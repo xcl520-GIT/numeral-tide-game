@@ -1354,63 +1354,127 @@
    * 为什么洞顶不铺墙瓦片：网格化的墙铺到整屏尺寸，一眼就能看出重复。
    * 而"黑掉的洞顶"既自然又便宜 —— 战斗发生在洞里，头顶本来就该是暗的。
    */
+  /**
+   * 拼一张战斗背景 —— 一个**带透视的房间**。
+   *
+   * 为什么必须带透视：平面的贴图 + 暗角，人眼读出来是"一张画"，
+   * 精灵贴在上面就像飘在虚空里。地平线 + 向灭点收束的地面，才给出"空间"。
+   *
+   * 透视的做法（纯 2D canvas，不用任何 3D 库）：
+   *   地面按**等比数列**分行 —— 每行到地平线的距离是上一行的 r 倍。
+   *   等比分行的间距恰好对应"深度等距"在屏幕上的投影，
+   *   所以看起来是真的往远处收，而不是把条纹挤在一起。
+   *   每行的格子宽度与"该行到地平线的距离"成正比，
+   *   于是横向也一起收束 —— 两个方向同时收，才是透视。
+   *
+   * 瓦片仍然用**真实地图瓦片**：风格一致性靠复用同一批素材达成，
+   * 手画的背景过两个版本就会和地图脱节。
+   */
   function bsBackdrop(game) {
     const rk = (game.regionTypeAt ? game.regionTypeAt(game.px, game.py) : 'normal') || 'normal';
     if (bsBg && bsBgKey === rk) return bsBg;
     const reg = D.REGIONS[rk] || D.REGIONS.normal;
-    const W = 1024, H = 640;
+    const W = 1280, H = 800;
     const cv = document.createElement('canvas');
     cv.width = W; cv.height = H;
     const c = cv.getContext('2d');
     const tiles = A.tiles || {};
     const SPR = A.TILE || 32;
-    const S = 3, tw = SPR * S;          // 瓦片放大 3 倍再铺，避免糊
-    const gy0 = Math.floor(H * 0.46);
+    const HY = Math.round(H * 0.30);          // 地平线
 
-    c.fillStyle = '#05070c';
+    c.fillStyle = '#04060a';
     c.fillRect(0, 0, W, H);
 
-    // 地面：真实地板瓦片。用 (x*3+y*5)%4 挑变体而不是随机 ——
-    // 随机每次重画都不一样，同一场战斗的两次截图会对不上，没法比对。
-    const names = ['floor0', 'floor1', 'floor2', 'floor3'];
-    for (let y = gy0; y < H; y += tw) {
-      for (let x = -tw; x < W; x += tw) {
-        const img = tiles[names[(((x / tw) * 3 + (y / tw) * 5) % 4 + 4) % 4]];
-        if (img) c.drawImage(img, x, y, tw, tw);
+    /* ---- ① 远墙：地平线以上 ---- */
+    const wallImg = tiles['wall15'] || tiles['wall0'];
+    if (wallImg) {
+      const ws = SPR * 4;
+      for (let y = HY - ws; y < HY; y += ws) {
+        for (let x = -ws; x < W; x += ws) {
+          c.drawImage(wallImg, x, y, ws, ws);
+        }
       }
     }
+    // 压在墙上的一层由下而上的暗：越往上越黑，把洞顶收进黑暗里
+    const gw = c.createLinearGradient(0, 0, 0, HY);
+    gw.addColorStop(0, 'rgba(4,6,10,0.97)');
+    gw.addColorStop(0.75, 'rgba(4,6,10,0.72)');
+    gw.addColorStop(1, 'rgba(4,6,10,0.34)');
+    c.fillStyle = gw;
+    c.fillRect(0, 0, W, HY);
 
-    // 洞顶：往下渐隐到地面
-    const g1 = c.createLinearGradient(0, 0, 0, gy0 + 48);
-    g1.addColorStop(0, '#04060a');
-    g1.addColorStop(1, 'rgba(4,6,10,0.10)');
-    c.fillStyle = g1;
-    c.fillRect(0, 0, W, gy0 + 48);
-
-    // 火盆：左右各一，用地图上同一个 prop 瓦片
-    const br = tiles['prop_brazier0'];
-    if (br) {
-      const bs = tw * 1.7;
-      c.drawImage(br, tw * 0.5, gy0 - bs * 0.52, bs, bs);
-      c.drawImage(br, W - tw * 0.5 - bs, gy0 - bs * 0.52, bs, bs);
+    /* ---- ①b 远墙上的两支小火把 ----
+       上一版把火盆画在**画面中部**、放大到 224px，于是成了"左右两个红色块"。
+       现在贴到远墙上、只有 70px：作用从"两个抢眼的大物件"变成
+       "给这个房间一个光源"。余烬粒子的起点也在这里。 */
+    const emberTile = tiles['prop_brazier0'];
+    if (emberTile) {
+      const es = SPR * 2.2;
+      const ey = HY - es * 0.84;
+      c.drawImage(emberTile, W * 0.30 - es / 2, ey, es, es);
+      c.drawImage(emberTile, W * 0.70 - es / 2, ey, es, es);
     }
 
-    // 区域染色：让战斗背景和"你在哪个区"一致。
-    // 精英区是紫的、危险区是红的 —— 这份信息在地图上就有，战斗里不该丢。
+    /* ---- ② 地面：等比数列分行的透视拉伸 ---- */    const names = ['floor0', 'floor1', 'floor2', 'floor3'];
+    const R = 0.845;                           // 每行向地平线收缩的比例
+    const span = H - HY;
+    let near = H;
+    let d = 0;
+    while (near > HY + 1 && d < 64) {
+      const far = HY + (near - HY) * R;         // 这一行的上边缘
+      const bandH = Math.max(1, near - far);
+      // 行宽与该行到地平线的距离成正比 -> 横向也收束到灭点
+      const halfW = (W * 0.62) * ((near - HY) / span);
+      const tw = Math.max(6, bandH * 2.6);      // 格子宽，同比例收缩
+      const cnt = Math.max(1, Math.ceil(halfW * 2 / tw));
+      // 只画行内的竖条带，避免整行铺满（否则远处会糊成一片）
+      for (let k = 0; k < cnt; k++) {
+        const x = (W / 2) - halfW + k * tw;
+        const img = tiles[names[((k * 3 + d * 7) % 4 + 4) % 4]];
+        if (img) c.drawImage(img, x, far, tw + 1, bandH + 1);
+      }
+      near = far;
+      d++;
+    }
+    // 远处压暗：大气透视。近处亮、远处暗，纵深才有层次
+    const gf = c.createLinearGradient(0, HY, 0, HY + span * 0.62);
+    gf.addColorStop(0, 'rgba(4,6,10,0.94)');
+    gf.addColorStop(0.45, 'rgba(4,6,10,0.38)');
+    gf.addColorStop(1, 'rgba(4,6,10,0)');
+    c.fillStyle = gf;
+    c.fillRect(0, HY, W, span * 0.62);
+
+    /* ---- ③ 地平线上的一线微光：把天与地分开 ---- */
+    const gh = c.createLinearGradient(0, HY - 26, 0, HY + 26);
+    gh.addColorStop(0, 'rgba(120,190,220,0)');
+    gh.addColorStop(0.5, 'rgba(140,205,235,0.16)');
+    gh.addColorStop(1, 'rgba(120,190,220,0)');
+    c.fillStyle = gh;
+    c.fillRect(0, HY - 26, W, 52);
+
+    /* ---- ④ 区域染色 ---- */
     c.fillStyle = reg.tint;
     c.fillRect(0, 0, W, H);
 
-    // 暗角：把视线收到中间那两个人身上
-    const g2 = c.createRadialGradient(W / 2, H * 0.62, H * 0.16, W / 2, H * 0.62, H * 0.98);
-    g2.addColorStop(0, 'rgba(0,0,0,0)');
-    g2.addColorStop(1, 'rgba(0,0,0,0.80)');
-    c.fillStyle = g2;
+    /* ---- ⑤ 暗角：把视线收到中轴 ---- */
+    const gv = c.createRadialGradient(W / 2, H * 0.66, H * 0.20, W / 2, H * 0.66, H * 1.02);
+    gv.addColorStop(0, 'rgba(0,0,0,0)');
+    gv.addColorStop(1, 'rgba(0,0,0,0.82)');
+    c.fillStyle = gv;
     c.fillRect(0, 0, W, H);
 
     bsBg = cv.toDataURL();
     bsBgKey = rk;
     return bsBg;
   }
+
+  /**
+   * 这一场的地平线在屏幕上的位置（0~1 的纵向比例）。
+   * 精灵的"脚"必须落在地面上 —— 对不齐的话它们又会飘起来，
+   * 而这次是"飘在一个看起来有地面的房间里"，比原来更别扭。
+   * 背景是 cover 铺满的，所以地平线的屏幕位置可以从画布参数反推。
+   */
+  const BS_HORIZON = 0.30;
 
   /** 标签 / 姿态 的图标徽章。用图标而不是文字：一眼认得出的东西不该要人读。 */
   const TAG_ICON = {
@@ -1443,7 +1507,9 @@
     if (!el || el.children.length) return;
     for (let i = 0; i < 16; i++) {
       const s = document.createElement('span');
-      const left = (i % 2 === 0) ? (4 + Math.random() * 8) : (88 + Math.random() * 8);
+      // 起点对应背景里那两支远墙火把的屏幕位置（画布 30% / 70%
+      // 经 cover 缩放裁切后约落在 24% / 65% 处），别让火星凭空冒出来
+      const left = (i % 2 === 0) ? (22 + Math.random() * 5) : (63 + Math.random() * 5);
       s.style.left = left.toFixed(1) + '%';
       s.style.animationDelay = (-Math.random() * 5).toFixed(1) + 's';
       s.style.animationDuration = (3.4 + Math.random() * 3).toFixed(1) + 's';
@@ -1509,13 +1575,17 @@
       // ⚠ paintHero 只认 'down' | 'up' | 'side'，传别的值不报错、
       //   静默落到默认分支（正面）。这个坑我连踩两次：
       //   先是 'right'（以为侧面），后是 'up'（把"背朝我们"理解成背对镜头）。
-      try { hArt.src = A.paintHero(game.cls, 'side', 0).toCanvas(6).toDataURL(); }
+      // 'up' = 背对镜头。相机在主角背后，所以看到的是他的背影 ——
+      // 这正是"视角在主角这边、与对面对峙"。（上一版按"侧面"做成了 'side'，
+      // 那是侧拍视角；这句话说的是**机位**。）
+      try { hArt.src = A.paintHero(game.cls, 'up', 0).toCanvas(8).toDataURL(); }
       catch (err) { hArt.src = A.heroDataURL(game.cls, 192, 'right'); }
       hArt.dataset.key = game.cls.key;
     }
     const fArt = $('bs-foe-art');
     if (fArt.dataset.key !== foe.arc.id) {
-      try { fArt.src = A.paintMonster(foe.arc.shape).toCanvas(7).toDataURL(); }
+      // 敌人远 -> 小。8 倍给主角（近）、4 倍给敌人（远）—— 这就是"近大远小"
+      try { fArt.src = A.paintMonster(foe.arc.shape).toCanvas(4).toDataURL(); }
       catch (err) {
         // 退化路径：实在烤不出来也比空白强，至少玩家看得出是谁
         try { fArt.src = A.monsterSprite(foe.arc.shape, foe.arc.id, 0).toDataURL(); }
