@@ -796,12 +796,36 @@ html, body {
    而伤害飘字用 CSS 动画，就省掉了一整套和地图 FX 并行的粒子坐标系统。
    ============================================================ */
 #battle-screen { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; }
-.bs-backdrop {
-  position: absolute; inset: 0;
-  background:
-    radial-gradient(ellipse at 50% 125%, rgba(43,126,160,0.32), transparent 62%),
-    radial-gradient(ellipse at 18% -10%, rgba(126,224,214,0.10), transparent 55%),
-    linear-gradient(180deg, #0a1018 0%, #050810 100%);
+/* 背景图由 ui.js 用**真实地图瓦片**拼出来（bsBackdrop），
+   这里只留一个底色兜底 —— 万一 canvas 烤失败，也是一块干净的暗场，
+   而不是一片白。 */
+.bs-backdrop { position: absolute; inset: 0; background-color: #05070c; }
+/* 火把光晕：带呼吸。它是"这里有人点着火"的唯一动态证据 */
+.bs-glow {
+  position: absolute; width: 340px; height: 340px; border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(255,172,84,0.20), transparent 68%);
+  animation: bsFlicker 2.6s ease-in-out infinite;
+}
+.bs-glow.left { left: -70px; bottom: 6%; }
+.bs-glow.right { right: -70px; bottom: 6%; animation-delay: -1.4s; }
+@keyframes bsFlicker {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  34% { opacity: 0.92; transform: scale(1.07); }
+  62% { opacity: 0.60; transform: scale(0.97); }
+}
+/* 尘埃：往上飘。20 个 span 由 bsAmbient() 铺一次，靠 CSS 无限循环，
+   不进每帧预算。 */
+.bs-ambient { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.bs-ambient span {
+  position: absolute; bottom: -12px; border-radius: 50%;
+  background: #9fe6f2; opacity: 0; animation: bsMote linear infinite;
+}
+@keyframes bsMote {
+  0% { transform: translate3d(0, 0, 0); opacity: 0; }
+  14% { opacity: 0.55; }
+  85% { opacity: 0.35; }
+  100% { transform: translate3d(26px, -580px, 0); opacity: 0; }
 }
 /* 舞台铺满剩余高度，两侧各自贴一端 —— 形成对角线构图。
    原来两侧都 align-items:flex-end，结果上半屏整片空着（体检实测：
@@ -820,6 +844,12 @@ html, body {
    对不上的话 CSS 会二次缩放，又把像素块糊掉一层。 */
 .bs-hero img { width: 192px; height: 192px; }
 .bs-foe img { width: 224px; height: 224px; }
+/* 待机浮动。两侧周期不同、且反向 —— 同步的话会像两个一起上下弹的图标，
+   错开才有"各自活着"的感觉。注意它挂在 img 上，和 .bs-hero.lunge-r
+   那个挂在 .bs-side 上的冲锋动画互不干扰（不同元素，各管各的 transform）。 */
+.bs-hero img { animation: bsIdle 2.9s ease-in-out infinite; }
+.bs-foe img { animation: bsIdle 3.7s ease-in-out infinite reverse; }
+@keyframes bsIdle { 50% { transform: translateY(-7px); } }
 .bs-bar {
   height: 9px; border: 1px solid rgba(120,140,180,0.32); border-radius: 5px;
   overflow: hidden; background: rgba(8,10,16,0.9);

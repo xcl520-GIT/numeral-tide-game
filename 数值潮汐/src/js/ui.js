@@ -1341,6 +1341,93 @@
     if (d) d();
   }
 
+  /* ---- 战斗背景：用真实地图瓦片拼 ---- */
+  let bsBg = null, bsBgKey = '';
+
+  /**
+   * 拼一张战斗背景。
+   *
+   * 为什么是"拼瓦片"而不是"手画一张背景图"：
+   * 风格一致性靠**复用同一批素材**达成。手画的背景过两个版本就会和地图脱节 ——
+   * 地图换了配色、加了新瓦片，背景还停在上一版的观感上，而且没人会想起来同步。
+   *
+   * 为什么洞顶不铺墙瓦片：网格化的墙铺到整屏尺寸，一眼就能看出重复。
+   * 而"黑掉的洞顶"既自然又便宜 —— 战斗发生在洞里，头顶本来就该是暗的。
+   */
+  function bsBackdrop(game) {
+    const rk = (game.regionTypeAt ? game.regionTypeAt(game.px, game.py) : 'normal') || 'normal';
+    if (bsBg && bsBgKey === rk) return bsBg;
+    const reg = D.REGIONS[rk] || D.REGIONS.normal;
+    const W = 1024, H = 640;
+    const cv = document.createElement('canvas');
+    cv.width = W; cv.height = H;
+    const c = cv.getContext('2d');
+    const tiles = A.tiles || {};
+    const SPR = A.TILE || 32;
+    const S = 3, tw = SPR * S;          // 瓦片放大 3 倍再铺，避免糊
+    const gy0 = Math.floor(H * 0.46);
+
+    c.fillStyle = '#05070c';
+    c.fillRect(0, 0, W, H);
+
+    // 地面：真实地板瓦片。用 (x*3+y*5)%4 挑变体而不是随机 ——
+    // 随机每次重画都不一样，同一场战斗的两次截图会对不上，没法比对。
+    const names = ['floor0', 'floor1', 'floor2', 'floor3'];
+    for (let y = gy0; y < H; y += tw) {
+      for (let x = -tw; x < W; x += tw) {
+        const img = tiles[names[(((x / tw) * 3 + (y / tw) * 5) % 4 + 4) % 4]];
+        if (img) c.drawImage(img, x, y, tw, tw);
+      }
+    }
+
+    // 洞顶：往下渐隐到地面
+    const g1 = c.createLinearGradient(0, 0, 0, gy0 + 48);
+    g1.addColorStop(0, '#04060a');
+    g1.addColorStop(1, 'rgba(4,6,10,0.10)');
+    c.fillStyle = g1;
+    c.fillRect(0, 0, W, gy0 + 48);
+
+    // 火盆：左右各一，用地图上同一个 prop 瓦片
+    const br = tiles['prop_brazier0'];
+    if (br) {
+      const bs = tw * 1.7;
+      c.drawImage(br, tw * 0.5, gy0 - bs * 0.52, bs, bs);
+      c.drawImage(br, W - tw * 0.5 - bs, gy0 - bs * 0.52, bs, bs);
+    }
+
+    // 区域染色：让战斗背景和"你在哪个区"一致。
+    // 精英区是紫的、危险区是红的 —— 这份信息在地图上就有，战斗里不该丢。
+    c.fillStyle = reg.tint;
+    c.fillRect(0, 0, W, H);
+
+    // 暗角：把视线收到中间那两个人身上
+    const g2 = c.createRadialGradient(W / 2, H * 0.62, H * 0.16, W / 2, H * 0.62, H * 0.98);
+    g2.addColorStop(0, 'rgba(0,0,0,0)');
+    g2.addColorStop(1, 'rgba(0,0,0,0.80)');
+    c.fillStyle = g2;
+    c.fillRect(0, 0, W, H);
+
+    bsBg = cv.toDataURL();
+    bsBgKey = rk;
+    return bsBg;
+  }
+
+  /** 环境尘埃。只在第一次铺，之后靠 CSS 无限循环 —— 不占每帧预算。 */
+  function bsAmbient() {
+    const amb = $('bs-ambient');
+    if (!amb || amb.children.length) return;
+    for (let i = 0; i < 20; i++) {
+      const s = document.createElement('span');
+      s.style.left = (Math.random() * 100).toFixed(1) + '%';
+      s.style.animationDelay = (-Math.random() * 11).toFixed(1) + 's';
+      s.style.animationDuration = (8 + Math.random() * 8).toFixed(1) + 's';
+      const sz = 2 + Math.random() * 3;
+      s.style.width = sz.toFixed(1) + 'px';
+      s.style.height = sz.toFixed(1) + 'px';
+      amb.appendChild(s);
+    }
+  }
+
   /** 播一次战斗。ev 就是 core 推的 fight 事件（携带 res.log 与起始血量）。 */
   function playBattle(game, ev, done) {
     const el = $('battle-screen');
@@ -1354,6 +1441,15 @@
     let bHp = (ev.bHp0 === undefined) ? bMax : ev.bHp0;
 
     bsSkip = false; bsDone = done || null;
+    // 背景：真实瓦片拼的地下城 + 按当前区域染色
+    const bd = $('bs-backdrop');
+    if (bd) {
+      bd.style.backgroundImage = 'url(' + bsBackdrop(game) + ')';
+      bd.style.backgroundSize = 'cover';
+      bd.style.backgroundPosition = 'center bottom';
+      bd.style.backgroundRepeat = 'no-repeat';
+    }
+    bsAmbient();
     $('bs-hero-name').textContent = heroName;
     $('bs-foe-name').textContent = foe.name;
     $('bs-foe-tags').textContent = (foe.tags && foe.tags.length) ? foe.tags.join(' · ') : '';
@@ -1362,7 +1458,10 @@
     // CSS 拉伸会走双线性插值，把像素画的边缘糊成一片。
     const hArt = $('bs-hero-art');
     if (hArt.dataset.key !== game.cls.key) {
-      try { hArt.src = A.paintHero(game.cls, 'right', 0).toCanvas(6).toDataURL(); }
+      // 'up' = 背朝镜头（宝可梦惯例：看自己角色的背影，面向敌人）。
+      // ⚠ paintHero 只认 'down' | 'up' | 'side' —— 传别的值不报错，
+      //   会静默落到默认分支（正面）。我上一版传 'right' 就栽在这。
+      try { hArt.src = A.paintHero(game.cls, 'up', 0).toCanvas(6).toDataURL(); }
       catch (err) { hArt.src = A.heroDataURL(game.cls, 192, 'right'); }
       hArt.dataset.key = game.cls.key;
     }

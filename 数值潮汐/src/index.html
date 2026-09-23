@@ -232,7 +232,10 @@
      遇敌切到独立画面：左边出击方，右边承受方。
      逐轮回放 fight 事件里的 res.log —— 每次出手都有动作、受击、飘字。 -->
 <div id="battle-screen" class="hidden">
-  <div class="bs-backdrop"></div>
+  <div class="bs-backdrop" id="bs-backdrop"></div>
+  <div class="bs-glow left"></div>
+  <div class="bs-glow right"></div>
+  <div class="bs-ambient" id="bs-ambient"></div>
   <div class="bs-stage">
     <div class="bs-side bs-hero" id="bs-hero-side">
       <div class="bs-name" id="bs-hero-name"></div>
