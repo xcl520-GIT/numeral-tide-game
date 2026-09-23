@@ -38,6 +38,33 @@
   function shake(mag) { shakeMag = Math.max(shakeMag, mag || 3); }
 
   /* ============================================================
+     伤害的视觉编码：3 种类型 x 2 种暴击 = 6 种
+
+     为什么必须分清：飘字是玩家**唯一能看到伤害类型**的地方。
+     数值层区分了物理/法术/真实，画面不区分就等于没区分 ——
+     玩家会以为所有伤害都是同一种东西。
+
+     配色沿用 SCHOOLS 的语义，不另起一套：
+       物理 = 橙（SCHOOLS.physical #ffa04d 的亮化）
+       法术 = 紫（SCHOOLS.arcane   #a78bfa 的亮化）
+       真实 = 冷白。它**没有颜色倾向**，因为它是"没有被任何防御过滤过"
+              的伤害 —— 用无色来表达这一点，比给它一个专属色更准确。
+     暴击再叠一层：更亮 + 字号 20 + 抛物线更陡（由 popText 的 vy 控制）。
+     ============================================================ */
+  function dmgColor(type, crit) {
+    if (type === 't') return crit ? '#ffffff' : '#dff2ff';
+    if (type === 'm') return crit ? '#e8c0ff' : '#b98cff';
+    return crit ? '#ffd86a' : '#ffb060';
+  }
+  function dmgSize(crit) { return crit ? 20 : 15; }
+  /** 粒子色，和飘字同源 —— 两处各写一份迟早会不一致 */
+  function dmgSparks(type) {
+    if (type === 't') return ['#dff2ff', '#ffffff', '#9fe6f2'];
+    if (type === 'm') return ['#b98cff', '#7ee0d6', '#ffffff'];
+    return ['#ffb060', '#ffe08a', '#ffffff'];
+  }
+
+  /* ============================================================
      两种"形状型"特效
 
      粒子能表达"碎屑"，但表达不了"一圈扩散的冲击"和"一条打过去的能量"，
@@ -234,15 +261,20 @@
             const tx = onEnemy ? ex : px;
             const ty = onEnemy ? ey : py;
             const crit = h.crit;
-            const col = h.type === 'm' ? (crit ? '#e8c0ff' : '#b98cff')
-              : (crit ? '#ffd86a' : '#ffb060');
             popText(tx + (Math.random() * 14 - 7), ty - 8 - (idx % 3) * 10,
-              (crit ? '' : '') + h.dmg, col, crit ? 20 : 15, crit ? -1.9 : -1.4);
+              h.dmg, dmgColor(h.type, crit), dmgSize(crit), crit ? -1.9 : -1.4);
             if (h.heal) popText(px, py - 26, '+' + h.heal, '#7ee08a', 13, -1.2);
             spawn(onEnemy ? ex : px, (onEnemy ? ey : py) + 4,
-              crit ? 12 : 6,
-              h.type === 'm' ? ['#b98cff', '#7ee0d6', '#ffffff'] : ['#ffb060', '#ffe08a', '#ffffff'],
-              { speed: crit ? 3.4 : 2.2 });
+              crit ? 12 : 6, dmgSparks(h.type), { speed: crit ? 3.4 : 2.2 });
+            // 反伤：单独跳一个字，挂在**挨打的那一方**头上。
+            // 混在主伤害里显示的话，玩家会以为"我这一下打出了这么多数"，
+            // 而实际上是两笔方向相反的账。
+            if (h.reflect > 0) {
+              const rx = onEnemy ? px : ex;
+              const ry = onEnemy ? py : ey;
+              popText(rx, ry - 20, h.reflect, dmgColor('t', false), 14, -1.5);
+              spawn(rx, ry + 4, 8, dmgSparks('t'), { speed: 2.4 });
+            }
             idx++;
           }
           if (crit_big(r)) shake(2.6);
@@ -268,9 +300,12 @@
             ['#7ee08a', '#a8f0b8', '#ffffff'], { speed: 1.8, grav: -0.02, lift: 1.4 });
           break;
         case 'corrode':
+          // 踩水是真实伤害 —— 配色走统一的 dmgColor / dmgSparks，不在这里另写一份。
+          // 两处各写一份，迟早会出现"同一类伤害在两张画面上颜色不同"。
           spawn(view.cx(view.game.px), view.cy(view.game.py) + 6, 10,
-            ['#2b7ea0', '#8fdff0'], { speed: 1.6 });
-          popText(view.cx(view.game.px), view.cy(view.game.py) - 18, '-' + ev.dmg, '#8fdff0', 14);
+            dmgSparks(ev.type), { speed: 1.6 });
+          popText(view.cx(view.game.px), view.cy(view.game.py) - 18,
+            '-' + ev.dmg, dmgColor(ev.type, false), 14);
           break;
         case 'tide':
           if (ev.rising) {

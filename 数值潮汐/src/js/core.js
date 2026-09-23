@@ -1510,15 +1510,20 @@
           heal = Math.round(dmg * Math.min(0.75, leech));
           src.hp = Math.min(src.maxHp, src.hp + heal);
         }
-        // 反伤
+        // 反伤。它**不走 rawDamage**，是直接扣血的 —— 语义上一直是真实伤害。
+        // 单独带一个 reflect 字段，而不是让画面去 parse extra 里的 "反伤12" 字符串：
+        // 主伤害和反伤是两笔钱，飘字要分开跳；而 parse 文案的做法
+        // 会随文案改动静默失效（文案一改，"反伤"两个字对不上就再也不显示了）。
+        let back = 0;
         if (num(dst.flags.thorns) > 0) {
-          const back = Math.round(dmg * num(dst.flags.thorns));
+          back = Math.round(dmg * num(dst.flags.thorns));
           src.hp -= back;
           if (back > 0) extra.push('反伤' + back);
         }
         roundLog.push({
           r: round, from: src.name, to: dst.name, dmg: dmg, type: atk.type,
-          crit: crit, heal: heal, extra: extra.join(' ')
+          crit: crit, heal: heal, extra: extra.join(' '),
+          reflect: back
         });
         return dmg;
       }
@@ -2143,7 +2148,10 @@
         const st = this.stats();
         const dmg = Math.max(1, Math.round(st.hp * (0.006 + this.tideLevel * 0.005)));
         this.hp -= dmg;
-        this.events.push({ kind: 'corrode', dmg: dmg });
+        // 踩水是真实伤害：它不走 rawDamage，无视一切防御。
+        // 标出来是为了让画面能给出正确的颜色 —— 玩家看到冷白色的数字，
+        // 就会明白"这不是它能防住的东西"，而不必读任何说明。
+        this.events.push({ kind: 'corrode', dmg: dmg, type: 't' });
         if (this.hp <= 0) { this._die('潮水'); return; }
       }
 
