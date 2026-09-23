@@ -42,9 +42,49 @@
 
   /* ============================================================
      开始界面的动态潮汐背景
+
+     ⚠ 这里踩过一个真把眼睛晃到的坑，写下来免得再犯。
+
+     原来每次调用都会**新开一条 requestAnimationFrame 循环**，而保存句柄的
+     bgRaf 是**模块级单例** —— 它只记得最后一个，前面那些谁也取消不掉。
+     而 tideBackground 是"每进一次标题页就调一次"。于是每进一次就多一条
+     全屏绘制循环：
+
+       · 被切走的那一块也在全速画 —— 白烧 CPU 和电
+       · 每多一条就多挂一个 window.resize 监听
+       · 而每个 resize 监听都会给 canvas.width 赋值一次 —— **赋值即清空画布**
+
+     resize 事件在拖窗 / 最大化时会连着来一串，而窗口越大、清空越贵、
+     空白帧越长。于是画布被反复清空，蓝色波形被擦掉又画上 ——
+     看起来就是"背景蓝色一闪一闪"，最大化之后尤其明显，取消最大化才安静。
+
+     修法四条，缺任何一条都还会闪：
+       ① 一块画布只允许一条循环 —— 重复调用就复用，不新开
+       ② 尺寸**在帧里查、且只在真的变了时才赋值** —— 索性不再监听 resize。
+          从此没有任何一条路径会因为"窗口变了"就去清画布
+       ③ 画布按 devicePixelRatio 缩放 —— 高分屏不再糊
+       ④ 不可见的画布跳过绘制，但保留循环
+
+     第 ④ 条为什么不做成"隐藏就停循环"：停了就得有一处负责把它重启回来，
+     而"谁负责重启"正是这类 bug 的温床（少调一处的表现是"背景再也没动过"）。
+     跳过绘制的代价只是每帧一次尺寸查询，可以忽略。
      ============================================================ */
-  let bgRaf = 0;
+  const bgLoops = {};          // 画布 id → 该画布的循环状态
+  let bgLoopN = 0;             // 活着的循环数（冒烟用它断言"不会累积"）
+
+  /** 活着的背景循环数。重复进标题页**不该**让它变大。 */
+  function bgLoopCount() { return bgLoopN; }
+
   function tideBackground(cv) {
+    if (!cv) return;
+    const key = cv.id || 'bg';
+    // ① 这一块画布已经有循环在跑 → 复用，不新开。
+    //    顺手按当前尺寸对齐一次：屏幕可能刚从 display:none 变成可见，
+    //    而帧里那次查询要等下一帧才有机会跑（窗口被遮挡时 RAF 可能不跑）。
+    if (bgLoops[key] && bgLoops[key].cv === cv && bgLoops[key].alive) {
+      if (bgLoops[key].fit) bgLoops[key].fit();
+      return;
+    }
     const c = cv.getContext('2d');
     // 拿不到 2D 上下文就别画背景。它只是标题页的装饰 ——
     // 而这个是**每帧**都在跑的循环：一旦 getContext 返回 null，
@@ -52,48 +92,46 @@
     // 几帧之内游戏就被锁死在标题页外面（"一开局就弹出错误、无法开始游戏"）。
     // 原则：**装饰不该有能力弄坏游戏。**
     if (!c) return;
-    let t = 0;
-    const motes = [];
+
+    const st = { cv: cv, ctx: c, t: 0, alive: true, raf: 0, motes: [] };
     for (let i = 0; i < 70; i++) {
-      motes.push({ x: Math.random(), y: Math.random(), r: 0.6 + Math.random() * 2.2, s: 0.0004 + Math.random() * 0.0016 });
+      st.motes.push({
+        x: Math.random(), y: Math.random(),
+        r: 0.6 + Math.random() * 2.2, s: 0.0004 + Math.random() * 0.0016
+      });
     }
-    function frame() {
-      try {
-        drawFrame();
-      } catch (e) {
-        // 画不出来就安静地停掉这个循环，别让它每帧污染错误日志
-        return;
-      }
-      t += 1;
-      bgRaf = requestAnimationFrame(frame);
-    }
-    function drawFrame() {
+    bgLoops[key] = st;
+    bgLoopN++;
+
+    function drawBg(d) {
+      const c2 = st.ctx, t = st.t, motes = st.motes;
       const w = cv.width, h = cv.height;
-      const g = c.createLinearGradient(0, 0, 0, h);
+      const g = c2.createLinearGradient(0, 0, 0, h);
       g.addColorStop(0, '#080c18');
       g.addColorStop(0.45, '#0a1526');
       g.addColorStop(1, '#061019');
-      c.fillStyle = g;
-      c.fillRect(0, 0, w, h);
-      c.save();
+      c2.fillStyle = g;
+      c2.fillRect(0, 0, w, h);
+      c2.save();
       for (let i = 0; i < 5; i++) {
-        const x = w * (0.12 + i * 0.19) + Math.sin(t * 0.004 + i) * 26;
-        const lg = c.createLinearGradient(x, 0, x + 90, h);
+        const x = w * (0.12 + i * 0.19) + Math.sin(t * 0.004 + i) * 26 * d;
+        const lg = c2.createLinearGradient(x, 0, x + 90 * d, h);
         lg.addColorStop(0, 'rgba(90,180,210,0.055)');
         lg.addColorStop(1, 'rgba(90,180,210,0)');
-        c.fillStyle = lg;
-        c.beginPath();
-        c.moveTo(x, 0); c.lineTo(x + 70, 0); c.lineTo(x + 190, h); c.lineTo(x + 60, h);
-        c.closePath(); c.fill();
+        c2.fillStyle = lg;
+        c2.beginPath();
+        c2.moveTo(x, 0); c2.lineTo(x + 70 * d, 0);
+        c2.lineTo(x + 190 * d, h); c2.lineTo(x + 60 * d, h);
+        c2.closePath(); c2.fill();
       }
-      c.restore();
+      c2.restore();
       for (const m of motes) {
         m.y -= m.s * 16;
         if (m.y < -0.05) { m.y = 1.05; m.x = Math.random(); }
-        c.fillStyle = 'rgba(150,220,235,' + (0.10 + m.r * 0.06).toFixed(3) + ')';
-        c.beginPath();
-        c.arc(m.x * w + Math.sin(t * 0.01 + m.y * 9) * 12, m.y * h, m.r, 0, Math.PI * 2);
-        c.fill();
+        c2.fillStyle = 'rgba(150,220,235,' + (0.10 + m.r * 0.06).toFixed(3) + ')';
+        c2.beginPath();
+        c2.arc(m.x * w + Math.sin(t * 0.01 + m.y * 9) * 12 * d, m.y * h, m.r * d, 0, Math.PI * 2);
+        c2.fill();
       }
       const layers = [
         { y: 0.72, a: 16, f: 0.0042, s: 0.9, col: 'rgba(24,74,104,0.55)' },
@@ -102,39 +140,64 @@
         { y: 0.93, a: 20, f: 0.0026, s: 2.7, col: 'rgba(70,170,200,0.42)' }
       ];
       for (const L of layers) {
-        c.beginPath();
-        c.moveTo(0, h);
-        for (let x = 0; x <= w; x += 6) {
-          const y = h * L.y + Math.sin(x * L.f + t * 0.02 * L.s) * L.a
-            + Math.sin(x * L.f * 2.7 + t * 0.031 * L.s) * L.a * 0.35;
-          c.lineTo(x, y);
+        c2.beginPath();
+        c2.moveTo(0, h);
+        for (let x = 0; x <= w; x += 6 * d) {
+          const y = h * L.y + Math.sin(x * L.f / d + t * 0.02 * L.s) * L.a * d
+            + Math.sin(x * L.f * 2.7 / d + t * 0.031 * L.s) * L.a * d * 0.35;
+          c2.lineTo(x, y);
         }
-        c.lineTo(w, h);
-        c.closePath();
-        c.fillStyle = L.col;
-        c.fill();
-        c.beginPath();
-        for (let x = 0; x <= w; x += 6) {
-          const y = h * L.y + Math.sin(x * L.f + t * 0.02 * L.s) * L.a
-            + Math.sin(x * L.f * 2.7 + t * 0.031 * L.s) * L.a * 0.35;
-          if (x === 0) c.moveTo(x, y); else c.lineTo(x, y);
-        }
-        c.strokeStyle = 'rgba(150,235,255,0.16)';
-        c.lineWidth = 1.2;
-        c.stroke();
+        c2.lineTo(w, h);
+        c2.closePath();
+        c2.fillStyle = L.col;
+        c2.fill();
+        c2.strokeStyle = 'rgba(150,235,255,0.16)';
+        c2.lineWidth = 1.2 * d;
+        c2.stroke();
       }
     }
-    const resize = function () {
-      const r = cv.parentElement.getBoundingClientRect();
-      // 容器还没布局时宽高可能是 0/NaN：给画布一个最小值，
-      // 免得后面 createLinearGradient 之类拿到非有限值直接抛错
-      cv.width = Math.max(1, Math.floor(r.width || 0));
-      cv.height = Math.max(1, Math.floor(r.height || 0));
-    };
-    resize();
-    global.addEventListener('resize', resize);
-    frame();
+
+    function frame() {
+      if (!st.alive) return;
+      // 每帧查一次尺寸；不可见（被切走的屏幕尺寸是 0）就只排下一帧，不画。
+      if (fit()) {
+        try {
+          drawBg(st.dpr);
+        } catch (e) {
+          // 画不出来就安静地停掉这个循环，别让它每帧污染错误日志
+          st.alive = false; bgLoopN--;
+          return;
+        }
+        st.t += 1;
+      }
+      st.raf = requestAnimationFrame(frame);
+    }
+
+    /**
+     * 取一次尺寸。返回 false = 此刻不可见（尺寸为 0），不要去动画布。
+     * 只在尺寸**真的变了**时才给 cv.width/height 赋值 ——
+     * 赋值等于清空画布，而那正是"窗口一变背景就闪"的根源。
+     */
+    function fit() {
+      const r = cv.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) return false;
+      const d = Math.min(2, global.devicePixelRatio || 1);
+      const nw = Math.max(1, Math.round(r.width * d));
+      const nh = Math.max(1, Math.round(r.height * d));
+      if (cv.width !== nw || cv.height !== nh) { cv.width = nw; cv.height = nh; }
+      st.dpr = d;
+      return true;
+    }
+
+    // 建好就**同步定一次尺**，不等第一帧。
+    // 为什么不能只靠帧里那次：requestAnimationFrame 在窗口被遮挡、最小化、
+    // 或者无头截图时是不跑的。那时画布会一直是默认的 300×150，
+    // 被 CSS 拉满整屏 —— 背景变成一块拉伸的糊图。同步这一下把它兜住。
+    st.fit = fit;
+    fit();
+    st.raf = requestAnimationFrame(frame);
   }
+
 
   /* ============================================================
      开始菜单（第 0 层）
@@ -180,14 +243,54 @@
     }
   }
 
+  /**
+   * 把**所有**浮层收干净。切屏（主菜单 / 标题页 / 进游戏）必须只走这一个函数。
+   *
+   * 为什么不再在三个切屏函数里各写一份清单：
+   * 原来 showMenu / showTitle / showGame 各有一份手写的 hidden 列表，
+   * 而这份名单已经漏过好几次 —— 漏 pause、漏 meta、漏 help / settings / board、
+   * 还漏了 relic-modal。
+   *
+   * 漏掉的后果不是"面板没关"，而是**它会活到下一局**：
+   * 上一局死的时候恰好挂着一张待选的秘藏牌，点「再来一局」之后，
+   * 选牌界面会盖在新一局的地图上；再点一下卡片，就会去改一局已经结束的游戏。
+   * 这种"跨局残留"最难查，因为它要"上一局恰好停在某个状态"才会出现。
+   *
+   * 一份名单、一个入口之后，漏就不再可能是"漏了某一处"，
+   * 只可能是"名单本身不全" —— 而那是可以被机械检查的（见冒烟：
+   * 它自动枚举所有 .modal，不靠人记）。
+   */
+  function hideAllModals() {
+    closeBattle();
+    closeInventory();
+    closePause();
+    closeHelp();
+    closeSettings();
+    closeBoard();
+    closeMeta();
+    // 选秘藏没有 closeXxx（平时由自己收起），切屏时必须强制收掉：
+    // 它的可见性挂在"上一局还挂着一张牌"上，跨局就会残留。
+    relicShown = '';
+    if ($('relic-modal')) $('relic-modal').classList.add('hidden');
+    if ($('over-modal')) $('over-modal').classList.add('hidden');
+  }
+
+  /**
+   * 现在有没有"全屏挡着游戏"的层。
+   * 输入门禁只问这一处 —— 逐个列名字的写法漏过：说明 / 设置 / 排行榜
+   * 曾经都不在名单里，后果是**打开说明按方向键，角色在面板后面自己走、
+   * 敌人也在动**：玩家看着一份说明，人却在挨打。
+   */
+  function inputBlocked() {
+    return isPauseOpen() || isHelpOpen() || isSettingsOpen() || isBoardOpen() || isMetaOpen();
+  }
+
   function showMenu() {
-    closeHelp(); closeSettings(); closeBoard(); closePause();
+    hideAllModals();
     invOpen = false; syncInventory();
     $('menu-screen').classList.remove('hidden');
     $('title-screen').classList.add('hidden');
     $('game-screen').classList.add('hidden');
-    $('over-modal').classList.add('hidden');
-    relicShown = '';
     renderMenu();
     global.TideAudio.music('title');
     global.TideMain.game = null;
@@ -2204,6 +2307,11 @@
   let helpOpen = false;
   function showHelp() { helpOpen = !helpOpen; $('help-modal').classList.toggle('hidden', !helpOpen); }
   function closeHelp() { helpOpen = false; $('help-modal').classList.add('hidden'); }
+  // 补一个模块级的 isHelpOpen：原来它只以行内函数的形式挂在导出表上
+  // （`isHelpOpen: function () { return helpOpen; }`），
+  // 于是模块内部想用"有没有弹窗开着"时根本引用不到它 ——
+  // 这正是输入门禁漏掉说明弹窗的隐性原因之一。
+  function isHelpOpen() { return helpOpen; }
 
   /* 潮汐结晶弹窗。
      为什么是弹窗而不是标题页上的第三块区块：标题页在 exe 的 1380×880
@@ -2408,18 +2516,11 @@
   }
 
   function showTitle() {
-    closeHelp();
-    closeBattle();          // 模态层必须逐个登记 —— 漏一个的后果是它永远开着
+    hideAllModals();          // 一份名单、一个入口 —— 别再往这里加手写清单
     invOpen = false; syncInventory();
     $('title-screen').classList.remove('hidden');
     if ($('menu-screen')) $('menu-screen').classList.add('hidden');
     $('game-screen').classList.add('hidden');
-    $('over-modal').classList.add('hidden');
-    $('meta-modal').classList.add('hidden');
-    metaOpen = false;
-    $('pause-modal').classList.add('hidden');
-    pauseOpen = false;
-    relicShown = '';
     renderClassPicker();
     renderDiffPicker();
     renderMetaPanel();                        // 刷新标题页按钮上的结晶数
@@ -2428,17 +2529,12 @@
     setTimeout(function () { global.TideRender.resize(); }, 30);
   }
   function showGame() {
-    closeHelp();
-    closeBattle();
+    hideAllModals();
     invOpen = false; syncInventory();
     $('title-screen').classList.add('hidden');
     if ($('menu-screen')) $('menu-screen').classList.add('hidden');
     $('game-screen').classList.remove('hidden');
-    $('over-modal').classList.add('hidden');
-    relicShown = '';
     lastSig = '';
-    $('pause-modal').classList.add('hidden');
-    pauseOpen = false;
     global.TideAudio.music('game', 1);        // 局内：探索段，强度随后由 render() 接管
     setTimeout(function () { global.TideRender.init(); global.TideRender.resize(); }, 30);
   }
@@ -2446,6 +2542,9 @@
   global.TideUI = {
     init: function () { buildMenu(); buildStart(); buildGame(); bindInventory(); bindTips(); },
     showMenu: showMenu,
+    // 输入门禁只问这一处：有没有全屏挡住游戏的层。
+    // 逐个列名字的写法漏过说明 / 设置 / 排行榜 —— 那次玩家能在面板后面走路。
+    inputBlocked: inputBlocked,
     renderMenu: renderMenu,
     showSettings: showSettings,
     closeSettings: closeSettings,
@@ -2463,6 +2562,9 @@
     isBattleOpen: isBattleOpen,
     skipBattle: skipBattle,
     closeBattle: closeBattle,
+    // 背景动画循环数。给冒烟断言"重复进标题页不会累积循环"用 ——
+    // 那个 bug 的症状是"背景一闪一闪"，靠肉眼很难判定，必须能被数出来。
+    bgLoopCount: bgLoopCount,
     // 战斗场景开着时的键盘入口。main.js 必须先问它，再决定要不要吞掉这个键 ——
     // 顺序反了的话，空格会同时被"用物理打"和"原地等一回合"吃掉。
     battleKey: battleKey,
@@ -2517,6 +2619,6 @@
     toggleInventory: toggleInventory,
     isInventoryOpen: function () { return invOpen; },
     get pick() { return pick; },
-    isHelpOpen: function () { return helpOpen; }
+    isHelpOpen: isHelpOpen
   };
 })(window);

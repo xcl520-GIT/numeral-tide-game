@@ -270,13 +270,20 @@
     { id: 'echo',    name: '回响',     icon: 'sound-waves',   flags: { echo: 0.22 },    weight: 3, rare: true,
       text: '法术伤害有 22% 概率翻倍' },
     { id: 'exec',    name: '处决',     icon: 'swordman',      flags: { execute: 0.15 }, weight: 2, rare: true,
-      text: '目标生命低于 30% 时，伤害 +15%→直接斩杀阈值' },
+      // 原来的文案是「伤害 +15%→直接斩杀阈值」：它同时说了两件互相矛盾的事，
+      // 而代码里**没有斩杀**，只有"低于 32% 时伤害 +15%"。玩家会照着一个
+      // 不存在的斩杀线去构筑。文案必须说代码做的事，一个字都不多。
+      text: '目标生命低于 32% 时，伤害 +15%' },
     { id: 'swift',   name: '疾行',     icon: 'running-shoe',  flags: { firstStrike: 0.28 }, weight: 3, rare: true,
       text: '速度高于目标时，伤害 +28%' },
     { id: 'regen',   name: '再生',     icon: 'regeneration',  flags: { regenAfterWin: 0.10 }, weight: 3, rare: true,
       text: '战斗胜利后回复 10% 生命' },
+    // 吞噬系：devour 是**层数**，每层再 +2 物攻（见 core.js 的 stats()）。
+    // 所以 flags.devour 2 / 3 对应的实际收益是 +4 / +6 物攻 ——
+    // 文案原来写的是 +2 / +3，少算了一半。改文案而不是改数值：
+    // 数值一动就会移动三档平衡基线，那该是单独的一次决定。
     { id: 'devour',  name: '吞噬',     icon: 'tooth',         flags: { devour: 2 },     weight: 2, rare: true,
-      text: '每击杀一名敌人，物理攻击 +2' },
+      text: '每击杀一名敌人，物理攻击 +4' },
     { id: 'vampiric',name: '血契',     icon: 'vampire-dracula', flags: { leechBonusIfBleed: 0.5 }, weight: 2, rare: true,
       text: '生命低于一半时，吸血效果 +50%' },
     { id: 'bulwark', name: '壁垒',     icon: 'stone-wall',    flags: { lastStand: 0.55 }, weight: 2, rare: true,
@@ -330,7 +337,8 @@
     { id: 'furnace',   name: '生命熔炉', icon: 'heart-bottle',  school: 'vitality',
       text: '生命上限 +90，法攻 +6',     mods: { hp: 90, atkM: 6 } },
     { id: 'devourR',   name: '吞噬者',   icon: 'tooth',         school: 'vitality',
-      text: '每击杀一名敌人永久 +3 物攻', flags: { devour: 3 } },
+      // 同「吞噬」：devour 是层数，每层 ×2 物攻 → 实际 +6 物攻/击杀
+      text: '每击杀一名敌人永久 +6 物攻', flags: { devour: 3 } },
 
     { id: 'allround',  name: '全能之印', icon: 'shining-heart', school: 'universal',
       text: '全部核心属性 +5',           mods: { hp: 25, atkP: 5, atkM: 5, penP: 5, penM: 5, defP: 5, defM: 5, spd: 5 } },

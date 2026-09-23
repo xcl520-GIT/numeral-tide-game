@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>probe-audit</title>
+<style>body{background:#0a0e18;color:#ccd6e6;font:12px Consolas,monospace}pre{padding:10px;white-space:pre-wrap}
+iframe{width:1380px;height:880px;border:1px solid #333}</style>
+</head>
+<body>
+<iframe id="fr" src="../src/index.html"></iframe>
+<pre id="out">running...</pre>
+<script>
+/* ============================================================
+   游玩逻辑体检：状态 × 输入 全矩阵 + 随机模糊
+
+   为什么专门做这一件事：**"卡住"这类缺陷全部藏在状态与输入的组合里**，
+   而单点测试永远覆盖不到 —— 每个功能自己都对，凑在一起才互相堵住。
+   （这个项目已经踩过两次：选牌死锁、模态层没登记导致"按什么都没反应"。）
+
+   不变量（每条都会在矩阵里逐个组合上验一遍）：
+
+     I1  处在"正在等人操作"的层里时，按下一个不属于该层的键，
+         **回合数、坐标都不该变** —— 变了就是输入门禁漏了一条分支。
+     I2  任何一次输入都不该抛异常。
+     I3  随机操作 500 次之后，所有关键数值仍然是有限值且在合法区间内
+         （NaN / 负数 / 越界这类问题不会崩，只会静默地把游戏算歪）。
+     I4  回合数单调不减 —— 倒退说明有地方重复或错误地推进了回合。
+   ============================================================ */
+(function () {
+  var lines = [], bad = 0;
+  function say(s) { lines.push(s); document.getElementById('out').textContent = 'AUDIT\n' + lines.join('\n'); }
+  function chk(ok, msg) { if (!ok) { bad++; say('  FAIL ' + msg); } else say('  ok   ' + msg); }
+
+  var fr = document.getElementById('fr');
+  var errs = [];
+
+  fr.addEventListener('load', function () {
+    var w = fr.contentWindow, d = fr.contentDocument;
+    w.addEventListener('error', function (ev) {
+      if (!ev.message && !ev.error) return;
+      if (/^烟雾测试/.test(ev.message || '')) return;
+      errs.push(ev.message + ' @' + ev.filename + ':' + ev.lineno);
+    });
+
+    setTimeout(function () { run(w, d); }, 700);
+  });
+
+  function run(w, d) {
+    var UI = w.TideUI, D = w.TideData;
+
+    var KEYS = ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', ' ',
+      '1', '2', 'q', 'e', 'h', 'm', 'g', 'Tab', 'Enter', 'Escape'];
+
+    function newGame(seed) {
+      w.TideMeta.reset();
+      w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: seed || 20260924, meta: null });
+      return w.TideMain.game;
+    }
+    function kd(k) {
+      try {
+        w.dispatchEvent(new w.KeyboardEvent('keydown', { key: k, bubbles: true }));
+        w.dispatchEvent(new w.KeyboardEvent('keyup', { key: k, bubbles: true }));
+      } catch (e) { errs.push('key ' + k + ': ' + e.message); }
+    }
+    function closeAll() {
+      try { UI.closeInventory(); } catch (e) {}
+      try { UI.closePause(); } catch (e) {}
+      try { UI.closeHelp(); } catch (e) {}
+      try { UI.closeSettings(); } catch (e) {}
+      try { UI.closeBoard(); } catch (e) {}
+      try { UI.closeMeta(); } catch (e) {}
+      try { UI.closeBattle(); } catch (e) {}
+    }
+    /* 把一只敌人挪到玩家旁边，再用真实的移动键走进去 —— 逐回合战斗界面
+       只在输入层打开，直接调模型是进不去的。 */
+    function enterDuel(g) {
+      var dirs = [['ArrowRight', 1, 0], ['ArrowLeft', -1, 0], ['ArrowDown', 0, 1], ['ArrowUp', 0, -1]];
+      for (var i = 0; i < 4; i++) {
+        var nx = g.px + dirs[i][1], ny = g.py + dirs[i][2];
+        if (g.walkable(nx, ny) && !g.enemyAt(nx, ny)) {
+          var e = g.enemies[0];
+          if (!e) return false;
+          e.x = nx; e.y = ny;
+          kd(dirs[i][0]);
+          return UI.isBattleOpen();
+        }
+      }
+      return false;
+    }
+
+    /* ---------- 各"正在等人操作"的状态 ---------- */
+    var STATES = [
+      { name: '局内空闲', blocked: false, up: function (g) { } },
+      { name: '背包', blocked: true, up: function () { UI.openInventory('bag'); } },
+      { name: '商店页', blocked: true, up: function () { UI.openInventory('shop'); } },
+      { name: '暂停菜单', blocked: true, up: function () { UI.showPause(); } },
+      { name: '操作指南', blocked: true, up: function () { UI.showHelp(); } },
+      { name: '设置', blocked: true, up: function () { UI.showSettings(); } },
+      { name: '排行榜', blocked: true, up: function () { UI.showBoard(); } },
+      {
+        name: '选秘藏', blocked: true, up: function (g) {
+          g.pendingRelic = [D.RELICS[0], D.RELICS[1], D.RELICS[2]];
+        }
+      },
+      { name: '逐回合战斗', blocked: true, up: function (g) { enterDuel(g); } },
+      { name: '已死亡', blocked: true, up: function (g) { g.status = 'dead'; g.reason = '体检'; UI.showOver(g); } },
+      { name: '已通关', blocked: true, up: function (g) { g.status = 'win'; UI.showOver(g); } }
+    ];
+
+    say('=== I1/I2 状态 × 输入 全矩阵 ===');
+    say('口径：在被挡住的状态里按任意键，**回合数与坐标都不许变**');
+    var cells = 0;
+    for (var si = 0; si < STATES.length; si++) {
+      var S = STATES[si];
+      var viol = [];
+      for (var ki = 0; ki < KEYS.length; ki++) {
+        var g = newGame(20260924 + si + ki);
+        closeAll();
+        try { S.up(g); } catch (e) { viol.push(KEYS[ki] + '(setup 抛错)'); continue; }
+        if (S.name === '逐回合战斗' && !UI.isBattleOpen()) { viol.push(KEYS[ki] + '(没进战斗)'); continue; }
+        var t0 = g.turn, x0 = g.px, y0 = g.py, e0 = errs.length;
+        kd(KEYS[ki]);
+        cells++;
+        if (errs.length > e0) { viol.push(KEYS[ki] + '(抛错)'); continue; }
+        if (S.blocked && (g.turn !== t0 || g.px !== x0 || g.py !== y0)) {
+          viol.push(KEYS[ki] + '(回合 ' + t0 + '→' + g.turn + ' 坐标 ' + x0 + ',' + y0 + '→' + g.px + ',' + g.py + ')');
+        }
+      }
+      if (viol.length) chk(false, S.name + ' 有 ' + viol.length + ' 个键漏过了门禁：' + viol.join(' / '));
+      else chk(true, S.name + '：' + KEYS.length + ' 个键全部被正确门禁');
+    }
+    say('  共验 ' + cells + ' 个「状态 × 键」组合');
+
+    /* ---------- I3/I4 随机模糊 ---------- */
+    say('');
+    say('=== I3/I4 随机模糊 500 次 ===');
+    var g2 = newGame(777001);
+    closeAll();
+    var badVals = [], turnDrops = 0, lastTurn = g2.turn, acted = 0;
+    for (var fi = 0; fi < 500; fi++) {
+      var k = KEYS[Math.floor(Math.random() * KEYS.length)];
+      var before = errs.length;
+      kd(k);
+      if (errs.length > before) { badVals.push('第' + fi + '步 ' + k + ' 抛错'); break; }
+      if (g2.turn < lastTurn) { turnDrops++; }
+      lastTurn = g2.turn;
+      if (g2.status !== 'playing') break;
+      // 每 50 步回一次正常局面，避免一直卡在同一个层里
+      if (fi % 50 === 49) { closeAll(); g2.pendingRelic = null; }
+      var st = g2.stats();
+      if (!isFinite(g2.hp) || !isFinite(g2.gold) || !isFinite(g2.turn) ||
+          !isFinite(g2.px) || !isFinite(g2.py) || !isFinite(st.hp)) {
+        badVals.push('第' + fi + '步出现非有限值 hp=' + g2.hp + ' gold=' + g2.gold);
+        break;
+      }
+      if (g2.hp > st.hp + 0.001 || g2.hp < 0) { badVals.push('第' + fi + '步 hp 越界 ' + g2.hp + '/' + st.hp); break; }
+      if (g2.px < 0 || g2.px >= g2.W || g2.py < 0 || g2.py >= g2.H) {
+        badVals.push('第' + fi + '步坐标越界 ' + g2.px + ',' + g2.py); break;
+      }
+      if (g2.turn !== lastTurn) acted++;
+    }
+    chk(badVals.length === 0, '模糊 500 次无异常 / 无 NaN / 无越界' + (badVals.length ? '：' + badVals[0] : ''));
+    chk(turnDrops === 0, '回合数单调不减（倒退 0 次）');
+    say('  模糊结果：status=' + g2.status + ' turn=' + g2.turn + ' depth=' + g2.depth +
+      ' hp=' + Math.round(g2.hp) + '/' + Math.round(g2.stats().hp) + ' kills=' + g2.kills +
+      ' gold=' + g2.gold);
+
+    /* ---------- 契约：切屏必须清掉所有浮层 ---------- */
+    say('');
+    say('=== 切屏必须清掉所有浮层（自动枚举，不靠手写名单）===');
+    /* 为什么自动枚举：原来这份名单是手写的，于是漏过 pause、漏过 meta、
+       又漏了 relic-modal。手写名单的失效方式是**静默**的 ——
+       新加一个浮层时没人会想起来去三个切屏函数里各补一行。
+       这里改成"页面上所有浮层"作为一个集合去断言。 */
+    function allOverlays(d2) {
+      var out = [];
+      var nodes = d2.querySelectorAll('.modal, [id$="-screen"], #enemy-info, #help-panel');
+      for (var i = 0; i < nodes.length; i++) {
+        var id = nodes[i].id;
+        // 当前屏幕本身当然要显示，只查"不该开着的那些"
+        if (!id || id === 'game-screen' || id === 'menu-screen' || id === 'title-screen') continue;
+        out.push(nodes[i]);
+      }
+      return out;
+    }
+    say('  页面上共发现 ' + allOverlays(d).length + ' 个可显示的浮层');
+
+    function leftoversAfter(fn) {
+      var g = newGame(4242);
+      UI.openInventory('bag');
+      UI.showHelp();
+      UI.showSettings();
+      UI.showBoard();
+      g.pendingRelic = [D.RELICS[0]];
+      UI.render(g);
+      try { enterDuel(g); } catch (e) {}
+      UI.showOver(g);
+      fn();
+      var stay = [];
+      var nodes = allOverlays(d);
+      for (var i = 0; i < nodes.length; i++) {
+        if (!nodes[i].classList.contains('hidden')) stay.push(nodes[i].id);
+      }
+      return stay;
+    }
+    var l1 = leftoversAfter(function () { UI.showTitle(); });
+    chk(l1.length === 0, '切到标题页后没有浮层残留' + (l1.length ? '：' + l1.join(',') : ''));
+    var l2 = leftoversAfter(function () { UI.showMenu(); });
+    chk(l2.length === 0, '切到主菜单后没有浮层残留' + (l2.length ? '：' + l2.join(',') : ''));
+    var l3 = leftoversAfter(function () { w.TideMain.restart(); });
+    chk(l3.length === 0, '重开一局后没有浮层残留（跨局残留最容易被忽略）' + (l3.length ? '：' + l3.join(',') : ''));
+
+    /* ---------- 契约：meta 不泄漏进没有 meta 的一局 ---------- */
+    say('');
+    say('=== 元进度隔离 ===');
+    w.TideMeta.reset();
+    var g4 = newGame(99);
+    if (g4.gold !== 0 || w.TideCore.num(g4.metaBonus.gold) !== 0) {
+      chk(false, 'meta=null 的一局仍然拿到了局外加成：gold=' + g4.gold);
+    } else chk(true, 'meta=null 的一局没有任何局外加成（gold=0）');
+
+    chk(errs.length === 0, '全程 window.onerror 次数 = ' + errs.length + (errs.length ? '：' + errs[0] : ''));
+
+    say('');
+    say('AUDITDONE ' + (bad ? ('FAIL ' + bad) : 'ALL PASS'));
+  }
+})();
+</script>
+</body>
+</html>

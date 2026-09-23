@@ -119,6 +119,18 @@ namespace NumeralTide
                 st.AreDevToolsEnabled = false;
                 st.IsZoomControlEnabled = false;
 
+                // 把 WebView2 的"底色"设成和游戏背景同一个颜色。
+                //
+                // 为什么必须设：DefaultBackgroundColor 默认是**白色**。
+                // 窗口尺寸变化（拖边、最大化）时，合成器有一瞬间拿不到新尺寸的
+                // 画面，那时露出来的就是这个底色 —— 于是"最大化之后背景一闪"。
+                // 设成 #05070d（和 style.css 的 --ink-0 一致）之后，
+                // 即使真的空了一帧，露出来的也是"底色"，肉眼看不出来。
+                //
+                // 这一条和网页那边的"别在 resize 时清空画布"是两道独立的防线：
+                // 网页那边管的是画布内容，这里管的是合成器还没有内容的那一瞬间。
+                web.DefaultBackgroundColor = Color.FromArgb(5, 7, 13);
+
                 web.CoreWebView2.SetVirtualHostNameToFolderMapping(
                     VirtualHost, www, CoreWebView2HostResourceAccessKind.Allow);
 

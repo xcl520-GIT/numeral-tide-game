@@ -3077,6 +3077,285 @@ try {
   w.TideUI.closeBattle();
 } catch (e) { fail('战斗立绘测试异常: ' + (e && e.stack ? e.stack : e)); }
 
+// ---------- 40. 开始界面背景：一块画布只允许一条循环 ----------
+/* 这一节守的是一个真把眼睛晃到的 bug：
+   原来 tideBackground 每次调用都新开一条 requestAnimationFrame 循环，
+   而保存句柄的 bgRaf 是模块级单例（只记得最后一个，旧的永远取消不掉）。
+   于是"每进一次标题页"就多一条全屏绘制循环 + 多一个 window.resize 监听，
+   而每个监听都会给 canvas.width 赋值 —— **赋值即清空画布**。
+   最大化时 resize 会连着来一串，画布被反复清空，蓝色波形擦了又画 ——
+   看起来就是"背景蓝色一闪一闪"。
+
+   两条断言各自对应一半修法：
+     · 循环不累积   ← 一块画布一条循环
+     · resize 不再清画布 ← 尺寸改成帧内查、只在真变了才赋值 */
+try {
+  var bgLoops0 = typeof w.TideUI.bgLoopCount === 'function' ? w.TideUI.bgLoopCount() : -1;
+  if (bgLoops0 < 0) fail('TideUI 没有导出 bgLoopCount（这个 bug 就没法被数出来）');
+  else {
+    // 回到主菜单。注意：循环是**按画布**长期存活的（不可见时只是跳过绘制），
+    // 所以菜单上也可以已经是 2 条 —— 这里要断言的是"不增长"，不是"恰好 1 条"。
+    w.TideUI.showMenu();
+    var n0 = w.TideUI.bgLoopCount();
+    if (n0 < 1 || n0 > 2) fail('背景循环数应当在 1~2 之间，实际 ' + n0);
+    else ok('主菜单背景循环数 = ' + n0 + '（不可能超过 2：一块画布一条）');
+
+    // 进标题页 4 次 —— 修之前这里会每次 +1（变成 n0 + 4）
+    for (var bi = 0; bi < 4; bi++) w.TideUI.showTitle();
+    var n1 = w.TideUI.bgLoopCount();
+    if (n1 !== n0 && n1 !== 2) {
+      fail('连进 4 次标题页之后循环数从 ' + n0 + ' 变成 ' + n1 + ' —— 循环在累积');
+    } else if (n1 > 2) {
+      fail('背景循环数超过 2 了（' + n1 + '）—— 一块画布跑了多条循环');
+    } else ok('连进 4 次标题页，背景循环数仍是 ' + n1 + ' —— 没有累积');
+
+    // 来回切也不涨
+    w.TideUI.showMenu();
+    w.TideUI.showTitle();
+    w.TideUI.showMenu();
+    var n2 = w.TideUI.bgLoopCount();
+    if (n2 > 2) fail('菜单 / 标题来回切之后循环数变成了 ' + n2 + '（不该超过 2）');
+    else ok('菜单 / 标题来回切，循环数不增长（' + n2 + '）');
+
+    // ---- 核心：一次 window.resize 不该清空背景画布 ----
+    // 修之前：每个 resize 监听都会给 canvas.width 赋值 → 清空一次。
+    // 赋值计数器说明：canvas.width 的 setter 被调用 ≠ 值变了，
+    // 所以这条断言直接测"有没有人去碰它"，比测像素靠谱得多。
+    var wsets = 0;
+    var wdesc = Object.getOwnPropertyDescriptor(w.HTMLCanvasElement.prototype, 'width');
+    if (!wdesc || !wdesc.set) fail('拿不到 canvas.width 的 setter，断言无法进行');
+    else {
+      Object.defineProperty(w.HTMLCanvasElement.prototype, 'width', {
+        get: wdesc.get, configurable: true,
+        set: function (v) { wsets++; return wdesc.set.call(this, v); }
+      });
+      var before = wsets;
+      w.dispatchEvent(new w.Event('resize'));
+      var used = wsets - before;
+      Object.defineProperty(w.HTMLCanvasElement.prototype, 'width', {
+        get: wdesc.get, configurable: true, set: wdesc.set
+      });
+      if (used !== 0) {
+        fail('一次 window.resize 让 canvas.width 被赋值 ' + used +
+          ' 次 —— 那就是"窗口一变就清空画布"，也是背景闪烁的直接原因');
+      } else ok('一次 window.resize 不会清空任何背景画布（尺寸改成帧内查了）');
+    }
+
+    w.TideUI.showMenu();
+    if (w.TideUI.bgLoopCount() > 2) {
+      fail('收回主菜单后循环数异常：' + w.TideUI.bgLoopCount());
+    } else ok('背景循环全程不超过 2 条（每块画布一条）');
+  }
+  w.TideMeta.reset();
+} catch (e) { fail('背景循环测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+// ---------- 41. 规则层补漏 + 门禁不变量 ----------
+/* 这一节填的是"功能都对、但没人测过规则边界"的那一块。
+   体检（tools/probe_audit.html）先扫出盲区：复活 / 踩水腐蚀 / 背包满 /
+   Boss 必掉 / 秘藏池抽干后的馈赠 / 文案与实现一致 —— 全是 0 覆盖。
+
+   另外把两条**门禁不变量**固化进来（它们本来是体检里的临时断言）：
+     · 说明 / 设置 / 排行榜开着时，按键不许推进回合
+     · 切屏后**自动枚举**所有浮层，不许有残留
+   第二条特意不写死名单：手写名单已经漏过 pause、meta、relic-modal。 */
+try {
+  var D3 = w.TideData, C3 = w.TideCore;
+
+  function freshG(seed) {
+    w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: seed || 5150, meta: null });
+    return w.TideMain.game;
+  }
+  function drain(g) { return g.drainEvents(); }
+  function findEvent(list, kind) {
+    for (var i = 0; i < list.length; i++) if (list[i].kind === kind) return list[i];
+    return null;
+  }
+
+  /* ---- ① 复活：回一半血 + 把近处的敌人推开 ----
+     第二条规则（推开 4 格内的敌人）此前**一次都没被测过** ——
+     它不是从文案推得出来的，只能从 core.js 的 _die 里读出来。
+     顺手也验"远处的不受影响"：否则"推开近处的"就成了"清空全场"，
+     而那种写法一样能让"复活后安全"这条断言通过。 */
+  var gr = freshG(5151);
+  var maxHpR = gr.stats().hp;
+  gr.enemies.length = 0;
+  // 用**真实的**敌人工厂，不手搓假对象：假对象缺 arc 之类的字段，
+  // 一进 endTurn 就会炸 —— 那种失败测的是"我的假数据不全"，
+  // 而不是游戏本身，白白把一次真实的断言变成噪音。
+  var mkFoe = function (x, y, nm) {
+    var e = gr._makeEnemy(x, y, gr.depth);
+    e.x = x; e.y = y; e.name = nm;
+    e.hp = e.maxHp = 5;         // 压小血量：它不该在这一步里反杀
+    return e;
+  };
+  var dirsR = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  for (var ri2 = 0; ri2 < 2; ri2++) {
+    gr.enemies.push(mkFoe(gr.px + dirsR[ri2][0], gr.py + dirsR[ri2][1], '贴身兵' + ri2));
+  }
+  var farX = (gr.px + 9 < gr.W) ? gr.px + 9 : gr.px - 9;
+  gr.enemies.push(mkFoe(farX, gr.py, '远处兵'));
+  gr.lives = 2; gr.hp = 1;
+  drain(gr);
+  gr._die('体检');
+  var evR = findEvent(drain(gr), 'revive');
+  var wantHp = Math.round(maxHpR * 0.5);
+  if (gr.status !== 'playing') fail('有复活次数时 _die 把状态改成了 ' + gr.status + '（应当在场上）');
+  else if (gr.lives !== 1) fail('复活没有扣次数：lives=' + gr.lives);
+  else if (Math.round(gr.hp) !== wantHp) {
+    fail('复活后的生命应为上限的一半（' + wantHp + '），实际 ' + gr.hp);
+  } else if (!evR) fail('复活没有推 revive 事件（界面/音效就接不到）');
+  else if (gr.enemies.length !== 1) {
+    fail('复活应当只推开 4 格内的敌人（留下 1 只远处的），实际剩 ' + gr.enemies.length + ' 只');
+  } else {
+    // 复活之后必须**能动** —— 不能只是"活着但卡住"
+    var stepOk = false;
+    for (var di2 = 0; di2 < 4 && !stepOk; di2++) {
+      var nx2 = gr.px + dirsR[di2][0], ny2 = gr.py + dirsR[di2][1];
+      if (gr.walkable(nx2, ny2) && !gr.enemyAt(nx2, ny2)) stepOk = gr.stepTo(nx2, ny2);
+    }
+    if (!stepOk) fail('复活之后走不动了（活着但被卡住）');
+    else ok('复活：回满一半生命（' + gr.hp + '/' + maxHpR + '）、推开近处敌人（留 ' +
+      gr.enemies.length + ' 只远处的）、并且立刻能继续行动');
+  }
+
+  var gr2 = freshG(5151);
+  gr2.lives = 1; gr2.hp = 1;
+  gr2._die('体检');
+  if (gr2.status !== 'dead') fail('复活次数用尽后仍然没有进入死亡状态：' + gr2.status);
+  else if (gr2.reason !== '体检') fail('死亡原因没有被记下来：' + gr2.reason);
+  else ok('复活次数用尽 → 状态 dead、原因已记录（"' + gr2.reason + '"）');
+
+  /* ---- ② 踩水腐蚀：伤害必须等于公式，且是真实伤害 ---- */
+  var gw = freshG(5152);
+  gw.enemies.length = 0;                     // 清场：只留踩水这一项伤害来源
+  var wt = null;
+  for (var wy = 0; wy < gw.H && !wt; wy++) {
+    for (var wx = 0; wx < gw.W; wx++) {
+      if (gw.tileAt(wx, wy) === C3.T.WATER) { wt = { x: wx, y: wy }; break; }
+    }
+  }
+  if (!wt) fail('这一层没有水格，踩水腐蚀测不了');
+  else {
+    gw.px = wt.x; gw.py = wt.y;
+    var hpW0 = gw.hp;
+    drain(gw);
+    gw.endTurn();
+    var evW = findEvent(drain(gw), 'corrode');
+    var stW = gw.stats();
+    var want = Math.max(1, Math.round(stW.hp * (0.006 + gw.tideLevel * 0.005)));
+    if (!evW) fail('站在水里结束回合没有产生 corrode 事件');
+    else if (evW.dmg !== want) fail('踩水伤害 ' + evW.dmg + ' 与公式 ' + want + ' 不符');
+    else if (evW.type !== 't') fail('踩水伤害没有被标成真实伤害（type=' + evW.type + '）');
+    else if (Math.round(gw.hp) !== Math.round(hpW0 - want)) {
+      fail('踩水扣的血不等于伤害值：' + hpW0 + '→' + gw.hp);
+    } else ok('踩水腐蚀：伤害 ' + evW.dmg + ' 与公式一致、标为真实伤害、血量对得上');
+  }
+
+  /* ---- ③ Boss 必掉：chance 1.6 被夹到 1.0，所以 20 次都不该为空 ---- */
+  var gd = freshG(5153);
+  var miss = 0;
+  for (var di = 0; di < 20; di++) if (!gd._rollDrop({ kind: 'boss', name: '测试' })) miss++;
+  if (miss) fail('Boss 掉落 20 次里有 ' + miss + ' 次是空的（"必掉"没成立）');
+  else ok('Boss 掉落必中：20 次全部有东西（掉落两件取更好的那件）');
+
+  /* ---- ④ 背包已满：掉落要被"收纳成事件"，不能静默丢 ---- */
+  var gb = freshG(5154);
+  gb.enemies.length = 0;
+  var cap = gb.bagCap();
+  while (gb.bag.length < cap) gb.bag.push(gb.makeItem({ depth: 1 }));
+  var bossLike = { kind: 'boss', name: '测试守卫', x: gb.px, y: gb.py,
+    hp: 1, maxHp: 1, stats: { hp: 1 } };
+  drain(gb);
+  gb._killEnemy(bossLike, true);
+  var evB = findEvent(drain(gb), 'bagfull');
+  if (!evB) fail('背包满时击杀没有产生 bagfull 事件（掉落被静默吞了）');
+  else if (gb.bag.length > cap) fail('背包超过了上限：' + gb.bag.length + ' > ' + cap);
+  else ok('背包满：掉落转成 bagfull 事件，背包没有超上限（' + gb.bag.length + '/' + cap + '）');
+
+  /* ---- ⑤ 秘藏池抽干：必须仍然给得出三张牌 ---- */
+  var gs = freshG(5155);
+  gs.relics = D3.RELICS.map(function (r) { return r.id; });   // 假装全拿过了
+  var offer = gs._offerRelics();
+  if (!offer || !offer.length) fail('秘藏池抽干后没有给出任何候选（会把玩家锁在选牌外）');
+  else if (offer.length !== 3) fail('秘藏池抽干后的候选不是三张：' + offer.length);
+  else if (!offer[0].id) fail('兜底候选缺少 id（界面画不出来）');
+  else ok('秘藏池抽干 → 仍然给出 3 张兜底候选（' + offer.map(function (x) { return x.name; }).join(' / ') + '）');
+
+  /* ---- ⑥ 文案 ↔ 实现：吞噬系的数字必须和实测一致 ---- */
+  var gt = freshG(5156);
+  gt.enemies.length = 0;
+  gt.relics.push('devourR');                  // 吞噬者：文案写 +6 物攻
+  var txt = '';
+  for (var ri = 0; ri < D3.RELICS.length; ri++) {
+    if (D3.RELICS[ri].id === 'devourR') txt = D3.RELICS[ri].text;
+  }
+  var atk0 = gt.stats().atkP;
+  gt._killEnemy({ kind: 'normal', name: '测试', x: gt.px, y: gt.py,
+    hp: 1, maxHp: 1, stats: { hp: 1 } }, true);
+  var got = Math.round(gt.stats().atkP - atk0);
+  var m = /\+(\d+)\s*物攻/.exec(txt);
+  var promised = m ? parseInt(m[1], 10) : -1;
+  if (promised < 0) fail('拿不到「吞噬者」文案里的数字：' + txt);
+  else if (promised !== got) {
+    fail('文案写 +' + promised + ' 物攻，实测击杀后涨了 +' + got + ' —— 文案在撒谎');
+  } else ok('文案与实现一致：吞噬者写 +' + promised + '，实测 +' + got + '');
+
+  /* ---- ⑦ 门禁不变量：这三个层开着时按键不许推进回合 ---- */
+  var gateCases = [
+    { n: '说明', up: function () { w.TideUI.showHelp(); } },
+    { n: '设置', up: function () { w.TideUI.showSettings(); } },
+    { n: '排行榜', up: function () { w.TideUI.showBoard(); } }
+  ];
+  var gateKeys = ['ArrowRight', 'ArrowUp', ' ', '1', 'q', 'e'];
+  var gateBad = [];
+  for (var gi = 0; gi < gateCases.length; gi++) {
+    var gg = freshG(5200 + gi);
+    w.TideUI.closeHelp(); w.TideUI.closeSettings(); w.TideUI.closeBoard();
+    gateCases[gi].up();
+    var gt0 = gg.turn, gx0 = gg.px, gy0 = gg.py;
+    for (var ki = 0; ki < gateKeys.length; ki++) {
+      w.dispatchEvent(new w.KeyboardEvent('keydown', { key: gateKeys[ki], bubbles: true }));
+      w.dispatchEvent(new w.KeyboardEvent('keyup', { key: gateKeys[ki], bubbles: true }));
+    }
+    if (gg.turn !== gt0 || gg.px !== gx0 || gg.py !== gy0) {
+      gateBad.push(gateCases[gi].n + '(回合 ' + gt0 + '→' + gg.turn + ')');
+    }
+  }
+  if (gateBad.length) {
+    fail('这些层没有挡住输入，角色在面板后面自己走：' + gateBad.join(', '));
+  } else ok('说明 / 设置 / 排行榜开着时，方向键与动作键都不会推进回合');
+
+  /* ---- ⑧ 切屏必须清掉**所有**浮层（自动枚举，不写死名单）---- */
+  function overlaysStay() {
+    var stay = [];
+    var nodes = d.querySelectorAll('.modal, [id$="-screen"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var id = nodes[i].id;
+      if (!id || id === 'game-screen' || id === 'menu-screen' || id === 'title-screen') continue;
+      if (!nodes[i].classList.contains('hidden')) stay.push(id);
+    }
+    return stay;
+  }
+  var gz = freshG(5300);
+  w.TideUI.openInventory('bag');
+  w.TideUI.showHelp();
+  w.TideUI.showSettings();
+  w.TideUI.showBoard();
+  gz.pendingRelic = [D3.RELICS[0]];
+  w.TideUI.render(gz);
+  var relEl = d.getElementById('relic-modal');
+  var relicWasUp = relEl && !relEl.classList.contains('hidden');
+  w.TideMain.restart();                        // 跨局残留：最容易漏的一条路
+  var stayZ = overlaysStay();
+  if (!relicWasUp) fail('选秘藏面板没能被打开，这条断言就失去意义了');
+  else if (stayZ.length) fail('重开一局后有浮层残留：' + stayZ.join(', '));
+  else ok('重开一局后没有任何浮层残留（自动枚举 ' +
+    d.querySelectorAll('.modal, [id$="-screen"]').length + ' 个）');
+
+  w.TideUI.closeBattle();
+  w.TideMeta.reset();
+} catch (e) { fail('规则层测试异常: ' + (e && e.stack ? e.stack : e)); }
+
   } catch (e) {
     fail('测试脚本异常: ' + (e && e.stack ? e.stack : e));
   }

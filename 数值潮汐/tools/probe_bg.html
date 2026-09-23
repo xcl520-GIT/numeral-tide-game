@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>probe-bg</title>
+<style>body{background:#0a0e18;color:#ccd6e6;font:12px Consolas,monospace}pre{padding:10px;white-space:pre-wrap}
+iframe{width:1380px;height:880px;border:1px solid #333}</style>
+</head>
+<body>
+<iframe id="fr" src="../src/index.html"></iframe>
+<pre id="out">running...</pre>
+<script>
+/* ============================================================
+   标题页潮汐背景：到底有几条动画循环在画同一块画布？
+   + 每来一次 window.resize，画布被重置几次？
+
+   为什么必须实测而不是读代码：这两件事都"看起来没问题" ——
+   tideBackground 只有一个 bgRaf 变量、resize 只挂了一个监听。
+   但 bgRaf 是**模块级单例**，而 tideBackground 是**每次进标题页都会调一次**的。
+   单例变量名字看起来像"只有一个循环"，实际语义是"只记得最后一个"。
+   ============================================================ */
+(function () {
+  var lines = [];
+  var fr = document.getElementById('fr');
+
+  function say(s) { lines.push(s); document.getElementById('out').textContent = 'BGPROBE\n' + lines.join('\n'); }
+
+  fr.addEventListener('load', function () {
+    var w = fr.contentWindow;
+    var d = fr.contentDocument;
+    var rafN = 0, wSets = 0;
+
+    // 统计每帧新排了多少个 rAF 回调 —— 常驻循环数 = 每帧的最低值
+    var origRaf = w.requestAnimationFrame.bind(w);
+    w.requestAnimationFrame = function (cb) { rafN++; return origRaf(cb); };
+
+    // 统计画布被重置的次数（给 canvas.width 赋值会清空画布）
+    var desc = Object.getOwnPropertyDescriptor(w.HTMLCanvasElement.prototype, 'width');
+    Object.defineProperty(w.HTMLCanvasElement.prototype, 'width', {
+      get: desc.get, configurable: true,
+      set: function (v) { wSets++; return desc.set.call(this, v); }
+    });
+
+    /* 用 setTimeout 开一个采样窗口数 rAF 的注册次数。
+       为什么不用自己的 rAF 逐帧数：无头 + 跨 frame 的 requestAnimationFrame
+       在这种组合下不可靠（回调根本不回来），数出来的是"我的探针没跑"，
+       而不是"被测代码没跑" —— 那种假阴性会把结论引到完全错的方向。 */
+    function countOver(ms, cb) {
+      var base = rafN;
+      setTimeout(function () { cb(rafN - base); }, ms);
+    }
+
+    setTimeout(function () {
+      say('--- 初始状态（还没进标题页）---');
+      say('屏幕：menu=' + shown('menu-screen') + '  title=' + shown('title-screen') + '  game=' + shown('game-screen'));
+      countOver(400, function (n0) {
+        say('400ms 内 rAF 注册 ' + n0 + ' 次');
+        say('--- 连点 3 次「开始游戏」(showTitle) ---');
+        for (var i = 0; i < 3; i++) { w.TideUI.showTitle(); }
+        say('屏幕：menu=' + shown('menu-screen') + '  title=' + shown('title-screen'));
+        countOver(400, function (n1) {
+          say('400ms 内 rAF 注册 ' + n1 + ' 次   （前 ' + n0 + '）← 明显变大就是循环在累积');
+          // resize 事件：画布被重置几次？
+          var before = wSets;
+          try { w.dispatchEvent(new w.Event('resize')); } catch (e) { say('resize 抛错: ' + e.message); }
+          say('一次 window.resize → canvas.width 被赋值 ' + (wSets - before) + ' 次');
+
+          var tbg = d.getElementById('title-bg'), mbg = d.getElementById('menu-bg');
+          say('title-bg 画布 ' + tbg.width + 'x' + tbg.height +
+            '  元素 ' + Math.round(tbg.getBoundingClientRect().width) + 'x' + Math.round(tbg.getBoundingClientRect().height));
+          say('menu-bg  画布 ' + mbg.width + 'x' + mbg.height +
+            '  元素 ' + Math.round(mbg.getBoundingClientRect().width) + 'x' + Math.round(mbg.getBoundingClientRect().height));
+
+          // 把 iframe 放大到 1920x1080，模拟"最大化"
+          say('--- 模拟最大化：iframe 1380x880 → 1920x1080 ---');
+          fr.style.width = '1920px'; fr.style.height = '1080px';
+          var b2 = wSets;
+          try { w.dispatchEvent(new w.Event('resize')); } catch (e) {}
+          setTimeout(function () {
+            say('一次 resize 之后 canvas.width 被赋值 ' + (wSets - b2) + ' 次');
+            say('title-bg 画布 ' + tbg.width + 'x' + tbg.height +
+              '  元素 ' + Math.round(tbg.getBoundingClientRect().width) + 'x' + Math.round(tbg.getBoundingClientRect().height));
+            say('menu-bg  画布 ' + mbg.width + 'x' + mbg.height +
+              '  元素 ' + Math.round(mbg.getBoundingClientRect().width) + 'x' + Math.round(mbg.getBoundingClientRect().height));
+            countOver(400, function (n2) {
+              say('放大后 400ms 内 rAF 注册 ' + n2 + ' 次');
+              say('');
+              say('BGDONE');
+            });
+          }, 300);
+        });
+      });
+    }, 900);
+
+    function shown(id) {
+      var e = d.getElementById(id);
+      if (!e) return '缺';
+      return e.classList.contains('hidden') ? 'hidden' : '显示';
+    }
+  });
+})();
+</script>
+</body>
+</html>
