@@ -2616,6 +2616,20 @@ function run(w, d) {
           fire(' ');
           return g.turn > t0;
         },
+        atkP: function () {
+          // 先掰到对侧再按：否则"本来就是 p"会让按键看起来没反应，
+          // 探针就退化成了永真的假验证。
+          var g = w.TideMain.game;
+          g.atkType = 'm';
+          fire('1');
+          return g.atkType === 'p';
+        },
+        atkM: function () {
+          var g = w.TideMain.game;
+          g.atkType = 'p';
+          fire('2');
+          return g.atkType === 'm';
+        },
         skill: function () {
           var g = w.TideMain.game;
           var foe = g._makeEnemy(g.px, g.py, g.depth);

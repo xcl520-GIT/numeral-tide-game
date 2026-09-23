@@ -827,6 +827,12 @@
       text: '走一格（按住连续走）' },
     { act: 'wait', scope: ['game'], label: '空格', keys: [' '],
       text: '原地等一回合' },
+    // 出手类型：文案只说明"由哪一侧防御抵挡"，**不写"哪个更好"** ——
+    // 操作指南一旦开始给答案，前面那套"让玩家自己算"就白做了。
+    { act: 'atkP', scope: ['game'], label: '1', keys: ['1'],
+      text: '出手切到物理 —— 由对方的物理防御抵挡' },
+    { act: 'atkM', scope: ['game'], label: '2', keys: ['2'],
+      text: '出手切到法术 —— 由对方的法术防御抵挡' },
     { act: 'skill', scope: ['game'], label: 'Q', keys: ['q'],
       text: '释放魂技（冷却写在这颗键上）' },
     { act: 'bag', scope: ['game'], label: 'E', keys: ['e', 'i', 'b', 'Tab'],

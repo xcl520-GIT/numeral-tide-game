@@ -657,6 +657,19 @@
       if (global.TideMain && global.TideMain.castSkill) global.TideMain.castSkill();
     };
     $('btn-help2').onclick = function () { global.TideAudio.ui(); showHelp(); };
+
+    // 出手类型开关：点击走 TideMain 的收口，和魂技按钮同一个模式 ——
+    // 界面不直接改模型，免得校验/音效在两条路径上不一致。
+    const atkSw = $('atk-switch');
+    if (atkSw) {
+      atkSw.addEventListener('click', function (ev) {
+        const b = ev.target && ev.target.closest ? ev.target.closest('.atk-opt') : null;
+        if (!b) return;
+        if (global.TideMain && global.TideMain.setAttackType) {
+          global.TideMain.setAttackType(b.dataset.atk);
+        }
+      });
+    }
     $('btn-restart').onclick = function () { global.TideAudio.ui(); showTitle(); };
     $('btn-close-relic').classList.add('hidden');
 
@@ -715,6 +728,19 @@
     const tideEl = $('h-tide');
     tideEl.textContent = tideWord + ' ' + game.tideLevel;
     tideEl.className = 'h-tide lv' + game.tideLevel;
+
+    // 出手类型开关的状态同步。只在真的变化时改 DOM —— 这段每帧都过。
+    const atkSwEl = $('atk-switch');
+    if (atkSwEl) {
+      const at = game.atkType || 'p';
+      if (atkSwEl._sig !== at) {
+        atkSwEl._sig = at;
+        const opts = atkSwEl.querySelectorAll('.atk-opt');
+        for (let oi = 0; oi < opts.length; oi++) {
+          opts[oi].classList.toggle('on', opts[oi].dataset.atk === at);
+        }
+      }
+    }
 
     const hpPct = Math.max(0, Math.min(100, game.hp / st.hp * 100));
     $('hero-hp-fill').style.width = hpPct + '%';

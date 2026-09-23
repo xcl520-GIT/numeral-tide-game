@@ -95,6 +95,19 @@
       <div class="hud-item"><i>回合</i><b id="h-turn">0</b></div>
       <div class="hud-item"><i>潮汐</i><b id="h-tide" class="h-tide lv0">平静 0</b></div>
       <div class="hud-item gold"><i>金币</i><b id="h-gold">0</b></div>
+      <!-- 出手类型（v11.2-f）。
+           放在 HUD 而不是做成弹窗：它是一条**持续状态**，不是一次性操作 ——
+           玩家每做一个攻击决定前都要确认自己现在按哪一路结算。
+           两个选项不带任何数字或推荐标记：算哪一路更高是玩家自己的事。 -->
+      <div class="hud-item atk">
+        <i>出手</i>
+        <div class="atk-switch" id="atk-switch">
+          <button class="atk-opt on" data-atk="p"
+                  title="按物理结算 —— 由对方的物理防御（defP）抵挡　快捷键 1">物理</button>
+          <button class="atk-opt" data-atk="m"
+                  title="按法术结算 —— 由对方的法术防御（defM）抵挡　快捷键 2">法术</button>
+        </div>
+      </div>
       <div class="hud-btns">
         <button id="btn-skill" class="mini skill" title="魂技（Q）">魂技</button>
         <button id="btn-bag" class="mini" title="背包 / 商店（E）">背包</button>

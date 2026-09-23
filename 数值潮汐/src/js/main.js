@@ -359,6 +359,10 @@
         UI.toast(on ? '音效已开' : '音效已关');
       } else if (ev.key === 'q' || ev.key === 'Q') {
         castSkill();
+      } else if (ev.key === '1' || ev.key === '2') {
+        // 直接选而不是单键来回切：两个键各对应一个确定的结果，
+        // 按几次都不会"切过头"，也不需要玩家记"现在在哪一边"。
+        setAttackType(ev.key === '1' ? 'p' : 'm');
       } else if (ev.key === ' ') {
         waitTurn();
       }
@@ -491,6 +495,27 @@
       return;
     }
     afterAction(g, before);
+  }
+
+  /**
+   * 切换出手类型（物理 / 法术）—— 界面层唯一的入口。
+   *
+   * 它只切"用哪一路结算"，**不算给玩家看哪一路更高** ——
+   * 那是玩家自己该做的题。整个函数里没有一次 bestAttack 调用，
+   * 这是刻意的：一旦这里偷偷比较了一下，整套"让玩家自己算"的设计就塌了。
+   *
+   * 和魂技同一条原则：界面不直接改模型语义，收口在这一个函数里，
+   * 免得某条路径漏掉音效或校验。
+   */
+  function setAttackType(t) {
+    const g = state.game;
+    if (!g || g.status !== 'playing' || g.pendingRelic) return;
+    if (t !== 'p' && t !== 'm') return;
+    if (g.atkType === t) return;
+    g.atkType = t;
+    AU.ui();
+    // 不在这里手动重绘：UI 的 render(game) 每帧都会跑（见 ui.js 里
+    // music() 那条注释），下一帧自然同步。手动重绘反而会引入两次渲染。
   }
 
   function waitTurn() {
@@ -659,6 +684,7 @@
     /* 界面上的技能键要调它。界面**不**直接调 g.useSkill()，
        因为那样会跳过音效/飘字/震屏这一整套反馈。 */
     castSkill: castSkill,
+    setAttackType: setAttackType,
     /* 渲染层拿不到 2D 上下文之类的情况下，用它弹人话而不是每帧抛错 */
     fatal: fatal
   };

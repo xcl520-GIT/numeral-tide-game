@@ -238,7 +238,13 @@
       this.skillUses = 0;        // 一局里放过几次魂技（平衡分析用）
       this.freeMoves = 0;        // 免费行动次数（疾影）—— 不推进潮汐，敌人也不动
       this.buffs = [];           // 临时增益（魂技），随回合递减
-      this.atkType = 'p';        // 玩家当前选定的伤害类型（HUD 上可切）
+      // 默认出手类型 = 这个职业**基础双攻更高**的那一路。
+      // 为什么要给默认值、而不是让玩家一开局就必须先选：
+      // 一个秘仪（atkM 46 / atkP 12）若默认按物理出手，会在学会切换之前
+      // 先怀疑"这游戏是不是坏了"。
+      // 关键边界：这个默认值**完全不看敌人** —— 它只是"你惯用哪一路"，
+      // 不替玩家做任何一道题。一旦它开始参考敌防，整套设计就塌了。
+      this.atkType = (num(this.cls.stats.atkP) >= num(this.cls.stats.atkM)) ? 'p' : 'm';
 
       this.equip = { weapon: null, helm: null, chest: null, boots: null, trinket: null };
       this.bag = [];

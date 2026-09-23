@@ -922,6 +922,24 @@ html, body {
 
 .hud-item.gold b { color: #e8c060; }
 .mini.on { color: var(--teal); border-color: rgba(126,224,214,0.5); background: rgba(126,224,214,0.10); }
+
+/* 出手类型开关。
+   选中色直接沿用伤害飘字的配色（物理橙 / 法术紫）——
+   玩家在飘字里看到的橙紫，和这里按下的橙紫是同一个语义，
+   不需要再学一套颜色。 */
+.hud-item.atk { gap: 6px; }
+.atk-switch {
+  display: flex; border: 1px solid rgba(120,140,180,0.28);
+  border-radius: 5px; overflow: hidden; pointer-events: auto;
+}
+.atk-opt {
+  font: inherit; font-size: 11px; line-height: 1; padding: 4px 8px;
+  cursor: pointer; background: transparent; border: 0; color: var(--muted);
+  transition: color 0.12s, background 0.12s;
+}
+.atk-opt:hover { color: #dfe6f0; }
+.atk-opt[data-atk="p"].on { color: #ffc07a; background: rgba(255,160,77,0.16); }
+.atk-opt[data-atk="m"].on { color: #c9b0ff; background: rgba(167,139,250,0.16); }
 .panel-body { padding: 10px 11px; }
 .panel-body.center { display: flex; justify-content: center; }
 .btn.small { padding: 8px 16px; font-size: 12px; letter-spacing: 0.06em; }
