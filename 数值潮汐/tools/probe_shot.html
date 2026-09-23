@@ -207,6 +207,37 @@
         if (shot === 'bag')   w.TideUI.openInventory('bag');
         if (shot === 'shop')  w.TideUI.openInventory('shop');
         if (shot === 'pause') w.TideUI.showPause();
+
+        /* 战斗场景（v11.2-h）：拍一场**真实**战斗，不摆拍 ——
+           调真实的 g.fight 拿到真实事件，再交给场景回放。
+           摆一个假事件的话，截出来的就不是这个版本会出现的画面。 */
+        if (shot === 'battle') {
+          if (!g.enemies.length) {
+            var mkE = g._makeEnemy(g.px, g.py, g.depth);
+            mkE.x = g.px + 2;
+            g.enemies.push(mkE);
+            g.visible[mkE.y * g.W + mkE.x] = 1;
+          }
+          var foeB = null;
+          for (var bi2 = 0; bi2 < g.enemies.length; bi2++) {
+            if (g.isVisible(g.enemies[bi2].x, g.enemies[bi2].y)) { foeB = g.enemies[bi2]; break; }
+          }
+          if (!foeB) foeB = g.enemies[0];
+          if (foeB) {
+            try {
+              g.fight(foeB, g.atkType || 'p');
+              var evsB = g.drainEvents();
+              var beB = null;
+              for (var bj2 = 0; bj2 < evsB.length; bj2++) {
+                if (evsB[bj2].kind === 'fight') beB = evsB[bj2];
+              }
+              if (beB) { w.TideUI.playBattle(g, beB, function () { }); }
+              else say('!! 没拿到 fight 事件');
+            } catch (eB) {
+              say('!! 战斗场景构建失败: ' + (eB && eB.message ? eB.message : eB));
+            }
+          } else say('!! 场上没有敌人');
+        }
         // relic 不用额外动作：refresh() 里看到 pendingRelic 就会自己弹出来
 
         /* 同步画一帧。目的不是"让截图有内容"（RAF 循环本来就会画），而是让
@@ -243,6 +274,15 @@
             '  已装备槽=' + filled.length + '/5 [' + filled.join(',') + ']');
         say('商店存货=' + (gg.shopStock ? gg.shopStock.length : 'n/a'));
       }
+      say('battleOpen=' + shown(w, 'battle-screen') +
+          '  轮数=' + (function () {
+            var e = w.document.getElementById('bs-round');
+            return e ? e.textContent : 'n/a';
+          })() +
+          '  日志行数=' + (function () {
+            var e = w.document.getElementById('bs-log');
+            return e ? e.children.length : 'n/a';
+          })());
       say('invOpen=' + shown(w, 'inv-screen') +
           '  relicModalOpen=' + shown(w, 'relic-modal') +
           '  秘藏卡片数=' + (function () {
@@ -259,7 +299,8 @@
          element.click() 永远成功，所以冒烟全绿也没发现。 */
       ['view', 'game-screen', 'sidebar', 'guide-panel',
        'inv-screen', 'inv-grid', 'relic-modal', 'relic-cards',
-       'menu-screen', 'hud-top'].forEach(function (id) {
+       'menu-screen', 'hud-top',
+       'battle-screen', 'bs-hero-side', 'bs-foe-side', 'bs-log', 'bs-foot'].forEach(function (id) {
         var el = w.document.getElementById(id);
         if (!el) { say('rect ' + id + ' = 不存在'); return; }
         var r = el.getBoundingClientRect();

@@ -1644,6 +1644,7 @@
     fight(enemy, atkType) {
       const st = this.stats();
       const fl = this.flags();
+      const hp0 = this.hp, ehp0 = enemy.hp;   // 战斗场景回放要用它推血条
       const A = Object.assign({}, st); A.hp = this.hp; A.maxHp = st.hp;
       const B = Object.assign({}, enemy.stats); B.hp = enemy.hp; B.maxHp = enemy.maxHp;
       B.wet = enemy.wet || 0;      // 潮湿状态要带进结算
@@ -1659,7 +1660,13 @@
       this.hp = res.aHp;
       enemy.hp = res.bHp;
       enemy.hitFlash = 12;
-      const ev = { kind: 'fight', enemy: enemy, rounds: res.log, target: enemy, capped: res.capped };
+      const ev = {
+        kind: 'fight', enemy: enemy, rounds: res.log, target: enemy, capped: res.capped,
+        // 起始血量。让界面自己从结束血量倒推也能work，但那样血条会在
+        // 「克制奖励 / 反伤 / 吸血」这些额外项上和真实值慢慢漂开 ——
+        // 边界一多就一定会错，而且错得很隐蔽（血条看起来一直在动）。
+        aHp0: hp0, bHp0: ehp0
+      };
       this.events.push(ev);
       if (res.capped) this._log('与 ' + enemy.name + '僵持不下 —— 先撑不住的一方倒下了。', 'warn');
       if (res.bHp <= 0) {

@@ -623,6 +623,14 @@ function run(w, d) {
         else if (ei.textContent.indexOf('攻击') < 0 || ei.textContent.indexOf('穿透') < 0)
           fail('敌人信息面板缺少攻击/穿透入参');
         else ok('敌人信息面板：只给入参（攻击/穿透/对方防御/有效防御），不替玩家做题');
+        // 战斗层（v11.2-h）必须被切屏清理掉。
+        // 这条断言来自一次真实的翻车：新加了模态层却忘了登记进 showTitle/showGame，
+        // 表现是**别的**用例大面积"按键失灵" —— 因为输入全被那个永远开着的层吞了。
+        if (!d.getElementById('battle-screen').classList.contains('hidden')) {
+          fail('切屏后战斗层没有被关闭（会吞掉所有输入）');
+        } else {
+          ok('切屏后战斗层已关闭（模态层登记完整）');
+        }
       }
       w.TideUI.enemyInfo(g2, null, { clientX: 0, clientY: 0 });
       if (!d.getElementById('enemy-info').classList.contains('hidden')) fail('移开敌人后面板没有隐藏');

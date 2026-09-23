@@ -657,6 +657,9 @@
       if (global.TideMain && global.TideMain.castSkill) global.TideMain.castSkill();
     };
     $('btn-help2').onclick = function () { global.TideAudio.ui(); showHelp(); };
+    // 战斗回放的跳过键
+    const bSkip = $('bs-skip');
+    if (bSkip) bSkip.onclick = function () { skipBattle(); };
 
     // 出手类型开关：点击走 TideMain 的收口，和魂技按钮同一个模式 ——
     // 界面不直接改模型，免得校验/音效在两条路径上不一致。
@@ -1291,6 +1294,216 @@
   }
 
   /* ============================================================
+     战斗场景（v11.2-h）
+
+     「外面是 2D 箱庭探索，进战斗换成左右对峙的回合画面」。
+
+     为什么值得单独开一块、而不是继续在地图上飘字：
+     地图上的演出只能把 res.log 里每一条伤害**一次性**砸出来 ——
+     玩家看不见谁先出手、看不见对方姿态什么时候切、也看不见自己挨了多少。
+     那不是"打仗"，是"看结算"。
+
+     本版只做**回放**：出手类型在开战前选定（HUD 的 1 / 2），场景逐轮演出来。
+     逐回合的**指令输入**是下一步 —— 那要把 _duel 改成可中断的，
+     属于模型层改动，不和表现层混在一个提交里。
+     ============================================================ */
+  let bsTimer = null, bsSkip = false, bsDone = null;
+
+  function isBattleOpen() {
+    const el = $('battle-screen');
+    return !!(el && !el.classList.contains('hidden'));
+  }
+
+  function skipBattle() { if (isBattleOpen()) bsSkip = true; }
+
+  /**
+   * 无条件关掉战斗层（切屏 / 重开时用）。
+   * 刻意不复用 endBattle：那个会调 done()，而切屏时我们**不想**再跑收尾 ——
+   * 那时游戏可能已经被重置，收尾会读到半截状态。
+   */
+  function closeBattle() {
+    if (bsTimer) { clearTimeout(bsTimer); bsTimer = null; }
+    const el = $('battle-screen');
+    if (el) el.classList.add('hidden');
+    const fx = $('bs-fx');
+    if (fx) fx.innerHTML = '';
+    bsDone = null; bsSkip = false;
+  }
+
+  function endBattle() {
+    if (bsTimer) { clearTimeout(bsTimer); bsTimer = null; }
+    const el = $('battle-screen');
+    if (el) el.classList.add('hidden');
+    const fx = $('bs-fx');
+    if (fx) fx.innerHTML = '';
+    const d = bsDone;
+    bsDone = null; bsSkip = false;
+    if (d) d();
+  }
+
+  /** 播一次战斗。ev 就是 core 推的 fight 事件（携带 res.log 与起始血量）。 */
+  function playBattle(game, ev, done) {
+    const el = $('battle-screen');
+    if (!el) { if (done) done(); return; }
+    const rounds = (ev.rounds || []).slice();
+    const foe = ev.enemy;
+    const heroName = game.cls.name;
+    const aMax = Math.max(1, Math.round(game.stats().hp));
+    const bMax = Math.max(1, Math.round(foe.maxHp));
+    let aHp = (ev.aHp0 === undefined) ? game.hp : ev.aHp0;
+    let bHp = (ev.bHp0 === undefined) ? bMax : ev.bHp0;
+
+    bsSkip = false; bsDone = done || null;
+    $('bs-hero-name').textContent = heroName;
+    $('bs-foe-name').textContent = foe.name;
+    $('bs-foe-tags').textContent = (foe.tags && foe.tags.length) ? foe.tags.join(' · ') : '';
+    // 精灵用 paintXxx + toCanvas(N) **原生放大**，而不是把小图交给 CSS 拉伸。
+    // toCanvas 内部把 imageSmoothingEnabled 关掉了，放大出来是干净的像素块；
+    // CSS 拉伸会走双线性插值，把像素画的边缘糊成一片。
+    const hArt = $('bs-hero-art');
+    if (hArt.dataset.key !== game.cls.key) {
+      try { hArt.src = A.paintHero(game.cls, 'right', 0).toCanvas(6).toDataURL(); }
+      catch (err) { hArt.src = A.heroDataURL(game.cls, 192, 'right'); }
+      hArt.dataset.key = game.cls.key;
+    }
+    const fArt = $('bs-foe-art');
+    if (fArt.dataset.key !== foe.arc.id) {
+      try { fArt.src = A.paintMonster(foe.arc.shape).toCanvas(7).toDataURL(); }
+      catch (err) {
+        // 退化路径：实在烤不出来也比空白强，至少玩家看得出是谁
+        try { fArt.src = A.monsterSprite(foe.arc.shape, foe.arc.id, 0).toDataURL(); }
+        catch (e2) { fArt.src = ''; }
+      }
+      fArt.dataset.key = foe.arc.id;
+    }
+    const lg = $('bs-log');
+    lg.innerHTML = '';
+    $('bs-fx').innerHTML = '';
+    bsBars(aHp, aMax, bHp, bMax);
+    $('bs-round').textContent = '交锋 ' + rounds.length + ' 轮';
+    el.classList.remove('hidden');
+
+    let i = 0;
+    const tick = function () {
+      if (bsSkip || i >= rounds.length) {
+        if (bsSkip) {
+          // 跳过时把血条推到终局 —— 血条停在中间比不播还糟
+          aHp = game.hp;
+          bHp = Math.max(0, Math.round(foe.hp));
+          bsBars(aHp, aMax, bHp, bMax);
+        }
+        bsTimer = setTimeout(endBattle, bsSkip ? 140 : 700);
+        return;
+      }
+      const r = rounds[i++];
+      // 血量从闭包传进去，不从 DOM 文本里读回来 ——
+      // 状态源只有一个，显示层永远不是状态源。
+      stepRound(r, heroName, aHp, bHp, function (nextA, nextB) {
+        aHp = nextA; bHp = nextB;
+      }, aMax, bMax);
+      bsTimer = setTimeout(tick, bsDelay(r));
+    };
+    // 第一击**同步**打出来，不先愣半秒 —— 空场最伤"这是战斗"的感觉。
+    // 附带好处：定时器驱动的画面截出来是不确定的，同步的这一击是确定的。
+    if (rounds.length) {
+      const r0 = rounds[i++];
+      stepRound(r0, heroName, aHp, bHp, function (nextA, nextB) {
+        aHp = nextA; bHp = nextB;
+      }, aMax, bMax);
+      bsTimer = setTimeout(tick, bsDelay(r0));
+    } else {
+      tick();
+    }
+  }
+
+  function bsBars(aHp, aMax, bHp, bMax) {
+    const ap = Math.max(0, Math.min(100, aHp / aMax * 100));
+    const bp = Math.max(0, Math.min(100, bHp / bMax * 100));
+    const ae = $('bs-hero-hp'), be = $('bs-foe-hp');
+    if (ae) ae.style.width = ap + '%';
+    if (be) be.style.width = bp + '%';
+    const at = $('bs-hero-hptext'), bt = $('bs-foe-hptext');
+    if (at) at.textContent = Math.max(0, Math.round(aHp)) + ' / ' + Math.round(aMax);
+    if (bt) bt.textContent = Math.max(0, Math.round(bHp)) + ' / ' + Math.round(bMax);
+  }
+
+  /** 出手越快越短、暴击留久一点 —— 节奏本身就是信息 */
+  function bsDelay(r) {
+    if (r.dodge) return 380;
+    return r.crit ? 620 : 460;
+  }
+
+  function bsPulse(sel, cls, ms) {
+    const n = $(sel);
+    if (!n) return;
+    n.classList.remove(cls);
+    void n.offsetWidth;               // 强制重排，动画才能重放
+    n.classList.add(cls);
+    setTimeout(function () { n.classList.remove(cls); }, ms);
+  }
+
+  function bsPop(text, kind, side, size) {
+    const fx = $('bs-fx');
+    if (!fx) return;
+    const d = document.createElement('span');
+    d.className = 'bs-dmg ' + kind;
+    d.textContent = text;
+    d.style.left = ((side === 'hero' ? 27 : 73) + (Math.random() * 12 - 6)) + '%';
+    if (size) d.style.fontSize = size + 'px';
+    d.style.setProperty('--dx', (Math.random() * 26 - 13) + 'px');
+    fx.appendChild(d);
+    d.addEventListener('animationend', function () {
+      if (d.parentNode) d.parentNode.removeChild(d);
+    });
+  }
+
+  function bsLine(r) {
+    const lg = $('bs-log');
+    if (!lg) return;
+    const line = document.createElement('div');
+    line.className = 'bs-line';
+    let s = '<b>' + esc(r.from) + '</b> → <b>' + esc(r.to) + '</b>　';
+    s += r.dodge ? '<em>闪避</em>' : '<em class="' + (r.type || 'p') + '">' + r.dmg + '</em>';
+    if (r.crit) s += '　暴击';
+    if (r.counter > 0) s += '　<span class="t">克 ' + r.counter + '</span>';
+    if (r.reflect > 0) s += '　<span class="t">反 ' + r.reflect + '</span>';
+    if (r.heal) s += '　<span class="hp">吸 +' + r.heal + '</span>';
+    line.innerHTML = s;
+    lg.appendChild(line);
+    while (lg.childNodes.length > 5) lg.removeChild(lg.firstChild);
+  }
+
+  function stepRound(r, heroName, curA, curB, setHp, aMax, bMax) {
+    const toHero = (r.to === heroName);
+    const fromHero = (r.from === heroName);
+    const targetSide = toHero ? 'hero' : 'foe';
+    // 出手方冲锋（朝对手方向），受击方挨完抖一下
+    bsPulse(fromHero ? 'bs-hero-side' : 'bs-foe-side', fromHero ? 'lunge-r' : 'lunge-l', 340);
+    bsLine(r);
+    if (r.dodge) {
+      bsPop('闪避', 'dodge', targetSide);
+      return;
+    }
+    let a = toHero ? undefined : null;
+    let dealt = (r.dmg || 0) + (r.counter || 0);
+    bsPop(r.dmg, (r.crit ? 'crit-' : '') + (r.type || 'p'), targetSide, r.crit ? 30 : 24);
+    if (r.counter > 0) bsPop(r.counter, 'true', targetSide, 17);
+    setTimeout(function () { bsPulse(toHero ? 'bs-hero-side' : 'bs-foe-side', 'flinch', 300); }, 150);
+    let na = toHero ? curA - dealt : curA;
+    let nb = toHero ? curB : curB - dealt;
+    if (r.reflect > 0) {
+      if (fromHero) na -= r.reflect; else nb -= r.reflect;
+      bsPop(r.reflect, 'true', fromHero ? 'hero' : 'foe', 17);
+    }
+    if (r.heal > 0) {
+      if (fromHero) na = Math.min(aMax, na + r.heal); else nb = Math.min(bMax, nb + r.heal);
+      bsPop('+' + r.heal, 'heal', fromHero ? 'hero' : 'foe', 17);
+    }
+    setHp(na, nb);
+    bsBars(na, aMax, nb, bMax);
+  }
+
+  /* ============================================================
      弹窗
      ============================================================ */
   let relicShown = '';
@@ -1656,6 +1869,7 @@
 
   function showTitle() {
     closeHelp();
+    closeBattle();          // 模态层必须逐个登记 —— 漏一个的后果是它永远开着
     invOpen = false; syncInventory();
     $('title-screen').classList.remove('hidden');
     if ($('menu-screen')) $('menu-screen').classList.add('hidden');
@@ -1675,6 +1889,7 @@
   }
   function showGame() {
     closeHelp();
+    closeBattle();
     invOpen = false; syncInventory();
     $('title-screen').classList.add('hidden');
     if ($('menu-screen')) $('menu-screen').classList.add('hidden');
@@ -1704,6 +1919,10 @@
     quitGame: quitGame,
     render: render,
     enemyInfo: enemyInfo,
+    playBattle: playBattle,
+    isBattleOpen: isBattleOpen,
+    skipBattle: skipBattle,
+    closeBattle: closeBattle,
     showTitle: showTitle,
     showGame: showGame,
     showOver: showOver,

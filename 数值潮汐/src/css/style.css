@@ -788,6 +788,89 @@ html, body {
 .ei-calc-r.p span { color: #ffc07a; }
 .ei-calc-r.m span { color: #c9b0ff; }
 .ei-calc-r b.eff { color: #9fe6f2; font-weight: 700; }
+
+/* ============================================================
+   战斗场景（v11.2-h）
+   演出全部走 DOM + CSS，不新开 canvas：
+   界面本来就是 DOM 叠层（背包 / 暂停 / 选秘藏都是），加一块成本最低；
+   而伤害飘字用 CSS 动画，就省掉了一整套和地图 FX 并行的粒子坐标系统。
+   ============================================================ */
+#battle-screen { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; }
+.bs-backdrop {
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(ellipse at 50% 125%, rgba(43,126,160,0.32), transparent 62%),
+    radial-gradient(ellipse at 18% -10%, rgba(126,224,214,0.10), transparent 55%),
+    linear-gradient(180deg, #0a1018 0%, #050810 100%);
+}
+/* 舞台铺满剩余高度，两侧各自贴一端 —— 形成对角线构图。
+   原来两侧都 align-items:flex-end，结果上半屏整片空着（体检实测：
+   精灵只占画面 0.9%）。 */
+.bs-stage {
+  position: relative; flex: 1; display: flex;
+  align-items: stretch; justify-content: space-between; padding: 3% 7% 2%;
+}
+.bs-side { position: relative; width: 33%; text-align: center; display: flex; flex-direction: column; }
+.bs-hero { justify-content: flex-end; }
+.bs-foe { justify-content: flex-start; }
+.bs-name { font-size: 14px; color: var(--text); margin-bottom: 6px; }
+.bs-foe .bs-name { color: #ffb0b5; }
+.bs-side img { image-rendering: pixelated; display: block; margin: 0 auto 12px; }
+/* 尺寸要和 JS 里 toCanvas 的倍数对上：hero 32x6=192，foe 32x7=224。
+   对不上的话 CSS 会二次缩放，又把像素块糊掉一层。 */
+.bs-hero img { width: 192px; height: 192px; }
+.bs-foe img { width: 224px; height: 224px; }
+.bs-bar {
+  height: 9px; border: 1px solid rgba(120,140,180,0.32); border-radius: 5px;
+  overflow: hidden; background: rgba(8,10,16,0.9);
+}
+.bs-bar i { display: block; height: 100%; width: 100%; transition: width 0.22s ease-out; }
+.bs-hero .bs-bar i { background: linear-gradient(90deg, #4fbf7a, #7ee08a); }
+.bs-foe .bs-bar i { background: linear-gradient(90deg, #c04a52, #e0525a); }
+.bs-hptext { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 3px; }
+.bs-tags { font-size: 10px; color: #cbb994; margin-top: 4px; min-height: 14px; }
+/* 冲锋 / 受击。位移量按"两边相距多远"给，太小会看不出来，太大会出画 */
+.bs-hero.lunge-r { animation: bsLungeR 0.32s ease-out; }
+.bs-foe.lunge-l { animation: bsLungeL 0.32s ease-out; }
+.bs-side.flinch { animation: bsFlinch 0.28s ease-out; }
+@keyframes bsLungeR { 50% { transform: translateX(24px) scale(1.05); } }
+@keyframes bsLungeL { 50% { transform: translateX(-24px) scale(1.05); } }
+@keyframes bsFlinch { 25% { transform: translateX(-7px); } 75% { transform: translateX(7px); } }
+/* 伤害飘字。配色沿用 dmgColor 那一套：物理橙 / 法术紫 / 真实冷白 */
+#bs-fx { position: absolute; inset: 0; pointer-events: none; }
+.bs-dmg {
+  position: absolute; top: 44%; font-family: var(--mono); font-weight: 700;
+  transform: translate(-50%, 0); animation: bsPop 0.85s ease-out forwards;
+  text-shadow: 0 2px 0 rgba(0,0,0,0.75);
+}
+@keyframes bsPop {
+  0% { opacity: 0; transform: translate(-50%, 10px) scale(0.7); }
+  18% { opacity: 1; transform: translate(calc(-50% + var(--dx, 0px)), -4px) scale(1.16); }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--dx, 0px)), -48px) scale(1); }
+}
+.bs-dmg.p { color: #ffb060; }
+.bs-dmg.crit-p { color: #ffd86a; }
+.bs-dmg.m { color: #b98cff; }
+.bs-dmg.crit-m { color: #e8c0ff; }
+.bs-dmg.true { color: #dff2ff; }
+.bs-dmg.heal { color: #7ee08a; }
+.bs-dmg.dodge { color: #9ecbff; }
+.bs-log {
+  position: relative; height: 92px; overflow: hidden; padding: 6px 7%;
+  font-size: 11px; line-height: 1.75; color: var(--text-dim);
+}
+.bs-line b { color: var(--text); font-weight: 500; }
+.bs-line em { font-style: normal; font-family: var(--mono); font-weight: 700; }
+.bs-line em.p { color: #ffb060; }
+.bs-line em.m { color: #b98cff; }
+.bs-line em.t { color: #dff2ff; }
+.bs-line .t { color: #dff2ff; font-family: var(--mono); }
+.bs-line .hp { color: #7ee08a; font-family: var(--mono); }
+.bs-foot {
+  position: relative; display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 7%; border-top: 1px solid rgba(120,140,180,0.2);
+  font-size: 11px; color: var(--muted);
+}
 .ei-warn { font-size: 10px; color: #e08ad0; margin-top: 4px; }
 
 #toast {

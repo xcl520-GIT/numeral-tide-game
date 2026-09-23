@@ -228,6 +228,34 @@
   </div>
 </div>
 
+<!-- 战斗场景（v11.2-h）
+     遇敌切到独立画面：左边出击方，右边承受方。
+     逐轮回放 fight 事件里的 res.log —— 每次出手都有动作、受击、飘字。 -->
+<div id="battle-screen" class="hidden">
+  <div class="bs-backdrop"></div>
+  <div class="bs-stage">
+    <div class="bs-side bs-hero" id="bs-hero-side">
+      <div class="bs-name" id="bs-hero-name"></div>
+      <img id="bs-hero-art" alt="">
+      <div class="bs-bar"><i id="bs-hero-hp"></i></div>
+      <div class="bs-hptext" id="bs-hero-hptext"></div>
+    </div>
+    <div class="bs-side bs-foe" id="bs-foe-side">
+      <div class="bs-name" id="bs-foe-name"></div>
+      <img id="bs-foe-art" alt="">
+      <div class="bs-bar"><i id="bs-foe-hp"></i></div>
+      <div class="bs-hptext" id="bs-foe-hptext"></div>
+      <div class="bs-tags" id="bs-foe-tags"></div>
+    </div>
+    <div id="bs-fx"></div>
+  </div>
+  <div class="bs-log" id="bs-log"></div>
+  <div class="bs-foot" id="bs-foot">
+    <span id="bs-round"></span>
+    <button id="bs-skip" class="btn ghost small">跳过（空格）</button>
+  </div>
+</div>
+
 <!-- 敌人信息 -->
 <div id="enemy-info" class="hidden"></div>
 <!-- 物品提示 -->

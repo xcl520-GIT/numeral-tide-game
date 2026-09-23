@@ -322,6 +322,14 @@
       // 漏掉一条分支的后果是"菜单开着，角色还在走"。
       if (UI.isPauseOpen()) return;
 
+      // 战斗场景开着：空格 / 回车 = 跳过回放，其余按键一律吞掉。
+      // 这个门禁必须放在"空格 = 原地等一回合"之前 ——
+      // 否则回放中途按一下空格，会顺手把回合推进掉，演的和算的就错位了。
+      if (UI.isBattleOpen && UI.isBattleOpen()) {
+        if (ev.key === ' ' || ev.key === 'Enter') UI.skipBattle();
+        return;
+      }
+
       // 背包打开时，只允许操作背包的按键，不能让角色继续走
       if (UI.isInventoryOpen()) {
         if (ev.key === 'e' || ev.key === 'E' || ev.key === 'i' || ev.key === 'I' ||
@@ -529,6 +537,29 @@
   /** 把这一轮产生的事件翻译成音效 / 粒子 / 界面更新 */
   function afterAction(g, before) {
     const evs = g.drainEvents();
+    // 战斗事件摘出来，交给战斗场景逐轮播。
+    // 为什么摘：原实现把 res.log 里的每一条伤害一次性砸在地图上 ——
+    // 那是"看结算"，玩家看不见谁先出手、也看不见对方姿态什么时候切，
+    // 中间没有任何可以介入的时刻。
+    let battleEv = null;
+    for (let i = 0; i < evs.length; i++) {
+      if (evs[i].kind === 'fight' && evs[i].rounds && evs[i].rounds.length) {
+        battleEv = evs.splice(i, 1)[0];
+        break;
+      }
+    }
+    runEvents(g, before, evs);
+    if (battleEv) {
+      // 场景播完再收尾 —— 那时可能已经死了或者通关了
+      UI.playBattle(g, battleEv, function () { finishAction(g, before); });
+    } else {
+      finishAction(g, before);
+    }
+  }
+
+  /** 事件 → 音效 / 粒子。战斗场景开着时，战斗事件不从这里走。 */
+  function runEvents(g, before, evs) {
+    if (!evs.length) return;
     FX.consume(evs, {
       cx: (x) => x * R.TILE + R.TILE / 2 - R.cam.x,
       cy: (y) => y * R.TILE + R.TILE / 2 - R.cam.y,
@@ -579,6 +610,12 @@
         AU.play('coin');
       } else if (ev.kind === 'sell' || ev.kind === 'buy') { }
     }
+  }
+
+  /** 一次行动的收尾：升级粒子 / 死亡结算 / 重绘 / 路径预览。
+      单独抽出来是因为它必须在**战斗场景播完之后**才跑 ——
+      否则"你倒下了"的结算面板会和战斗演出同时出现。 */
+  function finishAction(g, before) {
     // 升级了就在角色头上撒一把金粒子
     if (g.kills > before.kills && g.level() > (state.lastLevel || 1)) {
       AU.play('levelup');
