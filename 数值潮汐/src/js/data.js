@@ -328,7 +328,31 @@
     { id: 'gambler',   name: '赌徒之心', icon: 'rolling-dices', school: 'universal',
       text: '暴击率 +16%，生命上限 −25', mods: { crit: 0.16, hp: -25 } },
     { id: 'scavenger', name: '拾荒者',   icon: 'treasure-map',  school: 'universal',
-      text: '幸运 +8，装备掉率 +12%',    mods: { luck: 8 }, flags: { dropBonus: 0.12 } }
+      text: '幸运 +8，装备掉率 +12%',    mods: { luck: 8 }, flags: { dropBonus: 0.12 } },
+
+    /* ---- 针对词条（v11.2-c）----------------------------------------
+       这一组不是"+X 数值"，而是"+X 数值，**对某一类敌人**"。
+       作用是把「敌人标签」从展示信息变成**构筑决策的依据**：
+
+         · 你走到三层（孵化场，孢子母权重 x3）→「灭卵者」在这一层特别值钱
+         · 二层是帷幕（幽魂/祷者）→「禁咒」值钱
+         · 五层深渊口（汲血）→「血债」值钱
+
+       于是秘藏三选一不再只看"哪个数字大"，而要看"我接下来要下哪一层"。
+       19 + 3 = 22 件秘藏，对 8 个标签，决策面从「8 + 19」变成「8 x 22」。
+
+       数值刻意给得比通用秘藏高（40~45% vs 16~18 的通用增伤），
+       因为它们**有前提**：敌人不是那一类时，这张牌一文不值。
+       有前提的强牌才叫克制，没前提的强牌叫超模。 */
+    { id: 'spawnbane', name: '灭卵者',   icon: 'broken-bone',  school: 'physical',
+      text: '对「召唤」标签的敌人伤害 +45%',
+      flags: { vsMul: 0.45, vsTag: '召唤' } },
+    { id: 'silence',   name: '禁咒',     icon: 'magic-shield', school: 'arcane',
+      text: '对「法术」标签的敌人伤害 +40%',
+      flags: { vsMul: 0.40, vsTag: '法术' } },
+    { id: 'blooddebt', name: '血债',     icon: 'skull-ring',   school: 'vitality',
+      text: '对「汲血」标签的敌人伤害 +40%',
+      flags: { vsMul: 0.40, vsTag: '汲血' } }
   ];
 
   /* ============================================================

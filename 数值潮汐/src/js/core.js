@@ -307,13 +307,39 @@
         doubleAtSpd: 0, echo: 0, thorns: 0, lastStand: 0, firstStrike: 0,
         dodge: 0, regenAfterWin: 0, devour: 0, dropBonus: 0, execute: 0,
         leechBonusIfBleed: 0, goldBonus: 0,
-        dmgOut: 0        // 输出增伤（疾影的爆发窗口走这里）
+        dmgOut: 0,       // 输出增伤（疾影的爆发窗口走这里）
+        // 针对词条。注意这是**白名单**汇总，新字段不加进来会被静默忽略 ——
+        // 那种失败不报错，只是"秘藏看起来拿到了但完全不生效"。
+        //
+        // ⚠ 白名单里只能放**数字型**字段：take() 对白名单内的字段一律走
+        //   f[k] = num(f[k]) + num(fl[k])。vsTag 是字符串，一旦写进来，
+        //   num('召唤') = 0，标签会被静默清零 —— 实测踩过这个坑。
+        //   所以 vsTag 由下面 vsMul 那个分支自己赋值，不进白名单。
+        vsMul: 0
       };
       const take = function (fl) {
         if (!fl) return;
         for (const k in fl) {
+          // 只认**数字型**字段。这条守卫是必需的，而且理由并不显然：
+          // 下面 vsMul 那个分支会凭空创建 f.vsTag 这个键，而 vsTag
+          // 就排在同一个 flags 对象里、紧接着被遍历到 —— 于是它会通过
+          // `k in f` 检查、掉进数字累加分支：num('召唤') = 0，标签当场被清零。
+          // 症状极具迷惑性：vsMul 正常，只有标签变成 0，且不报任何错。
+          //
+          // 用通用守卫而不是给 vsTag 开特例，是为了挡住"以后任何人往 flags
+          // 里加字符串/布尔字段"这一整类问题 —— 特例只能挡住已经踩过的那一个。
+          if (typeof fl[k] !== 'number') continue;
           if (!(k in f)) continue;
           if (k === 'doubleAtSpd') f[k] = (f[k] && f[k] < fl[k]) ? f[k] : fl[k];
+          else if (k === 'vsMul') {
+            // 取**更强**的那一条，而不是相加。
+            // 相加会让"两条针对不同标签"在某只同时具备两个标签的怪身上
+            // 叠成 +85%，那是把克制变成了超模；取 max 才是"你选了一条路线"。
+            if (num(fl.vsMul) > num(f.vsMul)) {
+              f.vsMul = num(fl.vsMul);
+              f.vsTag = fl.vsTag || '';
+            }
+          }
           else f[k] = num(f[k]) + num(fl[k]);
         }
       };
@@ -740,6 +766,7 @@
       const e = {
         id: ++SEQ, x: x, y: y, arc: arc, name: arc.name, kind: arc.kind || 'normal',
         stats: st, hp: st.hp, maxHp: st.hp, cd: 0, hitFlash: 0,
+        tags: tagsOf(st, arc),    // 建怪时算一次：结算、UI、模拟都要用，别各算一遍
         // 初始姿态随机：如果恒定从同一侧开始，玩家会背成"前 3 回合用法术"，
         //  memorize 一个常数不等于读懂一个机制。
         stance: canStance(st, arc) ? (this.rng.chance(0.5) ? 'p' : 'm') : null,
@@ -761,6 +788,7 @@
       const e = {
         id: ++SEQ, x: x, y: y, arc: arc, name: arc.name, kind: 'boss',
         stats: st, hp: st.hp, maxHp: st.hp, cd: 0, hitFlash: 0, isBoss: true,
+        tags: tagsOf(st, arc),
         stance: canStance(st, arc) ? (this.rng.chance(0.5) ? 'p' : 'm') : null,
         stanceT: D.STANCE.every, stanceFx: 0,
         region: this.regionAt(x, y)
@@ -1412,7 +1440,8 @@
         name: bInfo.name, hp: B.hp, maxHp: B.maxHp || B.hp, st: B, flags: bf || {},
         dodge: num(B.dodge), isPlayer: !!bInfo.isPlayer,
         wet: num(B.wet),         // 潮湿是挂在敌人身上的状态，结算时读这里
-        stance: B.stance || null // 姿态：只重分配防御，不改变总量
+        stance: B.stance || null, // 姿态：只重分配防御，不改变总量
+        tags: B.tags || []       // 针对词条要判定的目标标签
       };
       const log = [];
       const roundLog = [];
@@ -1451,6 +1480,14 @@
         // 战斗结算就完全不必知道"这个增伤是遗物给的还是技能给的"。
         if (num(src.flags.dmgOut) > 0) {
           dmg *= (1 + num(src.flags.dmgOut)); extra.push('疾影');
+        }
+        // 针对词条：目标带上了对应标签才生效。
+        // 走的是和上面完全同一套 flags 通道 —— 结算不需要知道
+        // "这个 +45% 是灭卵者给的还是别的东西给的"。
+        if (num(src.flags.vsMul) > 0 && src.flags.vsTag &&
+            num(dst.tags ? dst.tags.length : 0) > 0 &&
+            dst.tags.indexOf(src.flags.vsTag) >= 0) {
+          dmg *= (1 + num(src.flags.vsMul)); extra.push('克·' + src.flags.vsTag);
         }
         // 暴击
         const critChance = num(src.st.crit);
@@ -1543,6 +1580,7 @@
       const B = Object.assign({}, enemy.stats); B.hp = enemy.hp; B.maxHp = enemy.maxHp;
       B.wet = enemy.wet || 0;      // 潮湿状态要带进结算
       B.stance = enemy.stance || null;   // 姿态同理，不带上就会「看得见、打不着」
+      B.tags = enemy.tags || [];            // 针对词条要在结算里读到它
       const res = this._duel(A, B, fl, null, true,
         { name: this.cls.name, isPlayer: true }, { name: enemy.name });
       this.hp = res.aHp;
@@ -2437,7 +2475,15 @@
     /** 魂技对某个敌人的实际伤害（和 _skillHit 共用，避免两处公式漂移） */
     _skillDamage(e, s) {
       const atk = bestAttack(this.stats(), e.stats, this.K);
-      return { dmg: Math.max(1, Math.round(atk.base * s.dmgPct)), type: atk.type };
+      let base = atk.base;
+      // 针对词条必须在这里也生效。
+      // 少了这一段会出现最坏的一种不一致：秘藏写着「对召唤物 +45%」，
+      // 普攻吃到了、魂技没吃到 —— 玩家只能认为是 bug，而且他会开始不信任所有面板数字。
+      const fl = this.flags();
+      if (num(fl.vsMul) > 0 && fl.vsTag && e.tags && e.tags.indexOf(fl.vsTag) >= 0) {
+        base *= (1 + num(fl.vsMul));
+      }
+      return { dmg: Math.max(1, Math.round(base * s.dmgPct)), type: atk.type };
     }
     _skillWouldKill(e, s) { return this._skillDamage(e, s).dmg >= e.hp; }
 

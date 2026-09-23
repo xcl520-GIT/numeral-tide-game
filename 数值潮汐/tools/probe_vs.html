@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>probe-vs</title></head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* ============================================================
+   探针：秘藏「针对词条」（v11.2-c）
+
+   只验一件事：词条是否**真的兑现**，而不只是把字段存了进去。
+   flags() 是白名单汇总 —— 字段漏进白名单的失败是**静默**的：
+   不报错、秘藏照常拿到、面板照常显示文字，就是完全不生效。
+   所以必须直接量伤害比。
+   ============================================================ */
+(function () {
+  var L = [], D = window.TideData, C = window.TideCore;
+  function pad(s, n) { s = String(s); while (s.length < n) s += ' '; return s; }
+  function findArc(id) {
+    var a = D.ENEMIES.concat(D.BOSSES);
+    for (var i = 0; i < a.length; i++) if (a[i].id === id) return a[i];
+    return null;
+  }
+
+  /* 量"打某只怪总共掉了多少血"。
+     必须用 _duel 的**伤害日志**求和，不能用剩余血量：
+     40 轮上限后 _duel 会按剩余比例把一方判死，bHp 会直接变成 0，
+     表面上看起来就是"打出了 9999999 点伤害"，完全是假数据。
+     上一版探针就栽在这里 —— 所以探针本身也要能被证伪。 */
+  function totalDamage(arcId, relicId) {
+    var g = new C.Game({ classKey: 'warlord', difficulty: 'standard', seed: 1 });
+    if (relicId) g.relics.push(relicId);
+    var arc = findArc(arcId);
+    var st = g.stats();
+    var A = {};
+    for (var k in st) A[k] = st[k];
+    A.hp = 9999999; A.maxHp = 9999999;
+    var B = g._scaleEnemyStats(arc, 2);
+    B.hp = 9999999; B.maxHp = 9999999;
+    B.tags = C.tagsOf(arc.stats, arc);
+    B.stance = null; B.wet = 0;
+    var saved = g.rng.chance;
+    g.rng.chance = function () { return false; };   // 屏蔽暴击/闪避，只留确定性部分
+    // 第三个参数是**攻击方的 flags**，必须传 g.flags()。
+    // 传 {} 等于让玩家一个秘藏都没有，会得出"词条不生效"的假结论。
+    var r = g._duel(A, B, g.flags(), null, true,
+      { name: '我', isPlayer: true }, { name: arc.name });
+    g.rng.chance = saved;
+    var total = 0;
+    for (var i = 0; i < r.log.length; i++) {
+      if (r.log[i].to === arc.name) total += r.log[i].dmg;
+    }
+    return total;
+  }
+
+  try {
+    L.push('=== 1 flags() 是否认出了新字段（白名单的静默失败检查）===');
+    var g0 = new C.Game({ classKey: 'warlord', difficulty: 'standard', seed: 1 });
+    var f0 = g0.flags();
+    L.push('  未拿秘藏:            vsMul=' + f0.vsMul + '  vsTag=' + JSON.stringify(f0.vsTag));
+    g0.relics.push('spawnbane');
+    var f1 = g0.flags();
+    L.push('  拿到灭卵者:          vsMul=' + f1.vsMul + '  vsTag=' + JSON.stringify(f1.vsTag) +
+      (f1.vsMul === 0.45 && f1.vsTag === '召唤' ? '   OK' : '   !! 被静默忽略了'));
+    g0.relics.push('silence');
+    var f2 = g0.flags();
+    L.push('  再叠禁咒(对法术):    vsMul=' + f2.vsMul + '  vsTag=' + JSON.stringify(f2.vsTag) +
+      (f2.vsMul === 0.45 ? '   OK — 取 max 不是相加' : '   !! 叠加逻辑不对'));
+
+    L.push('');
+    L.push('=== 2 词条是否真的兑现（对同一只怪，只换秘藏）===');
+    var cases = [
+      ['spawner', 'spawnbane', '灭卵者', 1.45],
+      ['priest',  'silence',   '禁咒',   1.40],
+      ['slime',   'spawnbane', '灭卵者', 1.00]
+    ];
+    for (var i = 0; i < cases.length; i++) {
+      var c = cases[i];
+      var base = totalDamage(c[0], null);
+      var withR = totalDamage(c[0], c[1]);
+      var ratio = withR / base;
+      var arc = findArc(c[0]);
+      var tg = C.tagsOf(arc.stats, arc);
+      var expect = c[3];
+      // 容差 0.06：伤害每次结算都 Math.round，小基数下量化误差明显
+      // （孢子母单次基数 21 -> round(21 x 1.45) = 30，比值 1.4286 而非 1.45）。
+      // 这是整数量化误差，不是逻辑错误。放宽容差，比把代码改成对得上探针安全得多。
+      var okFlag = Math.abs(ratio - expect) < 0.06;
+      L.push('  ' + pad(arc.name, 8) + ' tags=[' + pad(tg.join(' '), 16) + '] ' +
+        pad(c[2], 6) + ' 总量 ' + pad(base, 6) + ' -> ' + pad(withR, 6) +
+        '  x' + ratio.toFixed(3) + '（期望 x' + expect.toFixed(2) + '）' +
+        (okFlag ? '  OK' : '  !! 不符'));
+    }
+
+    L.push('');
+    L.push('=== 3 魂技是否同源（面板写着 +45%，魂技也必须吃到）===');
+    var g3 = new C.Game({ classKey: 'warlord', difficulty: 'standard', seed: 1 });
+    var sp = findArc('spawner');
+    var mk = function () {
+      return { stats: g3._scaleEnemyStats(sp, 2),
+               tags: C.tagsOf(sp.stats, sp), hp: 999, maxHp: 999 };
+    };
+    var sk = { key: 'x', name: '测试', dmgPct: 1.0, kind: 'burst' };
+    var noR = g3._skillDamage(mk(), sk).dmg;
+    g3.relics.push('spawnbane');
+    var withR2 = g3._skillDamage(mk(), sk).dmg;
+    L.push('  魂技对孢子母: ' + noR + ' -> ' + withR2 + '  x' + (withR2 / noR).toFixed(3) +
+      (Math.abs(withR2 / noR - 1.45) < 0.05 ? '  OK — 与普攻同源（容差放宽到 0.05，因为显示值是取整后的）' : '  !! 只有普攻吃到了词条'));
+
+    L.push('');
+    L.push('=== 4 秘藏池 ===');
+    L.push('  RELICS 总数 = ' + D.RELICS.length + '（改动前 19）');
+    var vs = 0;
+    for (var j = 0; j < D.RELICS.length; j++) if (D.RELICS[j].flags && D.RELICS[j].flags.vsMul) vs++;
+    L.push('  其中带针对词条的 = ' + vs + '，分别针对: ' +
+      D.RELICS.filter(function (r) { return r.flags && r.flags.vsMul; })
+        .map(function (r) { return r.name + '->' + r.flags.vsTag; }).join(', '));
+    L.push('  offerCount = ' + D.PROGRESSION.offerCount + '（池子变大，三选一的方差随之上升）');
+
+    document.getElementById('out').textContent = 'VSDONE\n' + L.join('\n');
+  } catch (err) {
+    document.getElementById('out').textContent = 'VSFAIL\n' +
+      (err && err.stack ? err.stack : String(err)) + '\npartial:\n' + L.join('\n');
+  }
+})();
+</script>
+</body>
+</html>
