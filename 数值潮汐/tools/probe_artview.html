@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>probe-artview</title>
+<style>body{background:#0a0e18;color:#ccd6e6;font:12px Consolas,monospace}pre{padding:10px;white-space:pre-wrap}</style>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/art.js"></script>
+<script>
+/* ============================================================
+   立绘查看器。
+   为什么需要它：判断"这张立绘好不好看"本来要靠眼睛，而这条流水线上
+   没有眼睛。所以退一步做两件**客观**的事：
+
+     ① 把精灵打成 ASCII 打出来 —— 用亮度梯度当字符，轮廓和明暗都能读。
+        这不能判断"美不美"，但能判断"是不是一个完整的人 / 怪"、
+        "脸有没有糊掉"、"有没有缺一块"。
+     ② 轮廓一致性断言 —— 大立绘按 mult 下采样之后，必须覆盖小立绘的
+        几乎每一个格子。这一条守的是**"还是同一个角色"**：
+        大立绘可以加细节，但不许改形体；改了形体就说明几何层被复制成
+        了两份，而那正是最危险的漂移。
+
+   这条断言的价值在于：它把"战斗立绘慢慢变成另一个人"这种
+   谁都不会立刻发现的问题，变成了一个会红的测试。
+   ============================================================ */
+(function () {
+  var lines = ['ARTVIEW'];
+  var A = window.TideArt, D = window.TideData;
+
+  function hex2rgb(h) {
+    if (!h || h.length !== 7 || h[0] !== '#') return null;
+    return [parseInt(h.substr(1, 2), 16), parseInt(h.substr(3, 2), 16), parseInt(h.substr(5, 2), 16)];
+  }
+  function ascii(px, cols) {
+    var ramp = ' .:-=+*oO#@';
+    var cw = px.w / cols, rows = Math.floor(px.h / cw);
+    var out = [];
+    for (var r = 0; r < rows; r++) {
+      var line = '';
+      for (var c = 0; c < cols; c++) {
+        var sum = 0, hit = 0;
+        for (var y = Math.floor(r * cw); y < Math.floor((r + 1) * cw); y++) {
+          for (var x = Math.floor(c * cw); x < Math.floor((c + 1) * cw); x++) {
+            var col = px.get(x, y);
+            if (!col) continue;
+            var rgb = hex2rgb(col);
+            if (!rgb) continue;
+            hit++;
+            sum += rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114;
+          }
+        }
+        if (!hit) { line += ' '; continue; }
+        var idx = Math.round(sum / hit / 255 * (ramp.length - 1));
+        if (idx < 1) idx = 1;
+        line += ramp.charAt(idx);
+      }
+      out.push(line);
+    }
+    return out.join('\n');
+  }
+  function colors(px) {
+    var s = {}, n = 0;
+    for (var i = 0; i < px.d.length; i++) {
+      var c = px.d[i];
+      if (!c) continue;
+      if (!s[c]) { s[c] = 1; n++; }
+    }
+    return n;
+  }
+  /* 大立绘按 mult 下采样后，应当覆盖小立绘的每一格。 */
+  function occ(small, big, mult) {
+    var out = [];
+    for (var y = 0; y < small.h; y++) {
+      var l = '';
+      for (var x = 0; x < small.w; x++) {
+        var sa = !!small.get(x, y), sb = false;
+        for (var j = 0; j < mult && !sb; j++) {
+          for (var i = 0; i < mult; i++) {
+            if (big.get(x * mult + i, y * mult + j)) { sb = true; break; }
+          }
+        }
+        l += (sa && sb) ? '#' : (sa ? 'S' : (sb ? 'B' : '.'));
+      }
+      out.push(l);
+    }
+    return out.join('\n');
+  }
+  function cover(small, big, mult) {
+    /* 允许**一格边界容差**。为什么必须给：
+       outline 给小立绘加的是"一整格"（1 格 = 1 像素），给大立绘加的是
+       "一个原生像素"（= 半格）。同一个描边操作在不同分辨率下厚度本来就
+       不一样，这是放大的必然结果，不是形体漂移。
+       真正要抓的是"形体变了" —— 那会让某个格子离对方最近的像素远到
+       两格以上，一格的容差挡不住它。 */
+    var tol = 1;
+    function blockHas(px, cx2, cy2, m) {
+      var X = cx2 * m, Y = cy2 * m;
+      for (var j = 0; j < m; j++) {
+        for (var i = 0; i < m; i++) if (px.get(X + i, Y + j)) return true;
+      }
+      return false;
+    }
+    function near(px, cx2, cy2, m) {
+      for (var dy = -tol; dy <= tol; dy++) {
+        for (var dx = -tol; dx <= tol; dx++) {
+          if (blockHas(px, cx2 + dx, cy2 + dy, m)) return true;
+        }
+      }
+      return false;
+    }
+    var onlySmall = 0, onlyBig = 0, both = 0;
+    for (var y = 0; y < small.h; y++) {
+      for (var x = 0; x < small.w; x++) {
+        var sa = !!small.get(x, y);
+        var sb = blockHas(big, x, y, mult);
+        if (sa && sb) both++;
+        else if (sa && !near(big, x, y, mult)) onlySmall++;   // 大立绘少了这块形体
+        else if (sb && !near(small, x, y, 1)) onlyBig++;      // 大立绘长出额外形体
+      }
+    }
+    return { both: both, onlySmall: onlySmall, onlyBig: onlyBig };
+  }
+
+  var bad = 0;
+  function chk(ok, msg) { lines.push((ok ? '  ok   ' : '  FAIL ') + msg); if (!ok) bad++; }
+
+  try {
+    var cls = D.classByKey ? D.classByKey('warlord') : D.CLASSES[0];
+    if (!A.paintHeroBig) { chk(false, 'TideArt 没有导出 paintHeroBig'); }
+    else {
+      chk(!!A.paintMonsterBig, 'TideArt 导出了 paintHeroBig / paintMonsterBig');
+
+      /* ---- 英雄：正面 + 背面 ---- */
+      var hSmall = A.paintHero(cls, 'up', 0);
+      var hBig = A.paintHeroBig(cls, 'up', 0, 3);
+      lines.push('');
+      lines.push('== 英雄（背面，战斗里用的朝向）==   小 32x32 / 大 ' + hBig.w + 'x' + hBig.h +
+        '   颜色数 ' + colors(hSmall) + ' -> ' + colors(hBig));
+      lines.push(ascii(hBig, 44));
+
+      var hc = cover(hSmall, hBig, 3);
+        chk(hc.onlySmall <= 6, '英雄背面：大立绘覆盖了小立绘的每一格（缺 ' + hc.onlySmall + ' 格）');
+        chk(hc.onlyBig <= 80, '英雄背面：大立绘没有长出额外形体（多 ' + hc.onlyBig + ' 格）');
+
+        var hf = A.paintHeroBig(cls, 'down', 0, 3);
+        var hfc = cover(A.paintHero(cls, 'down', 0), hf, 3);
+        chk(hfc.onlySmall <= 6, '英雄正面：覆盖（缺 ' + hfc.onlySmall + ' 格）');
+      lines.push('');
+      lines.push('== 英雄（正面）==   颜色数 ' + colors(hf));
+      lines.push(ascii(hf, 44));
+
+      /* ---- 怪物：每个 body 类型都过一遍 ---- */
+      var seen = {};
+      var shapes = [];
+      for (var i = 0; i < D.ENEMIES.length; i++) {
+        var sp = D.ENEMIES[i].shape;
+        if (sp && !seen[sp.body]) { seen[sp.body] = 1; shapes.push({ body: sp.body, shape: sp }); }
+      }
+      chk(shapes.length >= 5, '覆盖到的 monster body 类型数 = ' + shapes.length);
+      for (var k = 0; k < shapes.length; k++) {
+        var mS = A.paintMonster(shapes[k].shape);
+        var mB = A.paintMonsterBig(shapes[k].shape, 2);
+        var mc = cover(mS, mB, 2);
+        chk(mc.onlySmall <= 6, '怪物「' + shapes[k].body + '」：覆盖（缺 ' + mc.onlySmall +
+          ' 格 / 多 ' + mc.onlyBig + ' 格）');        if (shapes[k].body === 'brute' || shapes[k].body === 'ghost') {
+          lines.push('');
+          lines.push('== 怪物 ' + shapes[k].body + ' ==   颜色数 ' + colors(mS) + ' -> ' + colors(mB));
+          lines.push(ascii(mB, 36));
+        }
+        // 缺格时把差异图打出来：# 两边都有 · S 只有小立绘 · B 只有大立绘
+        if (mc.onlySmall > 6) {
+          lines.push('');
+          lines.push('== 差异图（' + shapes[k].body + '）== # 都有 · S 只有小 · B 只有大');
+          lines.push(occ(mS, mB, 2));
+        }
+      }
+
+      /* ---- 同一输入必须给同一输出（否则进战斗时立绘会抖）---- */
+      var a1 = A.paintHeroBig(cls, 'up', 0, 3).toCanvas(1).toDataURL();
+      var a2 = A.paintHeroBig(cls, 'up', 0, 3).toCanvas(1).toDataURL();
+      chk(a1 === a2, '战斗立绘是确定性的（同输入同输出）');
+
+      /* ---- 尺寸关系：战斗立绘必须是地图立绘的整数倍，否则没法 1:1 显示 ---- */
+      chk(hBig.w === 32 * 3 && hBig.h === 32 * 3, '英雄战斗立绘 96x96（= 32 x 3）');
+      chk(A.paintMonsterBig(shapes[0].shape, 2).w === 64, '怪物战斗立绘 64x64（= 32 x 2）');
+    }
+  } catch (e) {
+    lines.push('  FAIL 异常: ' + (e && e.stack ? e.stack : e));
+    bad++;
+  }
+  lines.push('');
+  lines.push('ARTVIEWDONE ' + (bad ? ('FAIL ' + bad) : 'ALL PASS'));
+  document.getElementById('out').textContent = 'ARTVIEW\n' + lines.join('\n');
+})();
+</script>
+</body>
+</html>

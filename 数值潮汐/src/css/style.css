@@ -859,8 +859,14 @@ html, body {
 /* 敌人的脚要落在**后墙根**上（画布 59.5% 高 -> 屏幕约 524px）。
    站得离后墙太近或太远，房间感都会散掉 ——
    脚不贴墙根的敌人看起来是贴在墙上，不是站在屋里。
-   这里的 top 是绝对定位的百分比，它**按含块高度**解析，这才是对的。 */
-.bs-foe { left: 56%; top: 50%; width: 26%; }
+   这里的 top 是绝对定位的百分比，它**按含块高度**解析，这才是对的。
+
+   v11.3-c 把立绘从 128px 换成 192px（高分辨率重绘）。敌人是靠 top 定位的，
+   精灵一变高，脚就跟着往下掉 —— 实测从 545px 掉到 609px，直接离地。
+   所以这里的 top 要按"精灵高度变化 × 脚在精灵里的比例(87.5%)"往上让：
+   128→192 让出 56px，686px 的舞台里就是 8.2 个百分点。50% - 8.2% = 41.8%。
+   主角是靠 bottom 定位的，精灵变高只把头顶抬上去、脚原地不动，所以不用改。 */
+.bs-foe { left: 56%; top: 41.8%; width: 26%; }
 .bs-hero { left: 6%; bottom: 1%; width: 40%; }
 .bs-name { font-size: 14px; color: var(--text); margin-bottom: 6px; }
 .bs-foe .bs-name { color: #ffb0b5; }
@@ -875,8 +881,8 @@ html, body {
   border-radius: 50%;
   background: radial-gradient(ellipse at center, rgba(0,0,0,0.62), rgba(0,0,0,0.22) 55%, transparent 74%);
 }
-.bs-hero .bs-figure::after { width: 190px; height: 30px; }
-.bs-foe .bs-figure::after { width: 96px; height: 16px; bottom: -2px; }
+.bs-hero .bs-figure::after { width: 216px; height: 32px; }
+.bs-foe .bs-figure::after { width: 132px; height: 18px; bottom: -2px; }
 /* 地面反光：镜像 + 向下渐隐。近处的倒影更明显、更虚化 */
 .bs-refl {
   position: absolute; left: 50%; transform: translateX(-50%) scaleY(-1);
@@ -885,14 +891,14 @@ html, body {
   -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,0.9), transparent 58%);
   mask-image: linear-gradient(to top, rgba(0,0,0,0.9), transparent 58%);
 }
-.bs-hero .bs-refl { width: 256px; height: 256px; top: 100%; margin-top: -6px; opacity: 0.26; }
-.bs-foe .bs-refl { width: 128px; height: 128px; top: 100%; margin-top: -4px; opacity: 0.14; }
-/* 尺寸要和 JS 里 toCanvas 的倍数对上：hero 32x6=192，foe 32x7=224。
-   对不上的话 CSS 会二次缩放，又把像素块糊掉一层。 */
-/* 近大远小：尺寸要和 JS 里 toCanvas 的倍数对上（32 x 8 / 32 x 4）。
-   对不上的话 CSS 会二次缩放，把像素块又糊一层。 */
-.bs-hero img { width: 256px; height: 256px; }
-.bs-foe img { width: 128px; height: 128px; }
+/* 尺寸要和 JS 里 toCanvas 的倍数对上。
+   v11.3-c 起不再是"小图放大"：画布本身就是 96×96 / 64×64 的高分辨率立绘，
+   这里只是把它整数倍放到屏幕上（3 倍）。整数倍 + image-rendering:pixelated
+   才保得住像素质感 —— 非整数倍会让每个色块落在半个像素上，边缘立刻发糊。 */
+.bs-hero .bs-refl { width: 288px; height: 288px; top: 100%; margin-top: -6px; opacity: 0.26; }
+.bs-foe .bs-refl { width: 192px; height: 192px; top: 100%; margin-top: -4px; opacity: 0.14; }
+.bs-hero img { width: 288px; height: 288px; }
+.bs-foe img { width: 192px; height: 192px; }
 /* 大气透视：远处的敌人降一点亮度、褪一点色 —— 这是纵深感的第二根支柱
    （第一根是尺寸差）。少了它，远处的敌人会像"缩小版的近处敌人"。 */
 .bs-foe img { filter: brightness(0.9) saturate(0.88); }

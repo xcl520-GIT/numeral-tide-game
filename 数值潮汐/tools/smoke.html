@@ -2937,6 +2937,146 @@ try {
   w.TideMeta.reset();
 } catch (e) { fail('逐回合战斗测试异常: ' + (e && e.stack ? e.stack : e)); }
 
+// ---------- 39. 高分辨率战斗立绘：还是同一个角色 ----------
+/* 这一节守的不是"好不好看"（那要靠眼睛，它在这里没有发言权），
+   守的是**"还是不是同一个角色"**。
+
+   art.js 里现在有两套绘制器：小立绘（32×32，地图用）和战斗立绘
+   （96×96 / 64×64，战斗场景用）。它们共用 heroGeo / monsterGeo 这段几何，
+   所以形体必须一致。而"几何被复制成两份"是这里最危险的漂移 ——
+   它的症状只是"战斗里的主角看着有点陌生"，没有人会立刻发现、更不会有人报。
+
+   把这件事变成一条会红的断言，就不用指望有人记得去比对。 */
+try {
+  var A2 = w.TideArt, D2 = w.TideData;
+  var clsBig = D2.classByKey ? D2.classByKey('warlord') : D2.CLASSES[0];
+
+  if (!A2.paintHeroBig || !A2.paintMonsterBig) {
+    fail('TideArt 没有导出 paintHeroBig / paintMonsterBig（战斗立绘没接上）');
+  } else {
+    /**
+     * 大立绘按 mult 下采样后应当覆盖小立绘的轮廓，**允许一格边界容差**。
+     * 容差是必需的：outline 给小立绘加的是"一整格"（1 格 = 1 像素），
+     * 给大立绘加的是"一个原生像素"（= 半格）。同一个描边操作在不同分辨率下
+     * 厚度本来就不一样。真要抓的是"形体变了" —— 那会让格子离对方最近的
+     * 像素远到两格以上，一格容差挡不住。
+     */
+    function bigCover(small, big, mult) {
+      var tol = 1;
+      /* ⚠ m 必须显式传进来。写成"读外层 mult"的话，
+         near(small, ...) 会拿大立绘的倍数去索引小立绘，
+         索引一大半越界、全部返回 false，onlyBig 会被灌成几百格 ——
+         而这个断言本来就是为了防误报，自己误报就毫无意义了。 */
+      function blockHas(px, cx2, cy2, m) {
+        var X = cx2 * m, Y = cy2 * m;
+        for (var j = 0; j < m; j++) {
+          for (var i = 0; i < m; i++) if (px.get(X + i, Y + j)) return true;
+        }
+        return false;
+      }
+      function near(px, cx2, cy2, m) {
+        for (var dy = -tol; dy <= tol; dy++) {
+          for (var dx = -tol; dx <= tol; dx++) if (blockHas(px, cx2 + dx, cy2 + dy, m)) return true;
+        }
+        return false;
+      }
+      var onlySmall = 0, onlyBig = 0;
+      for (var y = 0; y < small.h; y++) {
+        for (var x = 0; x < small.w; x++) {
+          var sa = !!small.get(x, y), sb = blockHas(big, x, y, mult);
+          if (sa && !near(big, x, y, mult)) onlySmall++;
+          else if (sb && !near(small, x, y, 1)) onlyBig++;
+        }
+      }
+      return { onlySmall: onlySmall, onlyBig: onlyBig };
+    }
+    function colorCount(px) {
+      var s = {}, n = 0;
+      for (var i = 0; i < px.d.length; i++) {
+        var c = px.d[i];
+        if (c && !s[c]) { s[c] = 1; n++; }
+      }
+      return n;
+    }
+
+    // ---- 英雄：两种朝向都验 ----
+    var hBigUp = A2.paintHeroBig(clsBig, 'up', 0, 3);
+    var hBigDown = A2.paintHeroBig(clsBig, 'down', 0, 3);
+    if (hBigUp.w !== 96 || hBigUp.h !== 96) {
+      fail('英雄战斗立绘不是 96x96（= 32 x 3）: ' + hBigUp.w + 'x' + hBigUp.h);
+    } else ok('英雄战斗立绘 96x96（地图立绘的正好 3 倍）');
+    var cUp = bigCover(A2.paintHero(clsBig, 'up', 0), hBigUp, 3);
+    var cDown = bigCover(A2.paintHero(clsBig, 'down', 0), hBigDown, 3);
+    if (cUp.onlySmall > 0 || cDown.onlySmall > 0 || cUp.onlyBig > 8 || cDown.onlyBig > 8) {
+      fail('英雄战斗立绘的形体和小立绘对不上：背面缺 ' + cUp.onlySmall + '/多 ' + cUp.onlyBig +
+        '，正面缺 ' + cDown.onlySmall + '/多 ' + cDown.onlyBig);
+    } else {
+      ok('英雄战斗立绘与小立绘**同一个形体**（背面 缺' + cUp.onlySmall + '/多' + cUp.onlyBig +
+        '，正面 缺' + cDown.onlySmall + '/多' + cDown.onlyBig + '）');
+    }
+    var colSmallH = colorCount(A2.paintHero(clsBig, 'up', 0));
+    var colBigH = colorCount(hBigUp);
+    if (colBigH < colSmallH * 6) {
+      fail('英雄战斗立绘的用色只多了 ' + (colBigH - colSmallH) + ' 种 —— 那不是"重画"，是"放大"');
+    } else {
+      ok('英雄战斗立绘真的加了细节：用色 ' + colSmallH + ' → ' + colBigH + ' 种');
+    }
+
+    // ---- 怪物：每一种 body 都要验（共 6 种）----
+    var seen2 = {}, shapes2 = [];
+    for (var mi = 0; mi < D2.ENEMIES.length; mi++) {
+      var sp2 = D2.ENEMIES[mi].shape;
+      if (sp2 && !seen2[sp2.body]) { seen2[sp2.body] = 1; shapes2.push(sp2); }
+    }
+    if (shapes2.length < 5) fail('只取到 ' + shapes2.length + ' 种 monster body，覆盖不全');
+    else {
+      var badShape = [];
+      for (var si = 0; si < shapes2.length; si++) {
+        var mB2 = A2.paintMonsterBig(shapes2[si], 2);
+        if (mB2.w !== 64 || mB2.h !== 64) { badShape.push(shapes2[si].body + '(尺寸)'); continue; }
+        var mc2 = bigCover(A2.paintMonster(shapes2[si]), mB2, 2);
+        if (mc2.onlySmall > 0 || mc2.onlyBig > 16) {
+          badShape.push(shapes2[si].body + '(缺' + mc2.onlySmall + '/多' + mc2.onlyBig + ')');
+        }
+      }
+      if (badShape.length) fail('这些怪物体的战斗立绘和小立绘对不上：' + badShape.join(', '));
+      else ok('6 种怪物体型的战斗立绘都是 64x64，且与小立绘同形体（' +
+        shapes2.length + ' 种全部通过）');
+    }
+
+    // ---- 确定性：同输入必须同输出，否则进战斗时立绘会抖 ----
+    var url1 = A2.paintHeroBig(clsBig, 'up', 0, 3).toCanvas(1).toDataURL();
+    var url2 = A2.paintHeroBig(clsBig, 'up', 0, 3).toCanvas(1).toDataURL();
+    if (url1 !== url2) fail('战斗立绘本绘不是确定性的（两次调用结果不同）');
+    else ok('战斗立绘是确定性的（同输入同输出）');
+
+    // ---- 材质契约：CSS 里的显示尺寸必须是原生尺寸的整数倍 ----
+    // 非整数倍会让每个色块落在半个像素上，边缘发糊 —— 而这种糊不报错，只有肉眼。
+    // 必须先让战斗层可见再量：display:none 的元素拿到的宽度是 "auto"，
+    // 量出来是 0，断言就会变成"拿不到宽度"而不是"倍数不对"。
+    var bsEl2 = d.getElementById('battle-screen');
+    var wasHidden2 = bsEl2 ? bsEl2.classList.contains('hidden') : true;
+    if (bsEl2) bsEl2.classList.remove('hidden');
+    var heroW = 0, foeW = 0;
+    var hi2 = d.getElementById('bs-hero-art'), fi2 = d.getElementById('bs-foe-art');
+    if (hi2) heroW = Math.round(parseFloat(w.getComputedStyle(hi2).width) || 0);
+    if (fi2) foeW = Math.round(parseFloat(w.getComputedStyle(fi2).width) || 0);
+    if (wasHidden2 && bsEl2) bsEl2.classList.add('hidden');
+
+    if (!heroW || !foeW) {
+      fail('拿不到战斗立绘的显示宽度（元素或样式缺失）: hero=' + heroW + ' foe=' + foeW);
+    } else if (heroW % 96 !== 0) {
+      fail('战斗立绘的显示宽度 ' + heroW + 'px 不是原生 96px 的整数倍（会被非整数缩放糊掉）');
+    } else if (foeW % 64 !== 0) {
+      fail('敌人立绘的显示宽度 ' + foeW + 'px 不是原生 64px 的整数倍（同上）');
+    } else {
+      ok('战斗立绘按整数倍显示：主角 ' + heroW + 'px = 96 x ' + (heroW / 96) +
+        '，敌人 ' + foeW + 'px = 64 x ' + (foeW / 64));
+    }
+  }
+  w.TideUI.closeBattle();
+} catch (e) { fail('战斗立绘测试异常: ' + (e && e.stack ? e.stack : e)); }
+
   } catch (e) {
     fail('测试脚本异常: ' + (e && e.stack ? e.stack : e));
   }

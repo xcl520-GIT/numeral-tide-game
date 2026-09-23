@@ -1656,19 +1656,27 @@
     // CSS 拉伸会走双线性插值，把像素画的边缘糊成一片。
     const hArt = $('bs-hero-art');
     if (hArt.dataset.key !== game.cls.key) {
-      // 'up' = 背对镜头。相机在主角背后，所以看到的是他的背影 ——
-      // 这正是"视角在主角这边、与对面对峙"。
-      // ⚠ paintHero 只认 'down' | 'up' | 'side'，传别的值不报错、
-      //   静默落到默认分支（正面）。这个坑连踩两次：先是 'right'，后是以为
-      //   'side' 才是"背对镜头"。改朝向参数前先去 art.js 确认它认哪几个值。
-      try { hArt.src = A.paintHero(game.cls, 'up', 0).toCanvas(8).toDataURL(); }
-      catch (err) { hArt.src = A.heroDataURL(game.cls, 192, 'right'); }
+      // 战斗立绘（v11.3-c）：和地图立绘**共用几何**，但分辨率 3 倍
+      // （96×96）、并且多一层只有在原生分辨率下才画得出来的细节 ——
+      // 逐像素方向光梯度、眼睛的三层结构、布褶、金属高光。
+      //
+      // 交给 CSS 放大 3 倍显示（288px）：整数倍 + image-rendering:pixelated，
+      // 所以是干净的像素质感，而不是 32×32 拉大 8 倍那种"一块一格"。
+      // ⚠ 倍数必须和 style.css 里的 width/height 对上。对不上的话 CSS 会
+      //   做一次非整数缩放，像素块会糊掉半格 —— 这种糊没有报错，只有肉眼。
+      try { hArt.src = A.paintHeroBig(game.cls, 'up', 0, 3).toCanvas(1).toDataURL(); }
+      catch (err) {
+        // 退化路径：宁可退回旧的"小图放大"，也不能给一块空白
+        try { hArt.src = A.paintHero(game.cls, 'up', 0).toCanvas(8).toDataURL(); }
+        catch (e2) { hArt.src = A.heroDataURL(game.cls, 192, 'right'); }
+      }
       hArt.dataset.key = game.cls.key;
     }
     const fArt = $('bs-foe-art');
     if (fArt.dataset.key !== foe.arc.id) {
-      // 敌人远 -> 小。8 倍给主角（近）、4 倍给敌人（远）—— 这就是"近大远小"
-      try { fArt.src = A.paintMonster(foe.arc.shape).toCanvas(4).toDataURL(); }
+      // 敌人用 2 倍（64×64）：它在画面里更远更小，分辨率堆在它身上是浪费；
+      // 但 2 倍仍然比原来的 32×32 多一倍细节，而且是**重画**不是放大。
+      try { fArt.src = A.paintMonsterBig(foe.arc.shape, 2).toCanvas(1).toDataURL(); }
       catch (err) {
         // 退化路径：实在烤不出来也比空白强，至少玩家看得出是谁
         try { fArt.src = A.monsterSprite(foe.arc.shape, foe.arc.id, 0).toDataURL(); }

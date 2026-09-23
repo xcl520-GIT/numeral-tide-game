@@ -436,11 +436,33 @@
      dir : 'down' | 'up' | 'side'
      frame: 0 / 1 = 行走的两帧，2 = 攻击前倾
      ============================================================ */
+  /**
+   * 地图上的英雄立绘（32×32）。几何取自 heroGeo，和战斗立绘同源。
+   */
   function paintHero(cls, dir, frame) {
     dir = dir || 'down';
     frame = frame || 0;
-    const s = cls.style;
     const p = new PX(SPR, SPR);
+    heroGeo(geo32(p, 1), cls, dir, frame);
+    p.outline('#0b0e14', true);
+    p.topLight(0.14);
+    p.grain(20, cls.key.length + dir.length + frame, 0.06);
+    return p;
+  }
+
+  /**
+   * 英雄几何 —— 全部坐标都在 **32 单位**坐标系里。
+   *
+   * 这一段被三处共用：地图立绘（mult=1）、战斗立绘（mult=3）、
+   * 以及 chooseClass 界面里的头像。共用是硬要求：各画一份的话，
+   * 过两个版本战斗立绘就会变成另一个人，而且没有人会立刻发现 ——
+   * 它的症状只是"战斗里的主角看着有点陌生"。
+   */
+  function heroGeo(P, cls, dir, frame) {
+    dir = dir || 'down';
+    frame = frame || 0;
+    const p = P;
+    const s = cls.style;
     const dark = '#12151d';
     const skinD = shade(s.skin, -0.24);
     const step = frame === 1 ? 1 : 0;           // 行走相位
@@ -558,19 +580,31 @@
       p.rect(wx - 4, hy - 1, 11, 2, shade(s.trim, -0.1));
     }
 
-    p.outline('#0b0e14', true);
-    p.topLight(0.14);
-    p.grain(20, cls.key.length + dir.length + frame, 0.06);
-    return p;
   }
+
 
   /* ============================================================
      怪物：按 shape 参数生成，统一塞进 32×32
      6 种体型模板 + 参数（眼数/尖刺/手臂/颜色），
      所以加一种新怪只要加一条数据，不用画图。
      ============================================================ */
+  /**
+   * 地图上的怪物立绘（32×32）。几何取自 monsterGeo，和战斗立绘同源。
+   */
   function paintMonster(shape) {
     const p = new PX(SPR, SPR);
+    monsterGeo(geo32(p, 1), shape);
+    p.outline('#0b0e14', true);
+    p.topLight(0.20);
+    p.bottomDark(0.24);
+    return p;
+  }
+
+  /**
+   * 怪物几何 —— 全部坐标都在 **32 单位**坐标系里。同 heroGeo，共用。
+   */
+  function monsterGeo(P, shape) {
+    const p = P;
     const cx = 16 - 1;
     const base = shape.color, acc = shape.accent;
     const bw = Math.min(26, shape.w), bh = Math.min(24, shape.h);
@@ -648,11 +682,323 @@
       p.rect(cx - 9, cy + 3, 19, 2, '#a8801a');
     }
 
+  }
+
+  /* ============================================================
+     战斗立绘（v11.3-c）：同一套几何，更高的分辨率
+
+     问题：战斗场景现在把 32×32 的小立绘 toCanvas(8) 放大到 256px ——
+     那是**同一张图**拉大 8 倍，得到 8px 见方的色块。
+     放大解决不了细节，只解决了"占多大地方"。
+
+     做法分三层，缺一层都不成立：
+
+       ① 几何层 geo32(P, m)  —— 32 单位的坐标系统一换算到原生像素。
+          heroGeo / monsterGeo 里的 x / y / w / h 仍然写 32 单位，
+          于是**战斗立绘和地图小立绘是同一个人的同一套形体**。
+          容器变了、形状没变，这一点必须靠共用同一段几何来保证 ——
+          各画一份的话，过两个版本战斗立绘就会变成另一个人。
+
+       ② 细节层 heroDetail / monsterDetail —— 只在原生分辨率下画。
+          眼睛、发丝、布褶、金属高光、身上的纹理。
+          这些东西在 32×32 上根本没有位置：那时候一只眼睛就是一格。
+
+       ③ 明暗层 bigShade —— 逐像素的方向光梯度 + 轮廓内暗边 + 细噪。
+          只描一圈亮边是"贴纸感"的典型来源：整块颜色一样亮，看不出体积。
+          有了逐像素梯度，形体才立得住。
+
+     为什么不是"画一张更大的图"：形状会和 32×32 的地图立绘脱节，
+     玩家会觉得换了个角色。共用几何 + 加细节，才能"一眼是它、再看更细"。
+     ============================================================ */
+
+  /**
+   * 32 单位几何 → 原生像素坐标。
+   * 逐像素地把 set / rect 换算过去，**先取整再乘** ——
+   * 顺序反了（先乘再取整）会让格子的边界落在不同像素上，
+   * 战斗立绘的轮廓就会和地图立绘差出一整格，看起来像两个人。
+   */
+  function geo32(d, m) {
+    return {
+      m: m, raw: d,
+      rect: function (x, y, w, h, c) {
+        d.rect(Math.trunc(x) * m, Math.trunc(y) * m, Math.ceil(w) * m, Math.ceil(h) * m, c);
+        return this;
+      },
+      ell: function (cx, cy, rx, ry, c) {
+        // 这里**不能**把半径乘 m 之后交给 PX.ell：PX.ell 的扫描边界是
+        // floor/ceil(半径)，乘 m 之后会比"缩放后的边界"窄最多 m-1 个像素，
+        // 于是椭圆最外一圈会整圈丢掉（实测每个怪少 10~15 格）。
+        // 改成自己扫原生像素：按 32 单位算边界、乘 m 再**向外多扫一格**，
+        // 让判定完全由归一化方程决定。覆盖范围只多不少 ——
+        // 关键是"32 单位里被覆盖的格子，其左上角原生像素一定也被覆盖"，
+        // 轮廓一致性才守得住。
+        const x0 = Math.floor((cx - rx) * m), x1 = Math.ceil((cx + rx) * m) + m;
+        const y0 = Math.floor((cy - ry) * m), y1 = Math.ceil((cy + ry) * m) + m;
+        for (let y = y0; y <= y1; y++) {
+          for (let x = x0; x <= x1; x++) {
+            const dx = (x - cx * m) / (rx * m), dy = (y - cy * m) / (ry * m);
+            if (dx * dx + dy * dy <= 1.0) d.set(x, y, c);
+          }
+        }
+        return this;
+      },
+      /** 32 单位取色：该格对应的原生 m×m 里只要有东西，就算这一格有东西。 */
+      get: function (x, y) {
+        const X = Math.trunc(x) * m, Y = Math.trunc(y) * m;
+        for (let j = 0; j < m; j++) {
+          for (let i = 0; i < m; i++) {
+            const c = d.get(X + i, Y + j);
+            if (c) return c;
+          }
+        }
+        return null;
+      },
+      set: function (x, y, c) {
+        d.rect(Math.trunc(x) * m, Math.trunc(y) * m, m, m, c);
+        return this;
+      }
+    };
+  }
+
+  /**
+   * 明暗层。三样东西，都是"放大 8 倍"永远给不出来的：
+   *   ① 方向光梯度 —— 光从左上来（和战斗场景里那道 .bs-shaft 同一个方向）
+   *   ② 轮廓内暗边 —— 让形体收得住，而不是一块平色
+   *   ③ 细噪 —— 在**放大后**的尺度上撒，不会像 32×32 那样一颗噪点占掉半张脸
+   * @param {number} seed 决定噪点位置。同样的输入必须给同样的输出，
+   *   否则每次进战斗立绘都在抖（视错觉上像画面在噪）。
+   */
+  function bigShade(d, seed) {
+    const W = d.w, H = d.h;
+    const snap = d.d.slice();          // 先快照：所有判断基于同一份原始图
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const c = snap[y * W + x];
+      // 只处理 6 位 hex。staff 上那圈 'rgba(...)' 的光晕交给它自己 ——
+      // 硬算 shade() 会撞上 hex2rgb 拿不到 #rrggbb 的分支。
+      if (!c || c.length !== 7) continue;
+      const u = x / (W - 1), v = y / (H - 1);
+      let amt = (0.55 - (u * 0.62 + v * 0.55)) * 0.40;
+      const L = snap[y * W + x - 1], R = snap[y * W + x + 1];
+      const T = snap[(y - 1) * W + x], B = snap[(y + 1) * W + x];
+      if (!L || !T) amt += 0.10;       // 受光侧：轮廓内侧提亮（边缘光）
+      if (!R || !B) amt -= 0.13;       // 背光侧：轮廓内侧压暗（环境光遮蔽）
+      d.set(x, y, shade(c, amt));
+    }
+    const n = Math.round(W * H / 26);
+    for (let i = 0; i < n; i++) {
+      const x = Math.floor(hash2(i, seed, 171) * W);
+      const y = Math.floor(hash2(i, seed, 173) * H);
+      const c = d.get(x, y);
+      if (!c || c.length !== 7) continue;
+      d.set(x, y, shade(c, hash2(i, seed, 177) > 0.5 ? 0.05 : -0.05));
+    }
+  }
+
+  /** 一只"有神"的眼睛：眼白 → 虹膜 → 瞳 → 高光。四层，一层都不能省。 */
+  function drawEye(R, x, y, w, h, iris) {
+    R.ell(x + w / 2 - 0.5, y + h / 2 - 0.5, w / 2, h / 2, '#eef2f8');
+    R.ell(x + w / 2 - 0.5, y + h / 2 - 0.2, w / 3.6, h / 2.9, iris);
+    R.ell(x + w / 2 - 0.5, y + h / 2 - 0.2, w / 7, h / 6, '#141821');
+    R.set(x + w / 2 - Math.max(1, Math.round(w / 3)), y + Math.max(1, Math.round(h / 4)), '#ffffff');
+  }
+
+  /* ------------------------------------------------------------
+     英雄：战斗立绘
+     ------------------------------------------------------------ */
+  /**
+   * @param {number} mult 分辨率倍数。3 → 96×96（近景主角），
+   *   和地图立绘的 32×32 恰好是整数倍关系。
+   */
+  function paintHeroBig(cls, dir, frame, mult) {
+    dir = dir || 'down';
+    frame = frame || 0;
+    const m = Math.max(2, Math.min(8, mult || 3));
+    const p = new PX(SPR * m, SPR * m);
+    const G = geo32(p, m);
+    heroGeo(G, cls, dir, frame);
+    heroDetail(G, cls, dir, frame);
     p.outline('#0b0e14', true);
-    p.topLight(0.20);
-    p.bottomDark(0.24);
+    bigShade(p, cls.key.length * 31 + dir.length * 7 + frame);
     return p;
   }
+
+  /**
+   * 英雄细节层。坐标在这里是**原生像素**，全部由 32 单位经 n() 换算，
+   * 所以它锚在几何上的位置不会因为 mult 改变而跑掉。
+   */
+  function heroDetail(G, cls, dir, frame) {
+    const m = G.m, R = G.raw, s = cls.style;
+    const n = function (v) { return Math.round(v * m); };
+    const lean = (frame === 2) ? 1 : 0;
+    const side = (dir === 'side');
+    const up = (dir === 'up');
+    const cx = 12 + lean;
+    const bx = 9 + lean;
+    const hx = side ? (bx + 5.5) : cx;
+
+    /* ---- 脸：眼睛 / 眉 / 嘴 ----
+       32×32 上眼睛只有 2×1 格，画不出"眼白 + 瞳 + 高光"。
+       这里它有 2m × m 个原生像素，三层就放得下了。 */
+    if (up) {
+      // 背面：只看得到后脑勺，改画发层的明暗，别硬加五官
+      R.rect(n(hx - 3.2), n(3.6), Math.round(6.4 * m), 1, shade(s.hair, 0.34));
+      R.rect(n(hx - 3.2), n(5.4), Math.round(6.4 * m), 1, shade(s.hair, -0.28));
+      R.rect(n(hx - 1.4), n(8.4), Math.round(2.8 * m), 1, shade(s.hair, -0.2));
+    } else if (side) {
+      drawEye(R, n(bx + 8), n(8), m, m, '#243049');
+      R.rect(n(bx + 2), n(3), m, n(2.2), shade(s.hair, 0.3));       // 发丝亮面
+      R.rect(n(bx + 6), n(2.6), m, n(2.6), shade(s.hair, -0.26));   // 发根压暗
+    } else {
+      drawEye(R, n(cx - 3), n(8), 2 * m, m, '#243049');
+      drawEye(R, n(cx + 1), n(8), 2 * m, m, '#243049');
+      // 眉：两条短横压在眼上方。有它才有表情，没有就是两个洞。
+      R.rect(n(cx - 3.4), n(6.1), 2 * m, 1, shade(s.hair, -0.34));
+      R.rect(n(cx + 0.9), n(6.1), 2 * m, 1, shade(s.hair, -0.34));
+      R.rect(n(cx - 1), n(10.7), m, 1, shade(s.skin, -0.46));       // 嘴
+      R.rect(n(cx - 2), n(9.7), 3 * m, 1, shade(s.skin, -0.16));    // 下巴影
+      R.rect(n(cx - 4.2), n(4), m, n(2.2), shade(s.hair, 0.32));    // 发丝亮面
+      R.rect(n(cx + 3.4), n(3.6), m, n(2.4), shade(s.hair, -0.28));
+    }
+
+    /* ---- 躯干：布褶 + 腰带扣 ----
+       平色的大块是"贴纸感"的第二来源。两三道短褶就能把布变成布。 */
+    const ty = 11, th = 10;
+    R.rect(n(cx - 3.4), n(ty + 3), 1, n(th - 4.5), shade(s.body, -0.24));
+    R.rect(n(cx + 2.6), n(ty + 2.4), 1, n(th - 5), shade(s.body, -0.2));
+    R.rect(n(cx - 1.2), n(ty + 5.6), m, n(2.4), shade(s.body, -0.13));
+    R.rect(n(cx - 1), n(18.6), 2 * m, 1, shade(s.trim, 0.34));      // 腰带扣
+
+    /* ---- 金属：肩甲与武器上的窄高光 ----
+       只给 **1px 宽的一条**。宽了就变成白块，反而更假。 */
+    if (!side) {
+      R.rect(n(cx - 8) + 1, n(10) + 1, n(2) - 2, 1, shade(s.metal, 0.5));
+      R.rect(n(cx + 4) + 1, n(10) + 1, n(2) - 2, 1, shade(s.metal, 0.34));
+    } else {
+      R.rect(n(bx + 5) + 1, n(10) + 1, n(2) - 2, 1, shade(s.metal, 0.5));
+    }
+    const wx = side ? (16 + lean) : (18 + lean);
+    if (cls.weapon === 'greatsword') {
+      R.rect(n(wx) + 1, n(4) + (frame === 2 ? m : 0), 1, n(12), shade(s.metal, 0.46));
+    } else if (cls.weapon === 'hammer') {
+      R.rect(n(wx - 3) + 1, n(frame === 2 ? 8 : 3) + 1, n(6), 1, shade(s.metal, 0.5));
+    } else if (cls.weapon === 'staff') {
+      R.rect(n(wx) + 1, n(6), 1, n(17), '#a07446');
+    } else if (cls.weapon === 'bow') {
+      R.rect(n(wx + 2), n(5), 1, n(17), '#eef4fa');
+    }
+
+    /* ---- 披风：外侧亮、内侧暗，把"挂着一块布"和"身体的一部分"分开 ---- */
+    const capeX = side ? (bx - 2) : (cx - 6);
+    R.rect(n(capeX) + 1, n(12.4), 1, n(8.2), shade(s.cloth, -0.44));
+    if (!side) R.rect(n(cx + 5) - 2, n(12.4), 1, n(8.2), shade(s.cloth, -0.52));
+  }
+
+  /* ------------------------------------------------------------
+     怪物：战斗立绘
+     ------------------------------------------------------------ */
+  /**
+   * @param {number} mult 2 → 64×64。比英雄低一档：
+   *   敌人在画面里更远、更小，分辨率堆在它身上是浪费；
+   *   但 2 倍仍然比原来的 32×32 多一倍细节，而且是**重画**不是放大。
+   */
+  function paintMonsterBig(shape, mult) {
+    const m = Math.max(2, Math.min(8, mult || 2));
+    const p = new PX(SPR * m, SPR * m);
+    const G = geo32(p, m);
+    monsterGeo(G, shape);
+    monsterDetail(G, shape);
+    p.outline('#0b0e14', true);
+    bigShade(p, (shape.w || 0) * 13 + (shape.h || 0) * 7 +
+      ((shape.spikes || 0) + (shape.eye || 0)) * 29);
+    return p;
+  }
+
+  /**
+   * 怪物细节层：先把眼睛画成"眼睛"，再按体型加一层皮肤纹理。
+   * 纹理是**按 body 类型分派**的，不是统一撒噪 —— 统一撒噪只会让所有怪
+   * 看起来都像同一只在长毛。石头该裂、毛皮该起绒、布该有褶、软体该起泡。
+   */
+  function monsterDetail(G, shape) {
+    const m = G.m, R = G.raw;
+    const n = function (v) { return Math.round(v * m); };
+    const cx = 16 - 1;
+    const base = shape.color, acc = shape.accent;
+    const bw = Math.min(26, shape.w), bh = Math.min(24, shape.h);
+    const groundY = 28;
+    const top = groundY - bh;
+
+    /* ---- 皮肤纹理：先做，再画眼睛（眼睛要压在纹理上面）---- */
+    if (shape.body === 'blob') {
+      for (let i = 0; i < 5; i++) {
+        const bx2 = cx - bw / 3 + hash2(i, bw, 211) * (bw * 0.66);
+        const by2 = top + 3 + hash2(i, bh, 213) * (bh - 7);
+        R.ell(n(bx2), n(by2), m * 0.8, m * 0.6, shade(base, 0.22));
+      }
+    } else if (shape.body === 'brute') {
+      for (let i = 0; i < 3; i++) {
+        const sx2 = cx - bw / 3 + i * (bw / 3.4);
+        R.rect(n(sx2), n(top + 4), 1, n(bh * 0.42), shade(base, -0.3));
+      }
+      R.rect(n(cx - bw / 2 + 1), n(top + 2), n(bw - 2), 1, shade(base, 0.26));
+      for (let i = 0; i < 4; i++) {
+        R.set(n(cx - bw / 2 + 3 + i * (bw / 4.6)), n(groundY - 3.4), shade(acc, 0.4));
+      }
+    } else if (shape.body === 'beast') {
+      for (let i = 0; i < 7; i++) {
+        const fx = cx - bw / 2 + 1 + i * (bw / 7.4);
+        R.rect(n(fx), n(groundY - bh / 2 - bh / 3.4), 1, n(1.6), shade(base, 0.24));
+      }
+      R.rect(n(cx - bw / 2 + 1), n(groundY - bh / 2), n(bw - 2), 1, shade(base, -0.22));
+    } else if (shape.body === 'ghost') {
+      // 半透明感没法真的做（这一套只认 6 位 hex），
+      // 改用"外侧一格抖出去"来暗示它不结实
+      for (let i = 0; i < 6; i++) {
+        const gx = cx - bw / 2 + hash2(i, bw, 217) * bw;
+        const gy = top + 2 + hash2(i, bh, 219) * (bh / 2);
+        R.set(n(gx), n(gy), shade(base, 0.28));
+      }
+      R.rect(n(cx - bw / 4), n(top + bh / 2.6), n(bw / 2), 1, shade(base, -0.3));
+    } else if (shape.body === 'robed') {
+      for (let i = 0; i < 3; i++) {
+        const rx2 = cx - bw / 3 + i * (bw / 3.2);
+        R.rect(n(rx2), n(top + bh * 0.42), 1, n(bh * 0.46), shade(base, -0.28));
+      }
+      R.rect(n(cx - bw / 3.6), n(groundY - 3.2), n(bw / 1.8), 1, shade(base, 0.2));
+    } else if (shape.body === 'mimic') {
+      const lw = bw / 2, lh = bh / 2;
+      for (let i = 0; i < 3; i++) {
+        R.rect(n(cx - lw + 1), n(groundY - lh + 2 + i * (lh / 3.4)), n(bw - 2), 1, shade(PAL.wood, -0.26));
+      }
+      for (let i = 0; i < 3; i++) {
+        R.set(n(cx - lw + 3 + i * (bw / 3.4)), n(groundY - lh + 1.4), shade(PAL.gold, 0.4));
+      }
+      R.rect(n(cx - lw + 1), n(groundY - lh / 2 - 1), n(bw - 2), 1, '#120d07');
+    }
+
+    /* ---- 眼睛：眼白 → 虹膜 → 瞳 → 高光 ----
+       32×32 上每只眼只有 3×3 格，= 一格瞳。这里它有 3m × 3m。 */
+    const eyes = shape.eye || 2;
+    for (let i = 0; i < eyes; i++) {
+      const ex = cx - (eyes - 1) * 3 + i * 6;
+      const ey = groundY - bh / 2 - (shape.body === 'robed' ? 12 : 5);
+      drawEye(R, n(ex - 1), n(ey - 1), 3 * m, 3 * m, i % 2 ? '#e04040' : '#e8b23a');
+    }
+
+    /* ---- 尖刺 / 王冠：顶端一格提亮，才有"硬"的感觉 ---- */
+    for (let i = 0; i < (shape.spikes || 0); i++) {
+      const t = (i + 0.5) / shape.spikes;
+      const sx2 = Math.round(cx - bw / 2 + t * bw);
+      const sh = 3 + Math.round(hash2(i, shape.spikes, 91) * 4);
+      R.set(n(sx2), n(top - sh + 3), shade(acc, 0.42));
+    }
+    if (shape.crown) {
+      for (let i = 0; i < 5; i++) {
+        R.rect(n(cx - 8 + i * 4) + 1, n(top - 3) + 1, n(1), m, '#fff2c0');
+      }
+      R.rect(n(cx - 9), n(top), n(19), 1, '#c69a22');
+    }
+  }
+
 
   /* ============================================================
      预烤缓存
@@ -734,6 +1080,9 @@
     monsterSprite: monsterSprite,
     heroDataURL: heroDataURL,
     paintHero: paintHero,
-    paintMonster: paintMonster
+    paintMonster: paintMonster,
+    // 战斗立绘（v11.3-c）。和上面两个共用几何，但分辨率更高、多一层细节。
+    paintHeroBig: paintHeroBig,
+    paintMonsterBig: paintMonsterBig
   };
 })(window);
