@@ -1412,6 +1412,48 @@
     return bsBg;
   }
 
+  /** 标签 / 姿态 的图标徽章。用图标而不是文字：一眼认得出的东西不该要人读。 */
+  const TAG_ICON = {
+    '高物抗': 'checked-shield', '高法抗': 'shield-reflect', '法术': 'magic-swirl',
+    '召唤': 'cactus', '汲血': 'droplets', '精英': 'crown', '首领': 'crown',
+    '群居': 'sound-waves'
+  };
+  function bsBadges(elId, foe) {
+    const el = $(elId);
+    if (!el) return;
+    if (!foe) { el.innerHTML = ''; return; }
+    let h = '';
+    if (foe.stance) {
+      h += '<span class="bs-badge stance-' + foe.stance + '" title="姿态：硬化' +
+        (foe.stance === 'p' ? '物理' : '法术') + '">' +
+        icon(foe.stance === 'p' ? 'checked-shield' : 'shield-reflect', 12) + '</span>';
+    }
+    const tg = foe.tags || [];
+    for (let i = 0; i < tg.length; i++) {
+      const ic = TAG_ICON[tg[i]];
+      h += '<span class="bs-badge tag" title="' + esc(tg[i]) + '">' +
+        (ic ? icon(ic, 12) : esc(tg[i])) + '</span>';
+    }
+    el.innerHTML = h;
+  }
+
+  /** 火盆余烬。橙色、从两个火盆的位置往上飘，和尘埃区分开（暖色 / 冷色）。 */
+  function bsEmber() {
+    const el = $('bs-ember');
+    if (!el || el.children.length) return;
+    for (let i = 0; i < 16; i++) {
+      const s = document.createElement('span');
+      const left = (i % 2 === 0) ? (4 + Math.random() * 8) : (88 + Math.random() * 8);
+      s.style.left = left.toFixed(1) + '%';
+      s.style.animationDelay = (-Math.random() * 5).toFixed(1) + 's';
+      s.style.animationDuration = (3.4 + Math.random() * 3).toFixed(1) + 's';
+      const sz = 2 + Math.random() * 2.5;
+      s.style.width = sz.toFixed(1) + 'px';
+      s.style.height = sz.toFixed(1) + 'px';
+      el.appendChild(s);
+    }
+  }
+
   /** 环境尘埃。只在第一次铺，之后靠 CSS 无限循环 —— 不占每帧预算。 */
   function bsAmbient() {
     const amb = $('bs-ambient');
@@ -1450,18 +1492,24 @@
       bd.style.backgroundRepeat = 'no-repeat';
     }
     bsAmbient();
+    bsEmber();
     $('bs-hero-name').textContent = heroName;
     $('bs-foe-name').textContent = foe.name;
-    $('bs-foe-tags').textContent = (foe.tags && foe.tags.length) ? foe.tags.join(' · ') : '';
+    $('bs-foe-tags').textContent = '';
+    // 标签与姿态做成图标徽章：纯文字要读，图标一眼就认出。
+    // 图标全部来自已内联的 icons.js，不引入任何新素材。
+    bsBadges('bs-foe-badges', foe);
+    bsBadges('bs-hero-badges', null);
     // 精灵用 paintXxx + toCanvas(N) **原生放大**，而不是把小图交给 CSS 拉伸。
     // toCanvas 内部把 imageSmoothingEnabled 关掉了，放大出来是干净的像素块；
     // CSS 拉伸会走双线性插值，把像素画的边缘糊成一片。
     const hArt = $('bs-hero-art');
     if (hArt.dataset.key !== game.cls.key) {
-      // 'up' = 背朝镜头（宝可梦惯例：看自己角色的背影，面向敌人）。
-      // ⚠ paintHero 只认 'down' | 'up' | 'side' —— 传别的值不报错，
-      //   会静默落到默认分支（正面）。我上一版传 'right' 就栽在这。
-      try { hArt.src = A.paintHero(game.cls, 'up', 0).toCanvas(6).toDataURL(); }
+      // 'side' = 侧面，且默认朝右 —— 我方在左、敌方在右，正好相对。
+      // ⚠ paintHero 只认 'down' | 'up' | 'side'，传别的值不报错、
+      //   静默落到默认分支（正面）。这个坑我连踩两次：
+      //   先是 'right'（以为侧面），后是 'up'（把"背朝我们"理解成背对镜头）。
+      try { hArt.src = A.paintHero(game.cls, 'side', 0).toCanvas(6).toDataURL(); }
       catch (err) { hArt.src = A.heroDataURL(game.cls, 192, 'right'); }
       hArt.dataset.key = game.cls.key;
     }
@@ -1475,6 +1523,14 @@
       }
       fArt.dataset.key = foe.arc.id;
     }
+    // 地面反光：把同一张精灵图镜像贴在脚下。
+    // 湿地/石板地有倒影，这一层几乎是"立体感"里性价比最高的一条 ——
+    // 它让精灵"站在地上"，而不是"浮在背景前面"。
+    const hSrc = hArt.src, fSrc = fArt.src;
+    const hr = $('bs-hero-refl'), fr = $('bs-foe-refl');
+    if (hr) hr.style.backgroundImage = hSrc ? ('url(' + hSrc + ')') : '';
+    if (fr) fr.style.backgroundImage = fSrc ? ('url(' + fSrc + ')') : '';
+
     const lg = $('bs-log');
     lg.innerHTML = '';
     $('bs-fx').innerHTML = '';
@@ -1515,15 +1571,64 @@
     }
   }
 
+  /**
+   * 推血条。
+   *
+   * 两层：`.fill` 掉得快（0.18s），`.ghost` 掉得慢（延迟 0.22s、0.45s 收拢）。
+   * 这样挨打时会**先掉实条、再看到红条慢慢收**，中间那截红色就是"这一下掉了多少"。
+   * 单层血条只有一个最终值 —— 玩家知道"我现在是多少"，但不知道"刚才发生了什么"。
+   */
   function bsBars(aHp, aMax, bHp, bMax) {
     const ap = Math.max(0, Math.min(100, aHp / aMax * 100));
     const bp = Math.max(0, Math.min(100, bHp / bMax * 100));
-    const ae = $('bs-hero-hp'), be = $('bs-foe-hp');
-    if (ae) ae.style.width = ap + '%';
-    if (be) be.style.width = bp + '%';
+    // 残影只降不升：回血时不该看到红条往回长
+    const setBar = function (fillId, ghostId, pct) {
+      const f = $(fillId), g = $(ghostId);
+      if (!f) return;
+      const prev = parseFloat(f.style.width) || 100;
+      f.style.width = pct + '%';
+      if (g) g.style.width = Math.max(pct, prev) + '%';
+    };
+    setBar('bs-hero-hp', 'bs-hero-ghost', ap);
+    setBar('bs-foe-hp', 'bs-foe-ghost', bp);
     const at = $('bs-hero-hptext'), bt = $('bs-foe-hptext');
     if (at) at.textContent = Math.max(0, Math.round(aHp)) + ' / ' + Math.round(aMax);
     if (bt) bt.textContent = Math.max(0, Math.round(bHp)) + ' / ' + Math.round(bMax);
+  }
+
+  /** 受击反馈：闪白 + 火花 + 微震。三样一起上才有"打到了"的手感。 */
+  function bsImpact(side, dmg, kind) {
+    const sideEl = $(side === 'hero' ? 'bs-hero-side' : 'bs-foe-side');
+    const stage = $('bs-stage');
+    if (sideEl) {
+      sideEl.classList.remove('flash');
+      void sideEl.offsetWidth;
+      sideEl.classList.add('flash');
+      setTimeout(function () { sideEl.classList.remove('flash'); }, 200);
+    }
+    if (stage) {
+      stage.classList.remove('quake');
+      void stage.offsetWidth;
+      stage.classList.add('quake');
+      setTimeout(function () { stage.classList.remove('quake'); }, 260);
+    }
+    const fx = $('bs-fx');
+    if (!fx) return;
+    const n = Math.min(14, 5 + Math.round((dmg || 0) / 8));
+    for (let i = 0; i < n; i++) {
+      const s = document.createElement('span');
+      s.className = 'bs-spark ' + (kind || 'p');
+      s.style.left = ((side === 'hero' ? 27 : 73) + (Math.random() * 10 - 5)) + '%';
+      s.style.top = (42 + Math.random() * 12) + '%';
+      const a = Math.random() * Math.PI * 2;
+      const d = 26 + Math.random() * 54;
+      s.style.setProperty('--sx', (Math.cos(a) * d).toFixed(0) + 'px');
+      s.style.setProperty('--sy', (Math.sin(a) * d).toFixed(0) + 'px');
+      fx.appendChild(s);
+      s.addEventListener('animationend', function () {
+        if (s.parentNode) s.parentNode.removeChild(s);
+      });
+    }
   }
 
   /** 出手越快越短、暴击留久一点 —— 节奏本身就是信息 */
@@ -1586,6 +1691,7 @@
     let a = toHero ? undefined : null;
     let dealt = (r.dmg || 0) + (r.counter || 0);
     bsPop(r.dmg, (r.crit ? 'crit-' : '') + (r.type || 'p'), targetSide, r.crit ? 30 : 24);
+    bsImpact(targetSide, r.dmg, r.crit ? 'crit' : (r.type || 'p'));
     if (r.counter > 0) bsPop(r.counter, 'true', targetSide, 17);
     setTimeout(function () { bsPulse(toHero ? 'bs-hero-side' : 'bs-foe-side', 'flinch', 300); }, 150);
     let na = toHero ? curA - dealt : curA;

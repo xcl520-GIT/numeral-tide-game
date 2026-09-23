@@ -827,6 +827,29 @@ html, body {
   85% { opacity: 0.35; }
   100% { transform: translate3d(26px, -580px, 0); opacity: 0; }
 }
+/* 斜射光柱：一道从左上打下来的光。作用不是"好看"，而是给画面一个
+   **光源方向** —— 没有方向的光会让所有元素看起来一样亮，
+   那正是"贴纸感"的来源。 */
+.bs-shaft {
+  position: absolute; left: -10%; top: -30%; width: 62%; height: 150%;
+  pointer-events: none; transform: rotate(14deg);
+  background: linear-gradient(90deg,
+    rgba(159,230,242,0) 0%, rgba(159,230,242,0.055) 42%,
+    rgba(159,230,242,0.10) 52%, rgba(159,230,242,0) 100%);
+  animation: bsShaft 7s ease-in-out infinite;
+}
+@keyframes bsShaft { 50% { opacity: 0.62; transform: rotate(14deg) translateX(18px); } }
+/* 前景雾带：贴底一层缓慢横移。它是"景深"的关键 ——
+   有前景遮挡，玩家才会觉得那两个精灵在背景**里面**，而不是贴在上面。 */
+.bs-fog {
+  position: absolute; left: -20%; right: -20%; bottom: 12%; height: 170px;
+  pointer-events: none; opacity: 0.5;
+  background:
+    radial-gradient(ellipse 60% 100% at 22% 100%, rgba(120,160,200,0.16), transparent 70%),
+    radial-gradient(ellipse 55% 100% at 74% 100%, rgba(120,160,200,0.13), transparent 70%);
+  animation: bsFog 16s ease-in-out infinite;
+}
+@keyframes bsFog { 50% { transform: translateX(34px); opacity: 0.34; } }
 /* 舞台铺满剩余高度，两侧各自贴一端 —— 形成对角线构图。
    原来两侧都 align-items:flex-end，结果上半屏整片空着（体检实测：
    精灵只占画面 0.9%）。 */
@@ -839,7 +862,18 @@ html, body {
 .bs-foe { justify-content: flex-start; }
 .bs-name { font-size: 14px; color: var(--text); margin-bottom: 6px; }
 .bs-foe .bs-name { color: #ffb0b5; }
+.bs-figure { position: relative; }
 .bs-side img { image-rendering: pixelated; display: block; margin: 0 auto 12px; }
+/* 地面反光：镜像 + 向下渐隐。mask 让倒影"溶进地面"而不是硬生生截断。 */
+.bs-refl {
+  position: absolute; left: 50%; transform: translateX(-50%) scaleY(-1);
+  background-repeat: no-repeat; background-position: center; background-size: contain;
+  opacity: 0.30; pointer-events: none;
+  -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,0.85), transparent 62%);
+  mask-image: linear-gradient(to top, rgba(0,0,0,0.85), transparent 62%);
+}
+.bs-hero .bs-refl { width: 192px; height: 192px; top: 100%; margin-top: -10px; }
+.bs-foe .bs-refl { width: 224px; height: 224px; top: 100%; margin-top: -10px; }
 /* 尺寸要和 JS 里 toCanvas 的倍数对上：hero 32x6=192，foe 32x7=224。
    对不上的话 CSS 会二次缩放，又把像素块糊掉一层。 */
 .bs-hero img { width: 192px; height: 192px; }
@@ -854,11 +888,60 @@ html, body {
   height: 9px; border: 1px solid rgba(120,140,180,0.32); border-radius: 5px;
   overflow: hidden; background: rgba(8,10,16,0.9);
 }
-.bs-bar i { display: block; height: 100%; width: 100%; transition: width 0.22s ease-out; }
-.bs-hero .bs-bar i { background: linear-gradient(90deg, #4fbf7a, #7ee08a); }
-.bs-foe .bs-bar i { background: linear-gradient(90deg, #c04a52, #e0525a); }
+/* 两层血条：ghost 是"刚刚掉的"，延迟收拢 —— 让玩家看见"这一下掉了多少" */
+.bs-bar { position: relative; }
+.bs-bar i { position: absolute; left: 0; top: 0; display: block; height: 100%; }
+.bs-bar .ghost { width: 100%; background: #e8806a; transition: width 0.45s ease 0.22s; }
+.bs-bar .fill { width: 100%; transition: width 0.18s ease-out; }
+.bs-hero .bs-bar .fill { background: linear-gradient(90deg, #4fbf7a, #7ee08a); }
+.bs-foe .bs-bar .fill { background: linear-gradient(90deg, #c04a52, #e0525a); }
+/* 受击闪白 / 舞台微震 */
+.bs-side.flash img { animation: bsFlash 0.18s ease-out; }
+@keyframes bsFlash { 40% { filter: brightness(2.6) saturate(0.4); } }
+.bs-stage.quake { animation: bsQuake 0.24s ease-out; }
+@keyframes bsQuake {
+  20% { transform: translate(-4px, 2px); }
+  45% { transform: translate(4px, -2px); }
+  70% { transform: translate(-2px, 1px); }
+}
+/* 火花：从受击点向外溅开 */
+.bs-spark {
+  position: absolute; width: 3px; height: 3px; border-radius: 50%;
+  transform: translate(-50%, -50%); pointer-events: none;
+  animation: bsSpark 0.42s ease-out forwards;
+}
+@keyframes bsSpark {
+  0% { opacity: 1; transform: translate(-50%, -50%) scale(1.5); }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--sx, 0px)), calc(-50% + var(--sy, 0px))) scale(0.4); }
+}
+.bs-spark.p { background: #ffc07a; box-shadow: 0 0 6px rgba(255,176,96,0.9); }
+.bs-spark.m { background: #c9b0ff; box-shadow: 0 0 6px rgba(185,140,255,0.9); }
+.bs-spark.t { background: #dff2ff; box-shadow: 0 0 6px rgba(223,242,255,0.9); }
+.bs-spark.crit { background: #ffd86a; box-shadow: 0 0 10px rgba(255,216,106,1); }
 .bs-hptext { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 3px; }
 .bs-tags { font-size: 10px; color: #cbb994; margin-top: 4px; min-height: 14px; }
+/* 徽章：图标化标签。一眼认得出，不必读 */
+.bs-badges { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: middle; }
+.bs-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 4px;
+  background: rgba(203,185,148,0.12); border: 1px solid rgba(203,185,148,0.28);
+  color: #cbb994;
+}
+.bs-badge.stance-p { color: #ffc07a; border-color: rgba(255,160,77,0.5); background: rgba(255,160,77,0.14); }
+.bs-badge.stance-m { color: #c9b0ff; border-color: rgba(167,139,250,0.5); background: rgba(167,139,250,0.14); }
+.bs-name b { font-weight: 600; }
+/* 余烬：暖色、从火盆位置升起，和冷色尘埃区分 */
+.bs-ember span {
+  position: absolute; bottom: 16%; border-radius: 50%;
+  background: #ffb060; box-shadow: 0 0 6px rgba(255,150,60,0.85);
+  opacity: 0; animation: bsEmber linear infinite;
+}
+@keyframes bsEmber {
+  0% { transform: translate3d(0, 0, 0) scale(1); opacity: 0; }
+  18% { opacity: 0.9; }
+  100% { transform: translate3d(-18px, -300px, 0) scale(0.3); opacity: 0; }
+}
 /* 冲锋 / 受击。位移量按"两边相距多远"给，太小会看不出来，太大会出画 */
 .bs-hero.lunge-r { animation: bsLungeR 0.32s ease-out; }
 .bs-foe.lunge-l { animation: bsLungeL 0.32s ease-out; }

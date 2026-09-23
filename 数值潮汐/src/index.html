@@ -233,25 +233,41 @@
      逐轮回放 fight 事件里的 res.log —— 每次出手都有动作、受击、飘字。 -->
 <div id="battle-screen" class="hidden">
   <div class="bs-backdrop" id="bs-backdrop"></div>
+  <!-- 斜射光柱：给画面一个**光源方向**。没有它，所有东西都是均匀亮的，
+       看起来就像贴纸而不是"在洞里" -->
+  <div class="bs-shaft"></div>
   <div class="bs-glow left"></div>
   <div class="bs-glow right"></div>
   <div class="bs-ambient" id="bs-ambient"></div>
-  <div class="bs-stage">
+  <div class="bs-ambient bs-ember" id="bs-ember"></div>
+  <div class="bs-stage" id="bs-stage">
     <div class="bs-side bs-hero" id="bs-hero-side">
-      <div class="bs-name" id="bs-hero-name"></div>
-      <img id="bs-hero-art" alt="">
-      <div class="bs-bar"><i id="bs-hero-hp"></i></div>
+      <div class="bs-name"><b id="bs-hero-name"></b><span class="bs-badges" id="bs-hero-badges"></span></div>
+      <div class="bs-figure">
+        <img id="bs-hero-art" alt="">
+        <div class="bs-refl" id="bs-hero-refl"></div>
+      </div>
+      <div class="bs-bar">
+        <i class="ghost" id="bs-hero-ghost"></i><i class="fill" id="bs-hero-hp"></i>
+      </div>
       <div class="bs-hptext" id="bs-hero-hptext"></div>
+      <div class="bs-tags" id="bs-hero-tags"></div>
     </div>
     <div class="bs-side bs-foe" id="bs-foe-side">
-      <div class="bs-name" id="bs-foe-name"></div>
-      <img id="bs-foe-art" alt="">
-      <div class="bs-bar"><i id="bs-foe-hp"></i></div>
+      <div class="bs-name"><b id="bs-foe-name"></b><span class="bs-badges" id="bs-foe-badges"></span></div>
+      <div class="bs-figure">
+        <img id="bs-foe-art" alt="">
+        <div class="bs-refl" id="bs-foe-refl"></div>
+      </div>
+      <div class="bs-bar">
+        <i class="ghost" id="bs-foe-ghost"></i><i class="fill" id="bs-foe-hp"></i>
+      </div>
       <div class="bs-hptext" id="bs-foe-hptext"></div>
       <div class="bs-tags" id="bs-foe-tags"></div>
     </div>
     <div id="bs-fx"></div>
   </div>
+  <div class="bs-fog"></div>
   <div class="bs-log" id="bs-log"></div>
   <div class="bs-foot" id="bs-foot">
     <span id="bs-round"></span>
