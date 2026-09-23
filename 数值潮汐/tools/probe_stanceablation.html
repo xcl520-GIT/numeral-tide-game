@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>probe-stance-ablation</title>
+<style>body{background:#0a0e18;color:#ccd6e6;font:13px Consolas,monospace}pre{padding:12px;white-space:pre-wrap}</style>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* 四配置消融：把"战斗内姿态轮换"和"AI 逐轮重掷失误"这两件事分开。
+   背景：f=0 时两者只差 ±1.4pp（说明机制本身近乎中性），
+   但 f=0.2 时治疗组比对照组高了 10~12pp。差值必须来自别处。
+
+   配置：
+     S0    姿态不轮换、开战时选一次          （v11.3-a 对照组）
+     S1    姿态轮换、开战时选一次            （隔离"轮换"）
+     S2    姿态轮换、每轮重掷                （本提交的正式形态）
+    S1 vs S0 看出"轮换"值多少，S2 vs S1 看出"逐轮重掷"值多少。
+
+   为什么要专门量"逐轮重掷"：失误率是**每轮**掷一次还是**每场**掷一次，
+   对期望伤害是等价的（都是 20% 的轮次打错），但对**结果**不等价 ——
+   这个差别没有任何理由能被忽略，必须量出来。
+
+   HACK（临时）：给 Game 实例加字段会让隐藏类迁移、整局慢 3 倍，
+   所以消融开关走模块外的全局，而不是挂在实例上。
+*/
+var CACHE = false;      // true = 开战时选一次，之后每轮沿用
+(function () {
+  var lines = ['ABLATION'];
+  var P = TideCore.Game.prototype;
+  var oPicker = P._autoPicker;
+  P._autoPicker = function () {
+    var real = oPicker.call(this);
+    if (!real) return null;
+    if (!CACHE) return real;
+    var once = null, got = false;
+    return function (d) { if (!got) { once = real(d); got = true; } return once; };
+  };
+
+  function run(tag, stance, cache, diff) {
+    CACHE = cache;
+    var t0 = performance.now();
+    var o = TideCore.Game.simulate(300, {
+      difficulty: diff, seedBase: 1000, maxTurns: 2400,
+      aiFumble: 0.2, aiStance: stance
+    });
+    return tag + '  win=' + o.winRate + '%  turns=' + o.turns + '  kills=' + o.kills +
+      '  (' + Math.round(performance.now() - t0) + 'ms)';
+  }
+
+  try {
+    var diffs = ['standard', 'abyss'];
+    for (var i = 0; i < diffs.length; i++) {
+      var d = diffs[i];
+      lines.push('---- ' + d + '  n=300 fumble=0.2 ----');
+      lines.push(run('S0 不轮换/选一次 ', false, true, d));
+      lines.push(run('S1 轮换/选一次   ', true, true, d));
+      lines.push(run('S2 轮换/每轮重掷 ', true, false, d));
+    }
+  } catch (e) {
+    lines.push('ERR ' + (e && e.stack ? e.stack : e));
+  }
+  document.getElementById('out').textContent = 'ABLATIONDONE\n' + lines.join('\n');
+})();
+</script>
+</body>
+</html>

@@ -200,6 +200,12 @@
       // 克制奖励倍率。允许覆盖，是为了把它的影响从别的改动里单独拆出来量。
       this.counterBonus = (opts.counterBonus === undefined)
         ? D.COMBAT.counterBonus : num(opts.counterBonus);
+      // 战斗内的姿态轮换（v11.3-b）。默认开。
+      // 关掉它得到的是一个**干净对照组**：姿态不翻面时，逐轮重算与
+      // 开战前算一次结果完全相同，随机流也完全相同 ——
+      // 于是"通关率变了多少"可以百分之百归因到这一件事上，
+      // 而不是"改了 AI 策略 + 改了结算"两件事混在一起。
+      this.aiStance = (opts.aiStance === undefined) ? true : !!opts.aiStance;
 
       this.seed = (opts.seed === undefined || opts.seed === null)
         ? ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0)
@@ -233,6 +239,13 @@
       this.nextRelicAt = D.PROGRESSION.relicEvery;
       this.logs = [];
       this.events = [];
+      // 逐回合模式里"正在进行的那场对决"。
+      // **必须在这里声明**，不能等到第一场战斗再 this.liveFight = ... ——
+      // 给一个已经定型的对象新增字段会让它发生隐藏类迁移，而 Game 实例
+      // 在 playHeadless 的每一轮循环里都被访问，指向旧 map 的内联缓存
+      // 会全部失效。实测代价：整局慢 3 倍（741ms → 2149ms，n=20），
+      // 而战斗只占整局的 1.5% —— 症状出现在离改动最远的地方。
+      this.liveFight = null;
       this.devourStacks = 0;
       this.skillCd = 0;          // 魂技冷却剩余回合
       this.skillUses = 0;        // 一局里放过几次魂技（平衡分析用）
@@ -1504,13 +1517,23 @@
         stance: B.stance || null, // 姿态：只重分配防御，不改变总量
         tags: B.tags || []       // 针对词条要判定的目标标签
       };
+      // 敌人的**模型对象**。有它，姿态时钟才能在战斗里继续走。
+      //
+      // 为什么这条是必需的、而不是锦上添花：实测 83% 的对决在第 1 轮就分
+      // 胜负（普通怪 92%），但精英是 66%、首领只有 37%。也就是说
+      // "每轮选一次"对杂兵根本没多出任何决定 —— 它退化成开战前选一次。
+      // 真正需要它的，恰恰是那些能打 2~6 轮的精英与首领。
+      // 而如果姿态不翻面，那 6 轮里最优解从头到尾是同一个，
+      // 逐轮再选一遍仍然是假决策。姿态翻面才把"轮"变成有意义的时间单位。
+      // 冒烟里的伤害数学不传它（那种合成对决本来就不该有姿态轮换）。
+      const bSrc = bInfo.src || null;
       const roundLog = [];
       // 先手权：速度高者先手；平手看参数。整场只判一次 ——
       // 中途重判会让"谁先手"随回合漂移，而意图预告是按当前顺序推出来的，
       // 漂移就等于预告在说谎。
       const order = (num(a.st.spd) === num(b.st.spd) ? !!aFirst : num(a.st.spd) > num(b.st.spd))
         ? [a, b] : [b, a];
-      let round = 0, capped = false, finished = false;
+      let round = 0, capped = false, finished = false, flipped = false;
 
       function atkOf(x) { return bestAttack(x.st, x === a ? b.st : a.st, K); }
 
@@ -1655,6 +1678,8 @@
         get round() { return round; },
         get finished() { return finished; },
         get capped() { return capped; },
+        /** 刚刚这一轮敌人翻面了吗 —— 界面据此给一次强调提示。 */
+        get lastFlip() { return flipped; },
 
         /**
          * 推进**一轮**，返回这一轮新增的明细（供演出逐条播）。
@@ -1680,6 +1705,22 @@
             // 连击词条：达标就每轮两次
             if (num(src.flags.doubleAtSpd) > 0 && num(src.st.spd) >= num(src.flags.doubleAtSpd) &&
                 src.hp > 0 && dst.hp > 0) strike(src, dst, t);
+          }
+          // 一轮打完，推进敌人的姿态时钟。
+          //
+          // 为什么放在**一轮结束**而不是开始：第一轮必须用玩家在开战前
+          // （地图上 / 意图预告里）看到的那一面。差一格的话，他读到的信息
+          // 和打出来的结果就永远错开半拍 —— 而这种错位不会表现成
+          // "数值不对"，只会被感觉成"这游戏有时候算错"。
+          //
+          // 只在双方都还活着时推进：让一只刚被打死的怪再翻一次姿态，
+          // 只会往事件流里塞一条指向尸体的通知。
+          flipped = false;
+          if (bSrc && a.hp > 0 && b.hp > 0) {
+            const was = b.stance;
+            g._tickStance(bSrc);
+            b.stance = bSrc.stance;
+            flipped = (b.stance !== was);
           }
           if (a.hp <= 0 || b.hp <= 0) finished = true;
           else if (round >= C.maxRounds) { capOut(); finished = true; }
@@ -1738,13 +1779,17 @@
       B.wet = enemy.wet || 0;      // 潮湿状态要带进结算
       B.stance = enemy.stance || null;   // 姿态同理，不带上就会「看得见、打不着」
       B.tags = enemy.tags || [];            // 针对词条要在结算里读到它
-      // 没显式传就取 attackTypeFor —— 那是唯一的收口，别在别处再造一个默认值。
-      // 必须在建对决之前算出来：无头模式下它会消耗随机数，
-      // 而随机流的位置一旦挪动，"重构零影响"的逐位比对就失去了意义。
-      const resolved = (atkType === 'p' || atkType === 'm') ? atkType : this.attackTypeFor(enemy);
+      // atkType === null 是**显式**的"不必在这里预选"：逐轮模式由 picker
+      // 每一轮现选，此时预选一次不但是浪费，还会白白消耗掉一个随机数，
+      // 把对照组的随机流弄脏。undefined 才走 attackTypeFor
+      // —— 那是"开战时用哪一路"的唯一收口。
+      const resolved = (atkType === undefined) ? this.attackTypeFor(enemy)
+        : ((atkType === 'p' || atkType === 'm') ? atkType : null);
       const duel = this.newDuel(A, B, fl, null, true,
         { name: this.cls.name, isPlayer: true, atkType: resolved },
-        { name: enemy.name });
+        // src 让姿态时钟能在战斗里继续走。aiStance 关掉时**不传**，
+        // 那场战斗的姿态就固定在开战那一刻 —— 对照组要的正是这个。
+        { name: enemy.name, src: this.aiStance ? enemy : null });
       // 刻意**不**把句柄挂在 this 上。无头模拟每局要开 34 场战斗，
       // 而给 Game 实例新增一个字段会让它的隐藏类发生迁移 ——
       // playHeadless 里所有指向旧 map 的内联缓存随之全部重建。
@@ -1758,7 +1803,7 @@
      * 收尾：把对决的结果写回模型，并推出那个"战斗已发生"的事件。
      * 只在这里改 this.hp / enemy.hp —— 状态源只有一个。
      */
-    _fightSettle(L) {
+    _fightSettle(L, played) {
       if (!L) return null;
       const enemy = L.enemy;
       const res = L.duel.result();
@@ -1772,7 +1817,10 @@
         // 边界一多就一定会错，而且错得很隐蔽（血条看起来一直在动）。
         aHp0: L.hp0, bHp0: L.ehp0
       };
-      this.events.push(ev);
+      // played = 这场仗的演出已经由战斗界面逐轮做过了。
+      // 这时**不能**再推一个 fight 事件：上层（main.js 的 afterAction）
+      // 会把它当成"还有一场仗要播"，于是刚打完的战斗原地再演一遍。
+      if (!played) this.events.push(ev);
       if (res.capped) this._log('与 ' + enemy.name + '僵持不下 —— 先撑不住的一方倒下了。', 'warn');
       if (res.bHp <= 0) {
         this._killEnemy(enemy, true);
@@ -1790,11 +1838,65 @@
      * "不需要人做决定"的场景都靠它。让它们共用 _fightSettle，
      * 就不会出现"模拟里赢了、游戏里没赢"的分叉。
      */
-    fight(enemy, atkType) {
+    /**
+     * @param {function} picker 可选。逐轮选路器：每轮开打前被问一次该走哪一路。
+     *   给了它，atkType 就不再被使用，也不会为它消耗随机数。
+     */
+    fight(enemy, atkType, picker) {
       const L = this._fightBegin(enemy, atkType);
-      const fixed = L.atkType;
-      L.duel.runAuto(function () { return fixed; });
+      if (picker) {
+        L.duel.runAuto(function (d) { return picker(d); });
+      } else {
+        const fixed = L.atkType;
+        L.duel.runAuto(function () { return fixed; });
+      }
       return this._fightSettle(L);
+    }
+
+    /* ============================================================
+       逐回合对决的两个入口（v11.3-b）
+
+       它们存在的全部理由：把"选择"从开战前那一刻挪到每一轮开始之前。
+       在此之前，玩家能选的只是"用物理还是法术走进去"，
+       进去了就只剩看结算 —— 而这游戏 83% 的仗只有一轮，
+       那一次选择几乎等于没有选择。
+       ============================================================ */
+    /**
+     * 玩家选定这一路，推进**一轮**。
+     * @returns {object|null} {rounds, aHp, bHp, aMax, bMax, stance, flipped,
+     *                         round, finished}
+     *   rounds 只含**这一轮新增**的明细 —— 界面要逐条演，
+     *   把整场的日志反复交出去会让演出无限重播。
+     */
+    duelRound(playerType) {
+      const L = this.liveFight;
+      if (!L) return null;
+      const d = L.duel;
+      const from = d.log.length;
+      d.step(playerType);
+      return {
+        rounds: d.log.slice(from),
+        aHp: d.a.hp, bHp: d.b.hp,
+        aMax: d.a.maxHp, bMax: d.b.maxHp,
+        stance: d.b.stance, flipped: d.lastFlip,
+        round: d.round, finished: d.finished
+      };
+    }
+
+    /**
+     * 战斗界面的收尾：把结果写回模型，再走一次常规的回合结算。
+     *
+     * 顺序不能反 —— _afterAction 会让敌人动、让潮汐涨，那些事件必须
+     * 发生在"这场仗已经算完"之后。反过来的话，玩家会看到潮汐在他
+     * 还没打完的时候涨了，而敌人会在他还站在战斗画面里时从背后打他。
+     */
+    finishDuel() {
+      const L = this.liveFight;
+      if (!L) return null;
+      this.liveFight = null;
+      const res = this._fightSettle(L, true);
+      if (this.status === 'playing') this._afterAction();
+      return res;
     }
 
     /** 敌人主动打你：只打一下（不是整场对决）。否则一步一死，太难。 */
@@ -1848,10 +1950,52 @@
      * 完全一致，给出了一个可以逐位比对的干净对照组。
      */
     _autoAtkType(e) {
-      const best = bestAttack(this.stats(), stanceDef(e.stats, e.stance), this.K);
+      return this._autoAtkTypeLive(e.stats, e.stance);
+    }
+
+    /**
+     * 按"当前的"防御视图与姿态算一遍该走哪一路。
+     *
+     * 参数从"一只敌人"改成"一份防御数据 + 一个姿态"，是为了让**战斗中途**
+     * 也能调用它：姿态会在战斗里翻面，而翻面之后的最优解和开战前那个
+     * 很可能不是同一路。这时候如果 AI 还抱着开战时的答案，
+     * 它就是一个"看完被告知答案就不再抬头"的玩家 ——
+     * 用它的成绩去评估难度，会得出一个系统性偏低的通关率。
+     */
+    _autoAtkTypeLive(defStats, stance) {
+      const best = bestAttack(this.stats(), stanceDef(defStats, stance), this.K);
       const f = num(this.aiFumble);
       if (f > 0 && this.rng.chance(f)) return best.type === 'p' ? 'm' : 'p';
       return best.type;
+    }
+
+    /**
+     * 无头模拟的**逐轮**选路器。返回 null 表示"这一局不用逐轮选"。
+     *
+     * 关键在**什么时候重新读**：只有当题目变了（敌人姿态翻面）才重掷一次。
+     *
+     * 这不是偷懒省性能，是模型正确性。fumble 模拟的是"你有没有看准面板"。
+     * 面板一个字没变的时候让 AI 重新掷骰子，等于假设玩家每轮都会重新怀疑
+     * 自己一次 —— 那会把"每轮可以重选"这个界面改动变成一份白拿的收益。
+     * 实测过：那样做的通关率比对照组高 11.4pp（standard 51.3 → 61.7），
+     * 而真正的机制（姿态在战斗里翻面）只值 -1.0pp。
+     * 两份数字差一个数量级，混在一起就什么都归因不了。
+     *
+     * 只有在姿态不会在战斗里翻面（aiStance 关）时才返回 null ——
+     * 那种情况下逐轮重算和开战前算一次结果完全一致，
+     * 白跑一轮只会白耗随机数，把"能不能逐位比对"这件事毁掉。
+     */
+    _autoPicker() {
+      if (!this.aiStance) return null;
+      const g = this;
+      let lastStance, lastType = null;
+      return function (d) {
+        if (lastStance !== d.b.stance) {
+          lastStance = d.b.stance;
+          lastType = g._autoAtkTypeLive(d.b.st, d.b.stance);
+        }
+        return lastType;
+      };
     }
 
     _enemyPreview(e) {
@@ -2103,7 +2247,30 @@
       if (this.status !== 'playing' || this.hasPendingRelic()) return false;
       if (!this.walkable(x, y)) return false;
       const e = this.enemyAt(x, y);
-      if (e) { this.fight(e, this.attackTypeFor(e)); if (this.status === 'playing') this._afterAction(); return true; }
+      if (e) {
+        if (!this.headless) {
+          // 逐回合：这里只**开局**，每一轮选哪一路交给战斗界面。
+          //
+          // 绝不在这里调 _afterAction —— 收尾必须等对决真正打完。
+          // 提前收尾的后果是"你倒下了"的结算面板会和战斗演出同时出现，
+          // 玩家看到的是自己一边挨打一边被宣告死亡。
+          const L = this._fightBegin(e);
+          this.liveFight = L;
+          this.events.push({
+            kind: 'duel', enemy: e, target: e, duel: L.duel,
+            aHp0: L.hp0, bHp0: L.ehp0
+          });
+          return true;
+        }
+        // 无头模拟：一路按 AI 的策略打完，不需要人做决定。
+        // 开的时传 null（= 别在这里预选，省下那一个随机数）；
+        // 关的时走 attackTypeFor，和 v11.3-a 的路径**逐字相同** ——
+        // 对照组的意义就在这里，少一个随机数它就不是对照组了。
+        if (this.aiStance) this.fight(e, null, this._autoPicker());
+        else this.fight(e, this.attackTypeFor(e));
+        if (this.status === 'playing') this._afterAction();
+        return true;
+      }
 
       this.px = x; this.py = y;
       this.events.push({ kind: 'step', x: x, y: y });
@@ -2554,7 +2721,11 @@
           difficulty: opts.difficulty || 'standard',
           seed: seed,
           aiFumble: opts.aiFumble,
-          counterBonus: opts.counterBonus
+          counterBonus: opts.counterBonus,
+          // 战斗内姿态轮换的开关。**必须能被外面关掉**：
+          // 开着跑出来的通关率和关着跑出来的差多少，就是这条机制的全部代价，
+          // 而"代价"这件事只能靠对照实验回答，不能靠看代码猜。
+          aiStance: opts.aiStance
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;
@@ -2896,7 +3067,8 @@
         const e = g.ref;
         if (this.enemies.indexOf(e) < 0) { this.aiGoal = null; return false; }
         if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) === 1) {
-          this.fight(e, this._autoAtkType(e));
+          if (this.aiStance) this.fight(e, null, this._autoPicker());
+          else this.fight(e, this.attackTypeFor(e));
           if (this.status === 'playing') this._afterAction();
           this.aiGoal = null;
           return true;
@@ -2925,7 +3097,8 @@
       // 同时又走不出去，双方互相罚站到天荒地老。
       for (const e of this.enemies) {
         if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) === 1) {
-          this.fight(e, this._autoAtkType(e));
+          if (this.aiStance) this.fight(e, null, this._autoPicker());
+          else this.fight(e, this.attackTypeFor(e));
           if (this.status === 'playing') this._afterAction();
           this.aiGoal = null;
           return true;
@@ -3013,6 +3186,10 @@
     Game: Game, RNG: RNG, mulberry32: mulberry32,
     T: T, DECO: DECO, DECO_NAMES: DECO_NAMES,
     rawDamage: rawDamage, bestAttack: bestAttack, tagsOf: tagsOf, num: num,
+    // attackVia 要给界面用：战斗菜单上那两行"攻 X → 防 Y"就是它算的。
+    // 让界面自己复刻一遍公式是绝对的禁区 —— 复刻件一旦和真公式漂移，
+    // 菜单会持续给出错的入参，而玩家会先怀疑自己算错。
+    attackVia: attackVia,
     canStance: canStance, stanceDef: stanceDef, stanceFlip: stanceFlip,
     WALKABLE: WALKABLE, OPAQUE: OPAQUE
   };

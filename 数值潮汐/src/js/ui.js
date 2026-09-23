@@ -661,6 +661,20 @@
     const bSkip = $('bs-skip');
     if (bSkip) bSkip.onclick = function () { skipBattle(); };
 
+    // 指令菜单（逐回合战斗）。点击统一走 bsCmdCb 这一个收口 ——
+    // 键盘的 1 / 2 也走它。两条路各自直接调 doRound 一定会漂移，
+    // 而漂移的症状是"用鼠标点能触发克制奖励、用键盘点不能"。
+    const cmdBox = $('bs-cmd');
+    if (cmdBox) {
+      cmdBox.addEventListener('click', function (evt) {
+        const t = evt.target;
+        if (!t || !t.closest) return;
+        if (t.closest('#bs-cmd-auto')) { skipBattle(); return; }
+        const b = t.closest('[data-atk]');
+        if (b && bsCmdCb) bsCmdCb(b.dataset.atk);
+      });
+    }
+
     // 出手类型开关：点击走 TideMain 的收口，和魂技按钮同一个模式 ——
     // 界面不直接改模型，免得校验/音效在两条路径上不一致。
     const atkSw = $('atk-switch');
@@ -1307,7 +1321,7 @@
      逐回合的**指令输入**是下一步 —— 那要把 _duel 改成可中断的，
      属于模型层改动，不和表现层混在一个提交里。
      ============================================================ */
-  let bsTimer = null, bsSkip = false, bsDone = null;
+  let bsTimer = null, bsSkip = false, bsDone = null, bsCmdCb = null;
 
   function isBattleOpen() {
     const el = $('battle-screen');
@@ -1328,6 +1342,7 @@
     const fx = $('bs-fx');
     if (fx) fx.innerHTML = '';
     bsDone = null; bsSkip = false;
+    bsCmdCb = null;
   }
 
   function endBattle() {
@@ -1338,6 +1353,7 @@
     if (fx) fx.innerHTML = '';
     const d = bsDone;
     bsDone = null; bsSkip = false;
+    bsCmdCb = null;
     if (d) d();
   }
 
@@ -1605,19 +1621,19 @@
     }
   }
 
-  /** 播一次战斗。ev 就是 core 推的 fight 事件（携带 res.log 与起始血量）。 */
-  function playBattle(game, ev, done) {
-    const el = $('battle-screen');
-    if (!el) { if (done) done(); return; }
-    const rounds = (ev.rounds || []).slice();
-    const foe = ev.enemy;
+  /**
+   * 布场：名字 / 徽章 / 立绘 / 倒影 / 环境粒子。
+   *
+   * 回放（一次性演完）与指挥（逐回合等人）两条路都先用它。
+   * 为什么必须共用：两份布场代码一定会漂移，而漂移的症状是
+   * "某一种战斗少了倒影 / 名字没更新"这种根本不会有人报的 bug。
+   *
+   * @returns {{heroName:string, aMax:number, bMax:number, aHp:number, bHp:number}}
+   */
+  function bsSetup(game, foe) {
     const heroName = game.cls.name;
     const aMax = Math.max(1, Math.round(game.stats().hp));
     const bMax = Math.max(1, Math.round(foe.maxHp));
-    let aHp = (ev.aHp0 === undefined) ? game.hp : ev.aHp0;
-    let bHp = (ev.bHp0 === undefined) ? bMax : ev.bHp0;
-
-    bsSkip = false; bsDone = done || null;
     // 背景：真实瓦片拼的地下城 + 按当前区域染色
     const bd = $('bs-backdrop');
     if (bd) {
@@ -1640,13 +1656,11 @@
     // CSS 拉伸会走双线性插值，把像素画的边缘糊成一片。
     const hArt = $('bs-hero-art');
     if (hArt.dataset.key !== game.cls.key) {
-      // 'side' = 侧面，且默认朝右 —— 我方在左、敌方在右，正好相对。
-      // ⚠ paintHero 只认 'down' | 'up' | 'side'，传别的值不报错、
-      //   静默落到默认分支（正面）。这个坑我连踩两次：
-      //   先是 'right'（以为侧面），后是 'up'（把"背朝我们"理解成背对镜头）。
       // 'up' = 背对镜头。相机在主角背后，所以看到的是他的背影 ——
-      // 这正是"视角在主角这边、与对面对峙"。（上一版按"侧面"做成了 'side'，
-      // 那是侧拍视角；这句话说的是**机位**。）
+      // 这正是"视角在主角这边、与对面对峙"。
+      // ⚠ paintHero 只认 'down' | 'up' | 'side'，传别的值不报错、
+      //   静默落到默认分支（正面）。这个坑连踩两次：先是 'right'，后是以为
+      //   'side' 才是"背对镜头"。改朝向参数前先去 art.js 确认它认哪几个值。
       try { hArt.src = A.paintHero(game.cls, 'up', 0).toCanvas(8).toDataURL(); }
       catch (err) { hArt.src = A.heroDataURL(game.cls, 192, 'right'); }
       hArt.dataset.key = game.cls.key;
@@ -1663,17 +1677,44 @@
       fArt.dataset.key = foe.arc.id;
     }
     // 地面反光：把同一张精灵图镜像贴在脚下。
-    // 湿地/石板地有倒影，这一层几乎是"立体感"里性价比最高的一条 ——
-    // 它让精灵"站在地上"，而不是"浮在背景前面"。
+    // 它是"站住了"这件事里性价比最高的一条 —— 让精灵"站在地上"，
+    // 而不是"浮在背景前面"。
     const hSrc = hArt.src, fSrc = fArt.src;
     const hr = $('bs-hero-refl'), fr = $('bs-foe-refl');
     if (hr) hr.style.backgroundImage = hSrc ? ('url(' + hSrc + ')') : '';
     if (fr) fr.style.backgroundImage = fSrc ? ('url(' + fSrc + ')') : '';
-
     const lg = $('bs-log');
-    lg.innerHTML = '';
-    $('bs-fx').innerHTML = '';
-    bsBars(aHp, aMax, bHp, bMax);
+    if (lg) lg.innerHTML = '';
+    const fx = $('bs-fx');
+    if (fx) fx.innerHTML = '';
+    return {
+      heroName: heroName, aMax: aMax, bMax: bMax,
+      aHp: game.hp, bHp: Math.max(0, Math.round(foe.hp))
+    };
+  }
+
+  /**
+   * 播一次战斗。
+   *
+   * ev 有两条完全不同的来路，靠有没有 duel 区分：
+   *   带 duel   → 这是一场**还没打完**的对决，逐回合等玩家决定（指挥模式）
+   *   带 rounds → 已经算完的结算日志，一次性逐条演出来（回放模式）
+   *
+   * 回放模式仍然保留：被敌人偷袭（enemyHit）不走整场对决，
+   * 而"潮水/机关"这类没有决策的伤害也不该让玩家点按钮。
+   */
+  function playBattle(game, ev, done) {
+    const el = $('battle-screen');
+    if (!el) { if (done) done(); return; }
+    if (ev && ev.duel) return playDuel(game, ev, done);
+
+    const S = bsSetup(game, ev.enemy);
+    const rounds = (ev.rounds || []).slice();
+    let aHp = (ev.aHp0 === undefined) ? S.aHp : ev.aHp0;
+    let bHp = (ev.bHp0 === undefined) ? S.bHp : ev.bHp0;
+
+    bsSkip = false; bsDone = done || null;
+    bsBars(aHp, S.aMax, bHp, S.bMax);
     $('bs-round').textContent = '交锋 ' + rounds.length + ' 轮';
     el.classList.remove('hidden');
 
@@ -1683,8 +1724,8 @@
         if (bsSkip) {
           // 跳过时把血条推到终局 —— 血条停在中间比不播还糟
           aHp = game.hp;
-          bHp = Math.max(0, Math.round(foe.hp));
-          bsBars(aHp, aMax, bHp, bMax);
+          bHp = Math.max(0, Math.round(ev.enemy.hp));
+          bsBars(aHp, S.aMax, bHp, S.bMax);
         }
         bsTimer = setTimeout(endBattle, bsSkip ? 140 : 700);
         return;
@@ -1692,22 +1733,169 @@
       const r = rounds[i++];
       // 血量从闭包传进去，不从 DOM 文本里读回来 ——
       // 状态源只有一个，显示层永远不是状态源。
-      stepRound(r, heroName, aHp, bHp, function (nextA, nextB) {
+      stepRound(r, S.heroName, aHp, bHp, function (nextA, nextB) {
         aHp = nextA; bHp = nextB;
-      }, aMax, bMax);
+      }, S.aMax, S.bMax);
       bsTimer = setTimeout(tick, bsDelay(r));
     };
     // 第一击**同步**打出来，不先愣半秒 —— 空场最伤"这是战斗"的感觉。
     // 附带好处：定时器驱动的画面截出来是不确定的，同步的这一击是确定的。
     if (rounds.length) {
       const r0 = rounds[i++];
-      stepRound(r0, heroName, aHp, bHp, function (nextA, nextB) {
+      stepRound(r0, S.heroName, aHp, bHp, function (nextA, nextB) {
         aHp = nextA; bHp = nextB;
-      }, aMax, bMax);
+      }, S.aMax, S.bMax);
       bsTimer = setTimeout(tick, bsDelay(r0));
     } else {
       tick();
     }
+  }
+
+  /* ============================================================
+     指挥模式（v11.3-b）：逐回合
+     和"回放"的区别只有一件事 —— 每一轮**开打之前**停下来等人选一路。
+     这就是这次改动的全部：把"等"变成"规划"。
+
+     但要诚实说清楚它现在值多少：实测 83% 的对决在第 1 轮就分胜负
+     （普通怪 92%），所以对大多数战斗来说菜单只会弹一次 ——
+     那一轮的选择和"开战前选一次"是同一个决定。
+     菜单真正开始起作用是在能打 3 轮以上的精英与首领身上：
+     姿态每 3 次行动翻一面，长战斗里题目会中途改变，
+     那时"每轮重看一眼"才是真的多了一个决定。
+     ============================================================ */
+  /** 菜单当前等待的回调（收到 'p' / 'm'）。null = 没在等人。 */
+  function playDuel(game, ev, done) {
+    const el = $('battle-screen');
+    const foe = ev.enemy;
+    const S = bsSetup(game, foe);
+    let aHp = (ev.aHp0 === undefined) ? S.aHp : ev.aHp0;
+    let bHp = (ev.bHp0 === undefined) ? S.bHp : ev.bHp0;
+    bsSkip = false; bsDone = done || null; bsCmdCb = null;
+    bsBars(aHp, S.aMax, bHp, S.bMax);
+    $('bs-round').textContent = '交锋 0 轮';
+    el.classList.remove('hidden');
+    bsMenu('hide');
+
+    let busy = false;
+    const sync = function (na, nb) { aHp = na; bHp = nb; };
+
+    function playRounds(rounds, i, cb) {
+      if (bsSkip || i >= rounds.length) { cb(); return; }
+      const r = rounds[i];
+      stepRound(r, S.heroName, aHp, bHp, sync, S.aMax, S.bMax);
+      bsTimer = setTimeout(function () { playRounds(rounds, i + 1, cb); },
+        bsSkip ? 60 : bsDelay(r));
+    }
+
+    function endNow() {
+      bsCmdCb = null;
+      bsMenu('hide');
+      // 先把模型算完（finishDuel 会推进潮汐、让其他敌人动、发掉落），
+      // 再关掉战斗层。反过来的话，关场那一刻模型还没结算，
+      // 结算面板会晚一帧才出现 —— 表现为"打完黑一下"。
+      game.finishDuel();
+      bsTimer = setTimeout(endBattle, bsSkip ? 120 : 560);
+    }
+
+    /** 托管：按最优一路替玩家打完。这是**显式**的放弃选择权，不是默认行为。 */
+    function autoPick() {
+      const L = game.liveFight;
+      if (!L) return 'p';
+      const dv = C.stanceDef(L.duel.b.st, L.duel.b.stance);
+      return C.bestAttack(L.duel.a.st, dv, game.K).type;
+    }
+
+    function doRound(type) {
+      if (busy) return;
+      busy = true;
+      bsCmdCb = null;
+      bsMenu('hide');
+      const r = game.duelRound(type);
+      if (!r) { busy = false; endNow(); return; }
+      playRounds(r.rounds, 0, function () {
+        // 血条以**模型**为准。逐条累加出来的值在"克制奖励 / 反伤 / 吸血"
+        // 这些额外项上会和真实值慢慢漂开，边界一多就一定会错。
+        aHp = r.aHp; bHp = Math.max(0, r.bHp);
+        bsBars(aHp, S.aMax, bHp, S.bMax);
+        $('bs-round').textContent = '交锋 ' + r.round + ' 轮';
+        // 姿态可能刚翻面 —— 徽章必须跟着走，否则菜单下一轮读的是旧题目
+        bsBadges('bs-foe-badges', foe);
+        if (r.flipped) {
+          bsPop('姿态 → ' + (r.stance === 'p' ? '硬化物理' : '硬化法术'), 'true', 'foe', 15);
+        }
+        busy = false;
+        if (r.finished) endNow(); else askRound();
+      });
+    }
+
+    function askRound() {
+      if (bsSkip) { doRound(autoPick()); return; }
+      bsMenu('show', game);
+      bsCmdCb = doRound;
+    }
+
+    askRound();
+  }
+
+  /**
+   * 指令菜单。**只出入参，不出结论。**
+   *
+   * 物理那一行给的是「我方物攻 / 物穿 → 对方**姿态调整后**的物防」，
+   * 法术那一行同理。玩家自己比这两个数。
+   * 一旦菜单直接标出"建议用法术"，它就又变成了 bestAttack 的一层皮，
+   * 整套"让玩家自己算"的设计当场塌掉 —— 而那正是 v11.2-e 花一个提交拆掉的东西。
+   *
+   * 为什么显示的是**姿态调整后**的防御、而不是原始防御：
+   * 玩家心里那份算式用的是原始防御。两者对不上时他会先怀疑游戏算错了，
+   * 而不是怀疑自己看漏了姿态徽章。菜单和结算必须给同一份防御。
+   */
+  function bsMenu(state, game) {
+    const cmd = $('bs-cmd');
+    if (!cmd) return;
+    if (state === 'hide' || !game) { cmd.classList.add('hidden'); return; }
+    const L = game.liveFight;
+    if (!L) { cmd.classList.add('hidden'); return; }
+    const me = L.duel.a;
+    const dv = C.stanceDef(L.duel.b.st, L.duel.b.stance);
+    const r1 = function (v) { return Math.round(v * 10) / 10; };
+    const ep = $('bs-cmd-p'), em = $('bs-cmd-m');
+    if (ep) {
+      ep.textContent = '攻 ' + Math.round(C.num(me.st.atkP)) +
+        ' / 穿 ' + Math.round(C.num(me.st.penP)) + ' → 防 ' + r1(C.num(dv.defP));
+    }
+    if (em) {
+      em.textContent = '攻 ' + Math.round(C.num(me.st.atkM)) +
+        ' / 穿 ' + Math.round(C.num(me.st.penM)) + ' → 防 ' + r1(C.num(dv.defM));
+    }
+    // 高亮沿用 HUD 的出手类型：在 HUD 上养成的习惯不该被菜单忘掉。
+    // 于是"不想每场都点一次"的玩家可以在 HUD 上设好，然后一路敲空格。
+    const pre = (game.atkType === 'm') ? 'm' : 'p';
+    const btns = cmd.querySelectorAll('[data-atk]');
+    for (let i = 0; i < btns.length; i++) {
+      if (btns[i].dataset.atk === pre) btns[i].classList.add('on');
+      else btns[i].classList.remove('on');
+    }
+    cmd.classList.remove('hidden');
+  }
+
+  /**
+   * 战斗场景开着时的键盘入口。
+   * 返回 true = 这个键被消费掉了，外层的通用键位表**不能再看到它**。
+   *
+   * 必须显式返回：漏掉的后果是空格同时被"用物理打"和"原地等一回合"吃掉，
+   * 而第二种吃法的表现是"在战斗里按空格，回合数偷偷涨了一格、敌人动了"。
+   */
+  function battleKey(ev) {
+    if (!bsCmdCb) return false;
+    const k = ev.key;
+    if (k === '1') { bsCmdCb('p'); return true; }
+    if (k === '2') { bsCmdCb('m'); return true; }
+    if (k === ' ' || k === 'Enter') {
+      const g = global.TideMain ? global.TideMain.game : null;
+      bsCmdCb(g && g.atkType === 'm' ? 'm' : 'p');
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -2267,6 +2455,9 @@
     isBattleOpen: isBattleOpen,
     skipBattle: skipBattle,
     closeBattle: closeBattle,
+    // 战斗场景开着时的键盘入口。main.js 必须先问它，再决定要不要吞掉这个键 ——
+    // 顺序反了的话，空格会同时被"用物理打"和"原地等一回合"吃掉。
+    battleKey: battleKey,
     showTitle: showTitle,
     showGame: showGame,
     showOver: showOver,

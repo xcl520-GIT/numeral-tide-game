@@ -240,6 +240,48 @@
         }
         // relic 不用额外动作：refresh() 里看到 pendingRelic 就会自己弹出来
 
+        /* duel：逐回合战斗的**指挥界面**（v11.3-b）。
+           必须走真实按键进入 —— 战斗层是 main.js 的 afterAction 打开的，
+           绕开输入层直接调模型（像上面 battle 那样调 g.fight），
+           截到的是一个永远不会出现的画面。 */
+        if (shot === 'duel') {
+          if (!g.enemies.length) {
+            var mkD = g._makeEnemy(g.px, g.py, g.depth);
+            mkD.x = g.px + 2;
+            g.enemies.push(mkD);
+            g.visible[mkD.y * g.W + mkD.x] = 1;
+          }
+          var foeD = null;
+          for (var bi3 = 0; bi3 < g.enemies.length; bi3++) {
+            if (g.isVisible(g.enemies[bi3].x, g.enemies[bi3].y)) { foeD = g.enemies[bi3]; break; }
+          }
+          if (!foeD) foeD = g.enemies[0];
+          if (foeD) {
+            var dirsD = [['ArrowRight', 1, 0], ['ArrowLeft', -1, 0],
+                         ['ArrowDown', 0, 1], ['ArrowUp', 0, -1]];
+            var pickD = null;
+            for (var di3 = 0; di3 < 4; di3++) {
+              var nxD = g.px + dirsD[di3][1], nyD = g.py + dirsD[di3][2];
+              if (g.walkable(nxD, nyD) && !g.enemyAt(nxD, nyD)) {
+                pickD = { k: dirsD[di3][0], x: nxD, y: nyD };
+                break;
+              }
+            }
+            if (!pickD) say('!! 玩家四周没有空位可以摆敌人');
+            else {
+              foeD.x = pickD.x; foeD.y = pickD.y;
+              try {
+                w.dispatchEvent(new w.KeyboardEvent('keydown', { key: pickD.k, bubbles: true }));
+                w.dispatchEvent(new w.KeyboardEvent('keyup', { key: pickD.k, bubbles: true }));
+              } catch (eD) {
+                say('!! 进入战斗失败: ' + (eD && eD.message ? eD.message : eD));
+              }
+              say('duel: 敌人=' + foeD.name + ' · 我方出手类型=' + (g.atkType || '?') +
+                  ' · 模型回合=' + g.turn + ' · liveFight=' + (g.liveFight ? 'Y' : 'N'));
+            }
+          } else say('!! 场上没有敌人');
+        }
+
         /* 同步画一帧。目的不是"让截图有内容"（RAF 循环本来就会画），而是让
            报告里的**绘制期观测量**（已画几个区域标签、出口导航写了什么）
            真的被算出来 —— 否则报告只能描述模型，描述不了画面。
@@ -300,7 +342,8 @@
       ['view', 'game-screen', 'sidebar', 'guide-panel',
        'inv-screen', 'inv-grid', 'relic-modal', 'relic-cards',
        'menu-screen', 'hud-top',
-       'battle-screen', 'bs-hero-side', 'bs-foe-side', 'bs-log', 'bs-foot'].forEach(function (id) {
+       'battle-screen', 'bs-hero-side', 'bs-foe-side', 'bs-log', 'bs-foot',
+       'bs-cmd', 'bs-cmd-auto'].forEach(function (id) {
         var el = w.document.getElementById(id);
         if (!el) { say('rect ' + id + ' = 不存在'); return; }
         var r = el.getBoundingClientRect();

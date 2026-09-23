@@ -296,6 +296,10 @@
         if (UI.isBoardOpen()) { UI.closeBoard(); return; }
         if (UI.isHelpOpen()) { UI.closeHelp(); return; }
         if (UI.isPauseOpen()) { UI.closePause(); return; }
+        // 战斗场景开着时不进暂停菜单。它是全屏演出，而且逐回合模式下
+        // 还在等玩家选这一轮走哪一路 —— 在它上面叠一个暂停菜单，
+        // 会把"该你出手了"这个状态整个埋掉。
+        if (UI.isBattleOpen && UI.isBattleOpen()) return;
         // 还没开局 = 在菜单或选人界面。选人界面的"上一层"就是主菜单。
         if (!state.game) { UI.showMenu(); return; }
         // !ev.repeat 是必要的：按住 Esc 时系统会持续发 keydown，
@@ -322,10 +326,12 @@
       // 漏掉一条分支的后果是"菜单开着，角色还在走"。
       if (UI.isPauseOpen()) return;
 
-      // 战斗场景开着：空格 / 回车 = 跳过回放，其余按键一律吞掉。
+      // 战斗场景开着：逐回合模式下先让战斗界面挑键（1 / 2 / 空格 = 出手），
+      // 回放模式下空格 / 回车 = 快进，其余按键一律吞掉。
       // 这个门禁必须放在"空格 = 原地等一回合"之前 ——
-      // 否则回放中途按一下空格，会顺手把回合推进掉，演的和算的就错位了。
+      // 否则战斗中途按一下空格，会顺手把回合推进掉，演的和算的就错位了。
       if (UI.isBattleOpen && UI.isBattleOpen()) {
+        if (UI.battleKey && UI.battleKey(ev)) { ev.preventDefault(); return; }
         if (ev.key === ' ' || ev.key === 'Enter') UI.skipBattle();
         return;
       }
@@ -543,15 +549,29 @@
     // 中间没有任何可以介入的时刻。
     let battleEv = null;
     for (let i = 0; i < evs.length; i++) {
-      if (evs[i].kind === 'fight' && evs[i].rounds && evs[i].rounds.length) {
+      // duel = 还没打完（逐回合，要等玩家每轮选一路）
+      // fight = 已经算完的结算日志（回放）
+      const k = evs[i].kind;
+      if (k === 'duel' || (k === 'fight' && evs[i].rounds && evs[i].rounds.length)) {
         battleEv = evs.splice(i, 1)[0];
         break;
       }
     }
     runEvents(g, before, evs);
     if (battleEv) {
-      // 场景播完再收尾 —— 那时可能已经死了或者通关了
-      UI.playBattle(g, battleEv, function () { finishAction(g, before); });
+      // 场景演完再收尾 —— 那时可能已经死了或者通关了
+      UI.playBattle(g, battleEv, function () {
+        if (battleEv.duel) {
+          // 逐回合模式下，这场仗是在战斗界面里被**打完**的：
+          // 收尾产生的事件（击杀 / 掉落 / 金币 / 潮汐 / 其他敌人行动）
+          // 到这一刻才存在，所以必须在这里再排一次。
+          // 少了这一段，打完一场仗的掉落会静默留在队列里，
+          // 直到玩家做下一个动作才和其他东西一起冒出来 ——
+          // 那种延迟出现是没法归因的，看起来就像"掉落丢了"。
+          runEvents(g, before, g.drainEvents());
+        }
+        finishAction(g, before);
+      });
     } else {
       finishAction(g, before);
     }

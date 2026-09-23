@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>probe-fightlen</title>
+<style>body{background:#0a0e18;color:#ccd6e6;font:13px Consolas,monospace}pre{padding:12px;white-space:pre-wrap}</style>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* 一场对决到底打几轮？
+   为什么必须先量这个再决定做什么：
+   如果绝大多数战斗在第 1 轮就分胜负，那"逐回合指令菜单"就只会弹一次 ——
+   它退化成开战前选一次类型，玩家并没有多做一个决定。
+   那种情况下正确的做法不是把菜单做得更漂亮，而是先让战斗长到
+   足以让"轮"这个概念成立。 */
+(function () {
+  var lines = ['FIGHTLEN'];
+  var P = TideCore.Game.prototype;
+  var hist = {}, kind = {}, nFight = 0, nRounds = 0;
+  try {
+    var o = P.fight;
+    P.fight = function (e) {
+      var r = o.apply(this, arguments);
+      var rounds = (r && r.rounds && r.rounds.length) ? (r.rounds[r.rounds.length - 1].r || 0) : 0;
+      hist[rounds] = (hist[rounds] || 0) + 1;
+      nFight++; nRounds += rounds;
+      var k = (e && e.kind) || '?';
+      if (!kind[k]) kind[k] = { n: 0, sum: 0, max: 0, one: 0 };
+      kind[k].n++; kind[k].sum += rounds; kind[k].one += (rounds <= 1 ? 1 : 0);
+      if (rounds > kind[k].max) kind[k].max = rounds;
+      return r;
+    };
+    var r = TideCore.Game.simulate(60, { difficulty: 'standard', seedBase: 1000, maxTurns: 2400 });
+    lines.push('simulate n=60 standard  win=' + r.winRate + '%');
+    lines.push('fights=' + nFight + '  total rounds=' + nRounds +
+      '  avg=' + (Math.round(nRounds / nFight * 100) / 100));
+    var ks = Object.keys(hist).map(Number).sort(function (a, b) { return a - b; });
+    var h = [];
+    for (var i = 0; i < ks.length; i++) {
+      h.push(ks[i] + '轮:' + hist[ks[i]] + '(' + Math.round(hist[ks[i]] / nFight * 100) + '%)');
+    }
+    lines.push('轮数分布  ' + h.join('  '));
+    var kk = Object.keys(kind);
+    for (var j = 0; j < kk.length; j++) {
+      var v = kind[kk[j]];
+      lines.push('  [' + kk[j] + '] n=' + v.n + '  均轮数=' + (Math.round(v.sum / v.n * 100) / 100) +
+        '  最长=' + v.max + '  一轮结束占比=' + Math.round(v.one / v.n * 100) + '%');
+    }
+  } catch (e) {
+    lines.push('ERR ' + (e && e.stack ? e.stack : e));
+  }
+  document.getElementById('out').textContent = 'FIGHTLENDONE\n' + lines.join('\n');
+})();
+</script>
+</body>
+</html>

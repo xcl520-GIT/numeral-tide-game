@@ -1005,6 +1005,53 @@ html, body {
 .bs-line em.t { color: #dff2ff; }
 .bs-line .t { color: #dff2ff; font-family: var(--mono); }
 .bs-line .hp { color: #7ee08a; font-family: var(--mono); }
+/* ============================================================
+   指令菜单（v11.3-b）
+   它是逐回合战斗里**唯一**的输入口，所以必须显眼；
+   但它不能盖住演出（立绘 / 飘字），所以贴在日志条正上方、
+   用半透明底 + 细边，而不是一块实心面板。
+   ============================================================ */
+.bs-cmd {
+  position: relative; flex: 0 0 auto;
+  display: flex; align-items: stretch; gap: 10px; padding: 10px 7% 2px;
+}
+.bs-cmd-btn {
+  flex: 1 1 0; min-width: 0; cursor: pointer;
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 9px 12px; border-radius: 8px;
+  background: rgba(16,22,34,0.92);
+  border: 1px solid rgba(120,140,180,0.34);
+  color: var(--text); font: inherit; font-size: 12px; text-align: left;
+  transition: border-color .12s ease, background .12s ease,
+              transform .12s ease, box-shadow .12s ease;
+}
+.bs-cmd-btn:hover {
+  border-color: rgba(159,230,242,0.62); background: rgba(24,34,50,0.95);
+}
+/* 选中的那一路：抬起 + 发光。
+   两个效果都不改布局（transform / box-shadow 都不占位），
+   所以来回切换时按钮不会互相推挤 —— 那会让"我指着它"这个反馈变成抖动。 */
+.bs-cmd-btn.on {
+  border-color: rgba(159,230,242,0.85);
+  background: rgba(28,44,62,0.96);
+  transform: translateY(-2px);
+  box-shadow: 0 0 0 1px rgba(159,230,242,0.32), 0 8px 18px rgba(0,0,0,0.5);
+}
+.bs-cmd-btn .k {
+  font-family: var(--mono); font-size: 11px; color: var(--gold);
+  border: 1px solid rgba(216,185,106,0.45); border-radius: 4px; padding: 0 5px;
+}
+.bs-cmd-btn .t { font-weight: 600; }
+/* 入参用等宽字体：攻 / 穿 / 防 是三个要对齐着比的数，
+   比例字体下位数一变就会左右错位，很难扫。 */
+.bs-cmd-btn .n {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  margin-left: auto; white-space: nowrap;
+}
+.bs-cmd-btn.auto { flex: 0 0 auto; opacity: 0.72; }
+.bs-cmd-btn.auto:hover { opacity: 1; }
+.bs-cmd-btn.auto .n { margin-left: 8px; }
+
 .bs-foot {
   position: relative; flex: 0 0 auto;
   display: flex; align-items: center; justify-content: space-between;

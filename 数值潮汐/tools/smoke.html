@@ -2746,6 +2746,197 @@ function run(w, d) {
       w.TideMeta.reset();
     } catch (e) { fail('操作指南测试异常: ' + (e && e.stack ? e.stack : e)); }
 
+// ---------- 38. 逐回合战斗：走进敌人 → 菜单 → 出手 → 收尾 ----------
+/* 要断言的五件事：
+     ① 走进敌人 → 战斗层打开 + 指令菜单只出入参（不给结论）
+     ② 开战瞬间**不许**动模型 —— 收尾必须等对决真正打完
+     ③ 1 / 2 / 空格 三个入口都能出手，而且用的是选中的那一路
+     ④ 对决内的姿态轮换会发生；不传 src 的合成对决不会
+     ⑤ aiStance 开关能关掉整件事（对照组必须真实存在）
+
+   两条硬要求：
+
+   一、必须用**真实按键**走进去，不能直接调 g.stepTo()。
+       战斗界面是 main.js 的 afterAction 打开的，绕开输入层直接调模型，
+       战斗层根本不会出现 —— 那样测到的只是模型，
+       测不到"玩家到底见不见得到这个界面"，而这一节的重点恰恰是界面。
+
+   二、冒烟是同步的，演出是 setTimeout 驱动的。
+       所以每验完一个键就立刻 closeBattle() 掐掉定时器，改为直接驱动模型。
+       不这么做的话，断言会取决于动画跑到第几帧 —— 也就是时好时坏。 */
+try {
+  w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: 20260922, meta: null });
+  var gB = w.TideMain.game;
+  closeAllUI();
+
+  var kd = function (key) {
+    w.dispatchEvent(new w.KeyboardEvent('keydown', { key: key, bubbles: true }));
+    w.dispatchEvent(new w.KeyboardEvent('keyup', { key: key, bubbles: true }));
+  };
+  var KEYDIR = [['ArrowRight', 1, 0], ['ArrowLeft', -1, 0], ['ArrowDown', 0, 1], ['ArrowUp', 0, -1]];
+  /* 把最近的敌人挪到玩家旁边，再按**真实的移动键**走进去。
+     返回 null 表示失败（四周没有空位 / 按了键却没进战斗）。 */
+  var enterDuel = function () {
+    if (!gB.enemies.length || gB.status !== 'playing') return 'no-enemy';
+    var pick = null;
+    for (var i = 0; i < 4; i++) {
+      var nx = gB.px + KEYDIR[i][1], ny = gB.py + KEYDIR[i][2];
+      if (gB.walkable(nx, ny) && !gB.enemyAt(nx, ny)) {
+        pick = { k: KEYDIR[i][0], x: nx, y: ny };
+        break;
+      }
+    }
+    if (!pick) return 'blocked';
+    var e = gB.enemies[0];
+    e.x = pick.x; e.y = pick.y;
+    kd(pick.k);
+    return w.TideUI.isBattleOpen() ? null : 'not-open';
+  };
+  var playerRec = function (duel, from) {
+    for (var i = from; i < duel.log.length; i++) {
+      if (duel.log[i].from === gB.cls.name) return duel.log[i];
+    }
+    return null;
+  };
+  var drainDuel = function () {
+    var guard = 0;
+    while (gB.liveFight && guard++ < 300) {
+      var rr = gB.duelRound('p');
+      if (!rr || rr.finished) break;
+    }
+    return guard;
+  };
+
+  // ---- A. 走进敌人 → 菜单 → 1 键出手 ----
+  var errA = enterDuel();
+  if (errA) fail('第一场：没能用真实按键进入战斗（' + errA + '）');
+  else if (!gB.liveFight) fail('战斗层开了，但模型里没有 liveFight');
+  else {
+    var t0 = gB.turn;
+    var cmdEl = d.getElementById('bs-cmd');
+    if (!cmdEl || cmdEl.classList.contains('hidden')) {
+      fail('战斗层开了，但指令菜单没显示 —— 逐回合模式等于没生效');
+    } else ok('走进敌人 → 战斗层打开 + 指令菜单出现');
+
+    // ① 菜单只出入参，不给结论
+    var tp = (d.getElementById('bs-cmd-p').textContent || '');
+    var tm = (d.getElementById('bs-cmd-m').textContent || '');
+    if (tp.indexOf('攻') < 0 || tp.indexOf('防') < 0 ||
+        tm.indexOf('攻') < 0 || tm.indexOf('防') < 0) {
+      fail('菜单没有给出攻 / 防入参：' + tp + ' | ' + tm);
+    } else if (/建议|推荐|最优|适合/.test(tp + tm)) {
+      fail('菜单给出了结论（应当只出入参）：' + tp + ' | ' + tm);
+    } else ok('菜单只出入参：' + tp + ' ／ ' + tm);
+
+    // ② 开战瞬间不许动模型
+    if (gB.turn !== t0) {
+      fail('开战瞬间就推进了回合（' + t0 + ' → ' + gB.turn + '）：收尾提前跑了');
+    } else ok('开战瞬间不动模型：收尾确实等到对决结束');
+
+    // ③ 1 键（真实按键） = 用物理打这一轮；出手之后菜单必须收起
+    var duelA = gB.liveFight.duel, n0 = duelA.log.length;
+    kd('1');
+    if (duelA.log.length <= n0) fail('菜单显示时按 1 没有推进任何一轮');
+    else if (!cmdEl.classList.contains('hidden')) {
+      fail('出手之后菜单没有收起（会让人以为还能再点一次）');
+    } else {
+      var recA = playerRec(duelA, n0);
+      if (!recA) fail('按 1 出手后找不到我方的结算记录');
+      else if (recA.type !== 'p') fail('按 1 用的是 ' + recA.type + '，应当是物理');
+      else ok('按 1 → 用物理打一轮，菜单收起等演出');
+    }
+    // 演出期间空格**不再**属于菜单 —— 它留给"快进 / 托管"
+    if (w.TideUI.battleKey({ key: ' ' })) {
+      fail('演出期间空格被判给了菜单（那时它应当是"快进 / 托管"）');
+    } else ok('演出期间空格不再属于菜单，留给快进 / 托管');
+
+    // ④ 掐掉定时器，改为直接驱动模型，然后收尾
+    w.TideUI.closeBattle();
+    if (w.TideUI.isBattleOpen()) fail('closeBattle() 之后战斗层还开着（会吞掉所有输入）');
+    else ok('closeBattle() 能无条件关掉战斗层（切屏 / 重开靠它）');
+    drainDuel();
+    var resA = gB.finishDuel();
+    if (!resA) fail('finishDuel() 没有返回结果');
+    else if (gB.liveFight !== null) fail('finishDuel() 之后 liveFight 没有清空');
+    else if (gB.turn !== t0 + 1) {
+      fail('对决收尾没有走常规回合结算（turn ' + t0 + ' → ' + gB.turn + '）');
+    } else ok('对决收尾：写回模型并走完一次回合结算（turn ' + t0 + ' → ' + gB.turn + '）');
+    w.TideUI.closeBattle();
+  }
+
+  // ---- B. 空格 = 用 HUD 上选好的那一路（低摩擦入口）----
+  if (gB.status !== 'playing' || !gB.enemies.length) {
+    // 上一场把人打死了 / 场上没怪了：重开一局。
+    // 直接 fail 会把"运气"写进测试结果 —— 那不叫验证。
+    w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: 20260923, meta: null });
+    gB = w.TideMain.game;
+    closeAllUI();
+  }
+  gB.atkType = 'm';                       // HUD 上先选法术
+  var errB = enterDuel();
+  if (errB) fail('第二场：没能用真实按键进入战斗（' + errB + '）');
+  else if (!gB.liveFight) fail('第二场：没有建立 liveFight');
+  else {
+    // 菜单高亮必须跟着 HUD 走 —— 否则"空格用哪一路"就没有依据
+    var onEl = d.querySelector('#bs-cmd [data-atk].on');
+    if (!onEl || onEl.getAttribute('data-atk') !== 'm') {
+      fail('菜单高亮没有跟随 HUD 的出手类型（HUD=法术）');
+    } else ok('菜单高亮跟随 HUD 的出手类型（HUD=法术 → 高亮法术）');
+    var duelB = gB.liveFight.duel, n1 = duelB.log.length;
+    kd(' ');
+    if (duelB.log.length <= n1) fail('菜单显示时按空格没有推进任何一轮');
+    else {
+      var recB = playerRec(duelB, n1);
+      if (!recB) fail('按空格出手后找不到我方的结算记录');
+      else if (recB.type !== 'm') fail('空格用的是 ' + recB.type + '，应当是 HUD 上选的法术');
+      else ok('空格 = 用 HUD 上选好的那一路出手（实际打出法术）');
+    }
+    w.TideUI.closeBattle();
+    drainDuel();
+    gB.finishDuel();
+    w.TideUI.closeBattle();
+  }
+
+  // ---- C. 对决内的姿态轮换 ----
+  // 用假想敌直接驱动 newDuel：不依赖地图上恰好有一只能带姿态的怪，
+  // 也不依赖真实战斗长度（那两件事都会让断言时好时坏）。
+  var stDummy = { hp: 400, maxHp: 400, atkP: 5, atkM: 5, penP: 0, penM: 0,
+                  defP: 40, defM: 40, spd: 5, crit: 0, dodge: 0, leech: 0 };
+  var dummyFoe = function () {
+    return { name: '假想敌', stance: 'p', stanceT: 1,
+      stats: { hp: 400, atkP: 20, atkM: 20, penP: 0, penM: 0, defP: 20, defM: 20,
+               spd: 5, crit: 0, dodge: 0, leech: 0 } };
+  };
+  var fk = dummyFoe();
+  var dd = gB.newDuel(stDummy, fk.stats, {}, {}, true,
+    { name: '我', isPlayer: true, atkType: 'p' }, { name: fk.name, src: fk });
+  var flips = 0, sd = 0;
+  while (sd < 6 && !dd.finished) { dd.step('p'); sd++; if (dd.lastFlip) flips += 1; }
+  if (sd !== 6) fail('6 轮之内对决就结束了（假想敌的参数不该致死）: ' + sd);
+  else if (flips !== 2) fail('6 轮里姿态该翻 2 次（every=3），实际 ' + flips);
+  else ok('对决内姿态轮换：6 轮翻 ' + flips + ' 次 —— 题目确实会在战斗中改变');
+
+  // ---- D. 不传 src 的合成对决**不许**轮换（伤害数学靠这条保持纯净）----
+  var fk2 = dummyFoe();
+  var dd2 = gB.newDuel(stDummy, fk2.stats, {}, {}, true,
+    { name: '我', isPlayer: true, atkType: 'p' }, { name: fk2.name });
+  var flips2 = 0, sd2 = 0;
+  while (sd2 < 6 && !dd2.finished) { dd2.step('p'); sd2++; if (dd2.lastFlip) flips2 += 1; }
+  if (flips2 !== 0) fail('没有传 src 的合成对决不该轮换姿态，实际翻了 ' + flips2 + ' 次');
+  else ok('合成对决（不传 src）不做姿态轮换 —— 伤害数学保持纯净');
+
+  // ---- E. 开关能关掉整件事（对照组的存在性也要验）----
+  var gOff = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard',
+    seed: 20260922, aiStance: false });
+  if (gOff.aiStance !== false) fail('aiStance:false 没有传进模型（对照组就不存在了）');
+  else if (gOff._autoPicker() !== null) {
+    fail('aiStance 关掉时 _autoPicker 应当返回 null（否则会白耗随机数，逐位比对失效）');
+  } else ok('aiStance 开关：关掉时 AI 不做逐轮选路，随机流与改造前一致');
+
+  w.TideUI.closeBattle();
+  w.TideMeta.reset();
+} catch (e) { fail('逐回合战斗测试异常: ' + (e && e.stack ? e.stack : e)); }
+
   } catch (e) {
     fail('测试脚本异常: ' + (e && e.stack ? e.stack : e));
   }
