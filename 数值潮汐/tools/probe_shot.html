@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>数值潮汐 · 截图取证 probe_shot</title>
+<style>
+  /* 页面必须只有 iframe 一块，且严丝合缝 —— 否则截图里会多出白边，
+     或者 iframe 拿到一个比预期小一圈的视口，布局跟 exe 对不上。 */
+  html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+  iframe { border: 0; display: block; }
+  #out { position: fixed; left: -20000px; top: 0; }
+</style>
+</head>
+<body>
+<!--
+  probe_shot.html —— 给 README / 文档截图的取证页
+
+  【为什么不直接 --screenshot 游戏页面】
+  无头 Edge 的 --screenshot 在**页面 load 之后**就拍，而游戏自己的 ?auto=
+  调试入口是 setTimeout(...,60) 之后才开局的 —— 拍到的可能是标题页，
+  什么时候拍还不由我们决定。
+
+  做法：把游戏装进 iframe，在 iframe 的 load 回调里**同步**把游戏推到目标
+  状态。父页面的 load 事件本来就要等所有子框架加载完，所以状态一定在截图
+  之前就位 —— 没有竞态、不需要 sleep、不需要虚拟时间。
+
+  【为什么不传 --virtual-time-budget】
+  实测它和 --screenshot 同时出现时，Edge 进程永不退出、也不写文件；
+  和 --dump-dom 同时出现时（本页带持续动画循环），dump 文件是 0 字节且
+  被进程占着。两种情况都表现为"页面好像坏了"，其实页面好着。
+  → 截图和取报告都不传这个参数。入口脚本见 tools\shot.ps1。
+
+  【走法为什么必须"像玩家"】
+  第一版照抄 debugAuto 随机走地板格，结果背包永远 0/40 —— 它不捡东西、
+  不开宝箱、也躲不开水。README 要拿"装备构筑"当卖点，配一张空背包比没有
+  图更糟；而随机游荡还会踩水掉血，第 74 回合就把人玩死了，截出来是死亡
+  结算画面。所以这里的走法按优先级选目标，并且**用游戏自己的避水寻路**：
+    血少 → 找泉水（能回血，活得久）
+    → 找宝箱（给装备，而且守卫宝箱的怪会主动送上门来）
+    → 截秘藏时优先找敌人（击杀 6 个才给一次三选一）
+    → 都没有才随机走，把地图探开
+  寻路一律走游戏自己的 findPath，并且把"水的额外代价"从默认 5 调到 25 ——
+  避水这件事模型层本来就有，不需要我们另写一套。
+
+  【一条纪律】
+  报告只读**模型**，不读隐藏面板里的 DOM 文字。踩过一次：背包面板关着的
+  时候 #inv-bag-count 一直是初始的 0/40，报告于是说"背包是空的"，
+  而模型里其实有装备。
+
+  参数：
+    shot = title | play | bag | shop | relic | pause     （默认 play）
+    w,h  = 窗口尺寸（默认 1380x880，即 exe 的客户区）
+    walk = 自动走多少回合（默认 60）
+    bag  = 背包截图的提前收手阈值：凑到这么多件就停（默认 7）
+    cls  = 职业（默认 warlord）   diff = 难度（默认 standard）
+    seed = 种子                   page = 换一个页面（用于测分发包副本）
+-->
+<iframe id="f" scrolling="no"></iframe>
+<pre id="out"></pre>
+
+<script>
+(function () {
+  'use strict';
+
+  var q = {};
+  (location.search || '').replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return;
+    var p = kv.split('=');
+    q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+
+  var W    = parseInt(q.w || '1380', 10);
+  var H    = parseInt(q.h || '880', 10);
+  var shot = q.shot || 'play';
+  var walk = Math.max(0, parseInt(q.walk || '60', 10) || 0);
+  var bagStop = Math.max(1, parseInt(q.bag || '7', 10) || 7);
+  var clsKey = q.cls || 'warlord';
+  var diff   = q.diff || 'standard';
+  var seed   = parseInt(q.seed || '20260922', 10) >>> 0;
+  var page   = q.page || '../src/index.html';
+
+  var WATER_COST = 25;   // 默认 5；调大 = 宁可绕路也别踩水
+  // 这两个阈值决定"走到哪一步收手"。做成参数是因为调它们不需要改代码 ——
+  // 第一版把 BAIL 写死成 0.45，结果第 19 回合就收手，截出来是个空背包。
+  var HURT  = parseFloat(q.hurt || '0.75');   // 低于这个比例就去喝泉水
+  var BAIL  = parseFloat(q.bail || '0.30');   // 低于这个比例就收手，留住一条命好截图
+
+  var log = [];
+  function say(s) { log.push(s); }
+  function flush() { document.getElementById('out').textContent = log.join('\n'); }
+  function shown(w, id) {
+    var el = w.document.getElementById(id);
+    return el ? !el.classList.contains('hidden') : 'n/a';
+  }
+
+  var f = document.getElementById('f');
+  f.style.width  = W + 'px';
+  f.style.height = H + 'px';
+  f.src = page + (page.indexOf('?') >= 0 ? '&' : '?') + 'meta=0';
+
+  f.onload = function () {
+    var w = f.contentWindow;
+    say('shot=' + shot + '  请求尺寸=' + W + 'x' + H + '  seed=' + seed +
+        '  cls=' + clsKey + '  diff=' + diff);
+
+    try {
+      if (shot !== 'title') {
+        w.TideRender.init();
+
+        // start() 里才会 showGame()。resize() 必须排在它之后：
+        // 容器还是 hidden 的时候 resize 会提前返回，拿到的尺寸是 0x0。
+        w.TideMain.start({ mode: 'normal', classKey: clsKey, difficulty: diff, seed: seed });
+        var g = w.TideMain.game;
+        if (!g) throw new Error('start() 之后拿不到 game');
+
+        w.TideRender.resize();   // 此刻容器可见，读尺寸会强制回流，拿到的是真值
+
+        var T = w.TideCore.T;
+        var rng = new w.TideCore.RNG(999);
+
+        function maxHp() {
+          try { return g.stats().hp; } catch (e) { return 1; }
+        }
+        /* 离我最近的某类格子。用曼哈顿距离挑目标就够了 ——
+           真正走过去用的是游戏自己的寻路，不存在"抄近路穿墙"。 */
+        function nearest(code) {
+          var best = null, bd = 1e9;
+          for (var y = 1; y < g.H - 1; y++) {
+            for (var x = 1; x < g.W - 1; x++) {
+              if (g.tileAt(x, y) !== code) continue;
+              var d = Math.abs(x - g.px) + Math.abs(y - g.py);
+              if (d < bd) { bd = d; best = { x: x, y: y }; }
+            }
+          }
+          return best;
+        }
+        function nearestEnemy() {
+          var best = null, bd = 1e9;
+          for (var i = 0; i < g.enemies.length; i++) {
+            var e = g.enemies[i];
+            var d = Math.abs(e.x - g.px) + Math.abs(e.y - g.py);
+            if (d < bd) { bd = d; best = { x: e.x, y: e.y }; }
+          }
+          return best;
+        }
+        function pickTarget() {
+          if (shot === 'shop') return nearest(T.SHOP);
+          var mh = maxHp();
+          if (g.hp < mh * HURT) {
+            var fo = nearest(T.FOUNTAIN);
+            if (fo) return fo;
+          }
+          // 秘藏是"击杀 6 个给一次"，所以截它就得主动去找架打；
+          // 但残血时别再往怪身上撞。
+          if (shot === 'relic' && g.hp > mh * 0.7) {
+            var en = nearestEnemy();
+            if (en) return en;
+          }
+          var ch = nearest(T.CHEST);
+          if (ch) return ch;
+          return null;   // 没有目标 → 退回随机走，把地图探开
+        }
+
+        var guard = 0, stopWhy = 'walk 走完';
+        while (g.status === 'playing' && g.turn < walk && guard++ < walk * 4) {
+          if (g.pendingRelic && g.pendingRelic.length) {
+            // 截「秘藏三选一」时必须在这里停下：让它弹出来，而不是替玩家选掉
+            if (shot === 'relic') { stopWhy = '秘藏弹出'; break; }
+            g.chooseRelic(g.pendingRelic[0].id);
+            continue;
+          }
+          // 背包截图要的是"看得见的构筑"，不是"打到死"。凑够件数就收手。
+          if (shot === 'bag' && g.bag.length >= bagStop) {
+            stopWhy = '背包已凑够 ' + g.bag.length + ' 件'; break;
+          }
+          if (shot === 'shop' && g.tileAt(g.px, g.py) === T.SHOP) { stopWhy = '已站上商栈'; break; }
+          // 快没血了就收手 —— 截图要的是"活着的局面"，不是死亡结算
+          if (g.hp < maxHp() * BAIL) {
+            stopWhy = '血只剩 ' + Math.round(g.hp) + '，收手'; break;
+          }
+
+          var tgt = pickTarget();
+          if (!tgt) {
+            for (var t = 0; t < 40; t++) {
+              var rx = rng.int(1, g.W - 2), ry = rng.int(1, g.H - 2);
+              if (g.walkable(rx, ry)) { tgt = { x: rx, y: ry }; break; }
+            }
+          }
+          var path = tgt ? g.findPath(g.px, g.py, tgt.x, tgt.y, 3000, WATER_COST) : null;
+          if (!path || path.length < 2) { g.endTurn(); continue; }
+          if (!g.stepTo(path[1].x, path[1].y)) g.endTurn();
+        }
+
+        // 用游戏自己的"双击自动装备"逻辑把身上五格填起来 —— 走的是模型层的
+        // autoEquip（更强才换），不是我们另算一套强弱。对局内图也开着：
+        // 侧栏的装备面板是肉眼可见的部分，全空着不像一局真的在玩的游戏。
+        for (var i = g.bag.length - 1; i >= 0; i--) {
+          try { g.autoEquip(i); } catch (e) { /* 单件失败不影响整体 */ }
+        }
+
+        // 把这一局攒下的事件吃掉、特效清掉，否则截图里会糊着一堆飘字和粒子。
+        g.drainEvents();
+        w.TideFX.clear();
+        w.TideRender.markDirty();
+        w.TideMain.refresh();
+
+        if (shot === 'bag')   w.TideUI.openInventory('bag');
+        if (shot === 'shop')  w.TideUI.openInventory('shop');
+        if (shot === 'pause') w.TideUI.showPause();
+        // relic 不用额外动作：refresh() 里看到 pendingRelic 就会自己弹出来
+
+        /* 同步画一帧。目的不是"让截图有内容"（RAF 循环本来就会画），而是让
+           报告里的**绘制期观测量**（已画几个区域标签、出口导航写了什么）
+           真的被算出来 —— 否则报告只能描述模型，描述不了画面。
+           这几条正是"区域化地图到底有没有画在屏幕上"的证据。 */
+        try {
+          w.TideRender.markDirty();
+          w.TideRender.render(w.TideMain.game);
+        } catch (e2) {
+          say('render() 调用失败：' + (e2 && e2.message ? e2.message : e2));
+        }
+        say('停止原因=' + stopWhy + '  guard=' + guard);
+      }
+
+      /* ---------------- 观测量：截图内容可断言 ----------------
+         分工要清楚：这份报告证明「哪一屏、哪个界面开着、画了几层、什么局面」；
+         像素层面（有没有空白块、网格对齐、颜色分布）由 tools\shot_probe.py
+         事后验。谁都不假装能代替谁 —— 尤其是"好不好看"，那只能人看。 */
+      var gg = w.TideMain ? w.TideMain.game : null;
+      if (gg) {
+        var st = null;
+        try { st = gg.stats(); } catch (e3) {}
+        say('turn=' + gg.turn + '  depth=' + gg.depth + '  kills=' + gg.kills +
+            '  hp=' + Math.round(gg.hp) + '/' + (st ? st.hp : '?') +
+            '  gold=' + gg.gold + '  status=' + gg.status);
+        say('regions=' + (gg.regions ? gg.regions.length : 'n/a') +
+            '  已画区域标签=' + w.TideRender.regionLabels +
+            '  exitNav=' + w.TideRender.exitNav);
+        say('pendingRelic=' + ((gg.pendingRelic && gg.pendingRelic.length) || 0));
+        var filled = [];
+        for (var s in gg.equip) { if (gg.equip[s]) filled.push(s); }
+        say('背包=' + gg.bag.length + '/' + gg.bagCap() +
+            '  已装备槽=' + filled.length + '/5 [' + filled.join(',') + ']');
+        say('商店存货=' + (gg.shopStock ? gg.shopStock.length : 'n/a'));
+      }
+      say('invOpen=' + shown(w, 'inv-screen') +
+          '  relicModalOpen=' + shown(w, 'relic-modal') +
+          '  秘藏卡片数=' + (function () {
+            var e = w.document.getElementById('relic-cards');
+            return e ? e.children.length : 'n/a';
+          })());
+      say('view=' + JSON.stringify(w.TideRender.view) +
+          '  viewPx=' + JSON.stringify(w.TideRender.viewPx) +
+          '  zoom=' + w.TideRender.zoom);
+
+      /* 几何断言：截图就是整个视口的栅格化结果，所以「元素矩形 ⊆ 视口」
+         等价于「它一定出现在截图里」。这条专门堵这个项目栽过的坑 ——
+         v10.8 那次"卡死"的真因是按钮跑到了可视区之外，而
+         element.click() 永远成功，所以冒烟全绿也没发现。 */
+      ['view', 'game-screen', 'sidebar', 'guide-panel',
+       'inv-screen', 'inv-grid', 'relic-modal', 'relic-cards',
+       'menu-screen', 'hud-top'].forEach(function (id) {
+        var el = w.document.getElementById(id);
+        if (!el) { say('rect ' + id + ' = 不存在'); return; }
+        var r = el.getBoundingClientRect();
+        var vw = w.innerWidth, vh = w.innerHeight;
+        var vis = !el.classList.contains('hidden') && r.width > 0 && r.height > 0;
+        var inside = r.left >= -1 && r.top >= -1 &&
+                     (r.left + r.width) <= vw + 1 && (r.top + r.height) <= vh + 1;
+        say('rect ' + id +
+            ' = ' + Math.round(r.left) + ',' + Math.round(r.top) +
+            ' ' + Math.round(r.width) + 'x' + Math.round(r.height) +
+            '  可见=' + (vis ? 'Y' : 'N') +
+            '  在视口内=' + (vis ? (inside ? 'Y' : '!!越界') : '-'));
+      });
+      say('viewport=' + w.innerWidth + 'x' + w.innerHeight);
+      say('fx=' + JSON.stringify(w.TideFX.counts()));
+      say('RESULT=OK');
+    } catch (e) {
+      say('RESULT=THREW  ' + (e && e.message ? e.message : String(e)));
+      say('stack=' + (e && e.stack ? e.stack.split('\n').slice(0, 4).join(' | ') : ''));
+    }
+    flush();
+  };
+})();
+</script>
+</body>
+</html>

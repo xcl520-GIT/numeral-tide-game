@@ -21,6 +21,26 @@
 
 ---
 
+## 先看一眼
+
+上面那些话都不如直接看一眼。下面每张都是**发行版实际运行时**的截图，窗口尺寸就是
+exe 的客户区 **1380×880**；由 `tools\shot.ps1` 驱动 `tools\probe_shot.html` 把游戏
+自动跑到指定局面再截，同一条命令随时可以重来（见「开发与验证」）。
+
+**局内地牢。** 左侧那块操作指南会跟着当前界面换内容（走路 / 背包 / 选秘藏各一套）；
+小地图按区域上色，上方常驻一行出口导航。
+![局内地牢](数值潮汐/docs/screenshots/02-play.png)
+
+| 标题页 · 选职业与难度 | 背包与装备 · 五槽五档 |
+|---|---|
+| ![标题页](数值潮汐/docs/screenshots/01-title.png) | ![背包与装备](数值潮汐/docs/screenshots/03-bag.png) |
+
+| 潮汐秘藏 · 每 6 次击杀给一次三选一 | 暂停菜单 · Esc 逐层往回退 |
+|---|---|
+| ![潮汐秘藏](数值潮汐/docs/screenshots/04-relic.png) | ![暂停菜单](数值潮汐/docs/screenshots/05-pause.png) |
+
+---
+
 ## 一、三个版本的演进：从「比大小」到「属性对抗」到「潮汐地牢」
 
 **v1 · 数值吞噬。** 你有一个数字，吃掉比自己小的就变大，碰上大的就死。
@@ -564,6 +584,36 @@ $edge = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 > 测试用的 `start()` 都传了固定 seed。第一版没传，于是"画面亮度"在两次运行间
 > 从 25.3 跳到 79.2 —— 那不是回归，是开局随机到的地图不一样。
 > **不可复现的测试等于没有测试。**
+
+### 截图（可复现）
+
+开头那几张图不是手动截的 —— 手动截图会过期，而且没人记得它是哪一版截的。
+用 `tools\shot.ps1` 驱动 `tools\probe_shot.html`，把游戏**自动跑到指定局面**再拍：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\shot.ps1 -shot play  -walk 200 -diff casual -report
+powershell -ExecutionPolicy Bypass -File tools\shot.ps1 -shot bag   -walk 400 -bag 14 -report
+powershell -ExecutionPolicy Bypass -File tools\shot.ps1 -shot relic -walk 600 -report
+```
+
+`-shot` 可选 `title / play / bag / shop / relic / pause`；`-report` 会额外打印一份
+**观测量**（回合数、深度、击杀、血量、金币、区域标签画了几个、以及每个面板的矩形
+有没有超出视口）。曲线参数 `-walk / -bag / -diff / -bail / -hurt / -seed` 都可在命令行上调。
+
+三条踩过的坑已经固化在脚本里，不用再重新踩：
+
+- `--screenshot` 不带 `--window-size` 只有 754×487；而**加上 `--virtual-time-budget`
+  会永不退出也不写文件**。所以这条链路两个都不传。
+- 残留的 msedge 占着 user-data-dir 时，新进程会把 URL 转手给已有实例后**直接退出** ——
+  表现为"0 字节 / 不报错 / 看着像页面坏了"。每次都先杀干净、再等 3 秒。
+- 走法必须**像玩家**：照抄 `?auto=` 随机走地板格，背包永远是 0/40，而且会踩水掉血
+  把人玩死（截出来是死亡结算画面）。所以按优先级选目标 —— 血少找泉水、否则找宝箱、
+  截秘藏时主动找怪 —— 并且用游戏自己的 `findPath(..., waterCost=25)` 避水。
+
+> 观测量只读**模型**，不读隐藏面板里的 DOM 文字：背包关着的时候 `#inv-bag-count`
+> 一直是初始的 0/40，照它写报告就会谎报"背包是空的"。像素层面（有没有空白块、
+> 网格对齐、颜色分布）另外用 `py -3 tools\shot_probe.py <png>` 事后验。
+> 两份证据谁都不假装能代替谁 —— **尤其是"好不好看"，那只能人看。**
 
 ### 脚本加载自检（两步）
 
