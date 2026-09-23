@@ -845,13 +845,23 @@ html, body {
      主角近：靠下、靠左、大
    背景的地平线在 30% 高度处（BS_HORIZON），所以敌人的脚要落在它附近，
    主角的脚落在画面下缘 —— 两者都"踩在"那个透视地面上。 */
-.bs-stage {
-  position: relative; flex: 1; display: flex;
-  align-items: stretch; justify-content: space-between; padding: 0 7%;
+/* 舞台只负责"占满剩余高度"，两侧由**绝对定位**摆放。
+   为什么不用 flex 对齐：两侧要落在不同的深度线上（敌人贴后墙根、主角贴画面下缘），
+   而百分比 padding 是按父元素**宽度**算的（不是高度）——
+   用 padding-top 推位置，在宽屏上会推出一个远超预期的数字，把整个舞台撑爆。
+   实测：stage 宽 1187px，padding-top:53% = 629px，舞台被撑到 831px 高，
+   下面的日志条被压成 12px、底栏直接推出视口。 */
+.bs-stage { position: relative; flex: 1; min-height: 0; }
+.bs-side {
+  position: absolute; text-align: center;
+  display: flex; flex-direction: column;
 }
-.bs-side { position: relative; text-align: center; display: flex; flex-direction: column; }
-.bs-foe { width: 24%; justify-content: flex-start; padding-top: 30%; }
-.bs-hero { width: 38%; justify-content: flex-end; }
+/* 敌人的脚要落在**后墙根**上（画布 59.5% 高 -> 屏幕约 524px）。
+   站得离后墙太近或太远，房间感都会散掉 ——
+   脚不贴墙根的敌人看起来是贴在墙上，不是站在屋里。
+   这里的 top 是绝对定位的百分比，它**按含块高度**解析，这才是对的。 */
+.bs-foe { left: 56%; top: 50%; width: 26%; }
+.bs-hero { left: 6%; bottom: 1%; width: 40%; }
 .bs-name { font-size: 14px; color: var(--text); margin-bottom: 6px; }
 .bs-foe .bs-name { color: #ffb0b5; }
 .bs-figure { position: relative; display: flex; justify-content: center; }
@@ -980,8 +990,12 @@ html, body {
 .bs-dmg.true { color: #dff2ff; }
 .bs-dmg.heal { color: #7ee08a; }
 .bs-dmg.dodge { color: #9ecbff; }
+/* 固定高度的 flex 子项必须显式关掉收缩 —— 这是同一个坑的第二次：
+   flex 子项默认 flex-shrink:1，容器不够高时它们会被压扁，
+   而压扁**不报错**，只在某些窗口尺寸下悄悄少一截。
+   项目里 #sidebar > * { flex: 0 0 auto; } 就是为这个加的。 */
 .bs-log {
-  position: relative; height: 92px; overflow: hidden; padding: 6px 7%;
+  position: relative; flex: 0 0 auto; height: 92px; overflow: hidden; padding: 6px 7%;
   font-size: 11px; line-height: 1.75; color: var(--text-dim);
 }
 .bs-line b { color: var(--text); font-weight: 500; }
@@ -992,7 +1006,8 @@ html, body {
 .bs-line .t { color: #dff2ff; font-family: var(--mono); }
 .bs-line .hp { color: #7ee08a; font-family: var(--mono); }
 .bs-foot {
-  position: relative; display: flex; align-items: center; justify-content: space-between;
+  position: relative; flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: space-between;
   padding: 9px 7%; border-top: 1px solid rgba(120,140,180,0.2);
   font-size: 11px; color: var(--muted);
 }

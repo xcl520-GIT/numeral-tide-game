@@ -1370,6 +1370,23 @@
    * 瓦片仍然用**真实地图瓦片**：风格一致性靠复用同一批素材达成，
    * 手画的背景过两个版本就会和地图脱节。
    */
+  /**
+   * 拼一张战斗背景 —— 一间**封闭的屋子**。
+   *
+   * 为什么不是"地平线 + 向灭点收束的地面"：
+   * 那是洞窟/旷野的几何 —— 只有一个灭点、没有边界，读起来就是"外面"。
+   * 房间的几何是另一回事：一个**矩形后墙** + 四条从屏幕边缘收向它的棱。
+   * 眼睛判断"这是一间屋子"靠的正是那几条棱和四个角；
+   * 四块材质光拼在一起不叫房间，有了骨架才叫。
+   *
+   * 透视怎么做的（纯 2D canvas，不用 3D 库）：
+   * 每个面先 clip 到自己的四边形，再在里面铺材质。
+   * 地面用**等比数列分行**（每行到后墙根的距离是上一行的 R 倍）——
+   * 等比间距恰好对应"深度等距"在屏幕上的投影，所以是真的往远处收；
+   * 每行的格子宽又与"该行到后墙根的距离"成正比，横向一起收。
+   *
+   * 瓦片仍然用真实地图瓦片：风格一致性靠复用同一批素材达成。
+   */
   function bsBackdrop(game) {
     const rk = (game.regionTypeAt ? game.regionTypeAt(game.px, game.py) : 'normal') || 'normal';
     if (bsBg && bsBgKey === rk) return bsBg;
@@ -1380,86 +1397,145 @@
     const c = cv.getContext('2d');
     const tiles = A.tiles || {};
     const SPR = A.TILE || 32;
-    const HY = Math.round(H * 0.30);          // 地平线
+    const names = ['floor0', 'floor1', 'floor2', 'floor3'];
 
-    c.fillStyle = '#04060a';
+    /* —— 房间的几何 ——
+       全部就是这一个矩形 + 四条棱，其它都是材质。 */
+    const bx0 = Math.round(W * 0.255), bx1 = Math.round(W * 0.745);
+    const by0 = Math.round(H * 0.155), by1 = Math.round(H * 0.595);
+
+    c.fillStyle = '#03050a';
     c.fillRect(0, 0, W, H);
 
-    /* ---- ① 远墙：地平线以上 ---- */
+    const face = function (pts, draw) {
+      c.save();
+      c.beginPath();
+      c.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) c.lineTo(pts[i][0], pts[i][1]);
+      c.closePath();
+      c.clip();
+      draw();
+      c.restore();
+    };
+
+    /* ① 地面：等比数列分行的透视。收敛目标是后墙下沿 —— 地面"铺到后墙根"为止 */
+    face([[0, H], [W, H], [bx1, by1], [bx0, by1]], function () {
+      const R = 0.845, span = H - by1;
+      let near = H, d = 0;
+      while (near > by1 + 1 && d < 64) {
+        const far = by1 + (near - by1) * R;
+        const bandH = Math.max(1, near - far);
+        const halfW = W * 0.95 * ((near - by1) / span);
+        const tw = Math.max(6, bandH * 2.6);
+        const cnt = Math.max(1, Math.ceil(halfW * 2 / tw));
+        for (let k = 0; k < cnt; k++) {
+          const x = (W / 2) - halfW + k * tw;
+          const img = tiles[names[((k * 3 + d * 7) % 4 + 4) % 4]];
+          if (img) c.drawImage(img, x, far, tw + 1, bandH + 1);
+        }
+        near = far; d++;
+      }
+      const g = c.createLinearGradient(0, by1, 0, by1 + span * 0.74);
+      g.addColorStop(0, 'rgba(4,6,10,0.88)');
+      g.addColorStop(0.5, 'rgba(4,6,10,0.30)');
+      g.addColorStop(1, 'rgba(4,6,10,0)');
+      c.fillStyle = g;
+      c.fillRect(0, by1, W, span);
+    });
+
+    /* ② 洞顶：越靠后越黑。顶面不铺瓦片 —— 洞里本来就看不见顶的细节，
+       铺了反而会和地面抢注意力，而玩家的视线应该落在那两个精灵上 */
+    face([[0, 0], [W, 0], [bx1, by0], [bx0, by0]], function () {
+      const g = c.createLinearGradient(0, 0, 0, by0);
+      g.addColorStop(0, '#03050a');
+      g.addColorStop(0.70, '#080c14');
+      g.addColorStop(1, '#0e141e');
+      c.fillStyle = g;
+      c.fillRect(0, 0, W, by0);
+    });
+
+    /* ③ 左右墙 */
     const wallImg = tiles['wall15'] || tiles['wall0'];
-    if (wallImg) {
-      const ws = SPR * 4;
-      for (let y = HY - ws; y < HY; y += ws) {
-        for (let x = -ws; x < W; x += ws) {
-          c.drawImage(wallImg, x, y, ws, ws);
+    const wallFace = function (x0, x1, gx0, gx1) {
+      const ws = SPR * 3.2;
+      if (wallImg) {
+        for (let y = -ws; y < H + ws; y += ws) {
+          for (let x = Math.min(x0, x1) - ws; x < Math.max(x0, x1) + ws; x += ws) {
+            c.drawImage(wallImg, x, y, ws, ws);
+          }
         }
       }
-    }
-    // 压在墙上的一层由下而上的暗：越往上越黑，把洞顶收进黑暗里
-    const gw = c.createLinearGradient(0, 0, 0, HY);
-    gw.addColorStop(0, 'rgba(4,6,10,0.97)');
-    gw.addColorStop(0.75, 'rgba(4,6,10,0.72)');
-    gw.addColorStop(1, 'rgba(4,6,10,0.34)');
-    c.fillStyle = gw;
-    c.fillRect(0, 0, W, HY);
+      // 越靠后越暗 —— 瓦片本身不带深度信息，是这道光把它推远的
+      const g = c.createLinearGradient(gx0, 0, gx1, 0);
+      g.addColorStop(0, 'rgba(3,5,10,0.08)');
+      g.addColorStop(1, 'rgba(3,5,10,0.90)');
+      c.fillStyle = g;
+      c.fillRect(Math.min(x0, x1) - 6, -6, Math.abs(x1 - x0) + 12, H + 12);
+    };
+    face([[0, 0], [bx0, by0], [bx0, by1], [0, H]], function () {
+      wallFace(0, bx0, 0, bx0);
+    });
+    face([[W, 0], [bx1, by0], [bx1, by1], [W, H]], function () {
+      wallFace(W, bx1, W, bx1);
+    });
 
-    /* ---- ①b 远墙上的两支小火把 ----
-       上一版把火盆画在**画面中部**、放大到 224px，于是成了"左右两个红色块"。
-       现在贴到远墙上、只有 70px：作用从"两个抢眼的大物件"变成
-       "给这个房间一个光源"。余烬粒子的起点也在这里。 */
+    /* ④ 后墙 */
+    c.save();
+    c.beginPath(); c.rect(bx0, by0, bx1 - bx0, by1 - by0); c.clip();
+    {
+      const ws = SPR * 3.2;
+      if (wallImg) {
+        for (let y = by0 - ws; y < by1 + ws; y += ws) {
+          for (let x = bx0 - ws; x < bx1 + ws; x += ws) c.drawImage(wallImg, x, y, ws, ws);
+        }
+      }
+      const g = c.createLinearGradient(0, by0, 0, by1);
+      g.addColorStop(0, 'rgba(3,5,10,0.66)');
+      g.addColorStop(1, 'rgba(3,5,10,0.32)');
+      c.fillStyle = g;
+      c.fillRect(bx0, by0, bx1 - bx0, by1 - by0);
+    }
+    c.restore();
+
+    /* ⑤ 棱线 —— 房间的骨架。
+       这一步才是"屋子"与"洞窟"的分界：没有这几条线，四块材质只是碰巧
+       拼在一起；有了它们，眼睛才读得出"这是一间有四个角的房间"。 */
+    c.strokeStyle = 'rgba(2,4,8,0.82)';
+    c.lineWidth = 5;
+    c.beginPath();
+    c.moveTo(-4, -4); c.lineTo(bx0, by0);
+    c.moveTo(W + 4, -4); c.lineTo(bx1, by0);
+    c.moveTo(-4, H + 4); c.lineTo(bx0, by1);
+    c.moveTo(W + 4, H + 4); c.lineTo(bx1, by1);
+    c.moveTo(bx0, by0); c.lineTo(bx1, by0);
+    c.moveTo(bx0, by0); c.lineTo(bx0, by1);
+    c.moveTo(bx1, by0); c.lineTo(bx1, by1);
+    c.moveTo(bx0, by1); c.lineTo(bx1, by1);
+    c.stroke();
+    // 墙脚与墙头各给一条极淡的高光，免得房间只剩一个黑框
+    c.strokeStyle = 'rgba(150,205,230,0.11)';
+    c.lineWidth = 2;
+    c.beginPath();
+    c.moveTo(bx0, by1); c.lineTo(bx1, by1);
+    c.moveTo(bx0, by0); c.lineTo(bx1, by0);
+    c.stroke();
+
+    /* ⑥ 后墙上的两支火把。贴在远墙上、尺寸小 —— 它们的作用是
+       "给这个房间一个光源"，而不是"两个抢眼的物件" */
     const emberTile = tiles['prop_brazier0'];
     if (emberTile) {
-      const es = SPR * 2.2;
-      const ey = HY - es * 0.84;
-      c.drawImage(emberTile, W * 0.30 - es / 2, ey, es, es);
-      c.drawImage(emberTile, W * 0.70 - es / 2, ey, es, es);
+      const es = SPR * 1.9;
+      const ey = by0 + (by1 - by0) * 0.30;
+      c.drawImage(emberTile, bx0 + (bx1 - bx0) * 0.14 - es / 2, ey, es, es);
+      c.drawImage(emberTile, bx0 + (bx1 - bx0) * 0.86 - es / 2, ey, es, es);
     }
 
-    /* ---- ② 地面：等比数列分行的透视拉伸 ---- */    const names = ['floor0', 'floor1', 'floor2', 'floor3'];
-    const R = 0.845;                           // 每行向地平线收缩的比例
-    const span = H - HY;
-    let near = H;
-    let d = 0;
-    while (near > HY + 1 && d < 64) {
-      const far = HY + (near - HY) * R;         // 这一行的上边缘
-      const bandH = Math.max(1, near - far);
-      // 行宽与该行到地平线的距离成正比 -> 横向也收束到灭点
-      const halfW = (W * 0.62) * ((near - HY) / span);
-      const tw = Math.max(6, bandH * 2.6);      // 格子宽，同比例收缩
-      const cnt = Math.max(1, Math.ceil(halfW * 2 / tw));
-      // 只画行内的竖条带，避免整行铺满（否则远处会糊成一片）
-      for (let k = 0; k < cnt; k++) {
-        const x = (W / 2) - halfW + k * tw;
-        const img = tiles[names[((k * 3 + d * 7) % 4 + 4) % 4]];
-        if (img) c.drawImage(img, x, far, tw + 1, bandH + 1);
-      }
-      near = far;
-      d++;
-    }
-    // 远处压暗：大气透视。近处亮、远处暗，纵深才有层次
-    const gf = c.createLinearGradient(0, HY, 0, HY + span * 0.62);
-    gf.addColorStop(0, 'rgba(4,6,10,0.94)');
-    gf.addColorStop(0.45, 'rgba(4,6,10,0.38)');
-    gf.addColorStop(1, 'rgba(4,6,10,0)');
-    c.fillStyle = gf;
-    c.fillRect(0, HY, W, span * 0.62);
-
-    /* ---- ③ 地平线上的一线微光：把天与地分开 ---- */
-    const gh = c.createLinearGradient(0, HY - 26, 0, HY + 26);
-    gh.addColorStop(0, 'rgba(120,190,220,0)');
-    gh.addColorStop(0.5, 'rgba(140,205,235,0.16)');
-    gh.addColorStop(1, 'rgba(120,190,220,0)');
-    c.fillStyle = gh;
-    c.fillRect(0, HY - 26, W, 52);
-
-    /* ---- ④ 区域染色 ---- */
+    /* ⑦ 区域染色 + 暗角 */
     c.fillStyle = reg.tint;
     c.fillRect(0, 0, W, H);
-
-    /* ---- ⑤ 暗角：把视线收到中轴 ---- */
-    const gv = c.createRadialGradient(W / 2, H * 0.66, H * 0.20, W / 2, H * 0.66, H * 1.02);
+    const gv = c.createRadialGradient(W / 2, H * 0.58, H * 0.24, W / 2, H * 0.58, H * 1.06);
     gv.addColorStop(0, 'rgba(0,0,0,0)');
-    gv.addColorStop(1, 'rgba(0,0,0,0.82)');
+    gv.addColorStop(1, 'rgba(0,0,0,0.86)');
     c.fillStyle = gv;
     c.fillRect(0, 0, W, H);
 
@@ -1467,14 +1543,6 @@
     bsBgKey = rk;
     return bsBg;
   }
-
-  /**
-   * 这一场的地平线在屏幕上的位置（0~1 的纵向比例）。
-   * 精灵的"脚"必须落在地面上 —— 对不齐的话它们又会飘起来，
-   * 而这次是"飘在一个看起来有地面的房间里"，比原来更别扭。
-   * 背景是 cover 铺满的，所以地平线的屏幕位置可以从画布参数反推。
-   */
-  const BS_HORIZON = 0.30;
 
   /** 标签 / 姿态 的图标徽章。用图标而不是文字：一眼认得出的东西不该要人读。 */
   const TAG_ICON = {
@@ -1509,7 +1577,8 @@
       const s = document.createElement('span');
       // 起点对应背景里那两支远墙火把的屏幕位置（画布 30% / 70%
       // 经 cover 缩放裁切后约落在 24% / 65% 处），别让火星凭空冒出来
-      const left = (i % 2 === 0) ? (22 + Math.random() * 5) : (63 + Math.random() * 5);
+      // 起点对应后墙上那两支火把（画布 x 约 33% / 69%，经 cover 缩放后）
+      const left = (i % 2 === 0) ? (31 + Math.random() * 4) : (67 + Math.random() * 4);
       s.style.left = left.toFixed(1) + '%';
       s.style.animationDelay = (-Math.random() * 5).toFixed(1) + 's';
       s.style.animationDuration = (3.4 + Math.random() * 3).toFixed(1) + 's';
