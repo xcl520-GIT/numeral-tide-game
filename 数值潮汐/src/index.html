@@ -1,0 +1,431 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>数值潮汐 · Numeral Tide</title>
+<!-- 空 favicon：不写这一行，浏览器会去请求 /favicon.ico 并拿到 404，
+     而 404 会在 window 上抛出一个"资源加载失败"的 error 事件。
+     那种事件没有 message —— 早先的兜底把这类事件也当成"游戏崩了"，
+     于是一个 404 就变成了一张挡住整个游戏的黑屏。这里直接把它掐掉。 -->
+<link rel="icon" href="data:,">
+<!-- 资源版本号：改完 js/css 一定要往上加一位。
+     不加的后果很隐蔽 —— 页面是新版的，但 js 还是浏览器缓存里的旧版，
+     表现为"我明明修了怎么没用"，而刷新页面并不会帮你更新脚本。 -->
+<link rel="stylesheet" href="css/style.css?v=15">
+</head>
+<body>
+
+<!-- ============================================================
+     开始菜单（第 0 层）
+     游戏的第一个界面，职责只有「去哪」：开始 / 无尽 / 排行榜 / 设置 / 退出。
+     选职业与选难度往后挪一层 —— 那一步是「配置这一局」，不是「启动游戏」。
+     ============================================================ -->
+<div id="menu-screen">
+  <canvas id="menu-bg"></canvas>
+  <div class="menu-inner">
+    <header class="brand">
+      <h1>数值潮汐</h1>
+      <p class="latin">N U M E R A L &nbsp; T I D E</p>
+      <p class="tagline">潮水每 12 回合涨落一次。<br>你要在它淹掉整层之前，把路走完。</p>
+    </header>
+    <nav class="menu-list">
+      <button id="btn-menu-start" class="menu-btn primary">
+        <b>开始游戏</b><em>选职业 · 选难度 · 下潜</em>
+      </button>
+      <button id="btn-menu-endless" class="menu-btn">
+        <b>无尽模式</b><em id="menu-endless-note">未解锁 · 先通关一次</em>
+      </button>
+      <button id="btn-menu-board" class="menu-btn">
+        <b>排行榜</b><em id="menu-board-note">本机最高分</em>
+      </button>
+      <button id="btn-menu-settings" class="menu-btn">
+        <b>设置</b><em>音量 · 视角 · 存档</em>
+      </button>
+      <button id="btn-menu-quit" class="menu-btn ghost">
+        <b>退出游戏</b>
+      </button>
+    </nav>
+    <p class="menu-credit">作者：<b>此冬歌咏</b></p>
+  </div>
+</div>
+
+<!-- ============================================================
+     开始界面
+     ============================================================ -->
+<div id="title-screen">
+  <canvas id="title-bg"></canvas>
+  <div class="title-inner">
+    <header class="brand">
+      <h1>数值潮汐</h1>
+      <p class="latin">N U M E R A L &nbsp; T I D E</p>
+      <p class="tagline">潮水每 12 回合涨落一次。<br>你要在它淹掉整层之前，把路走完。</p>
+    </header>
+
+    <section class="pick-block">
+      <h2><span>01</span>选择职业</h2>
+      <div id="class-pick" class="cls-grid"></div>
+    </section>
+
+    <section class="pick-block">
+      <h2><span>02</span>选择难度</h2>
+      <div id="diff-pick" class="diff-grid"></div>
+    </section>
+
+    <div class="actions">
+      <button id="btn-start" class="btn primary">开始下潜</button>
+      <button id="btn-daily" class="btn">每日挑战</button>
+      <button id="btn-meta" class="btn" onclick="TideUI.showMeta()">潮汐结晶 <em id="meta-crystals">0</em></button>
+      <button id="btn-help" class="btn ghost">玩法说明</button>
+      <button id="btn-sound" class="btn ghost icon-btn" title="音效开关（M）">♪</button>
+    </div>
+    <p class="credit">像素美术与音效均由程序实时生成 · 图标来自 game-icons.net（CC BY 3.0）</p>
+  </div>
+</div>
+
+<!-- ============================================================
+     游戏界面
+     ============================================================ -->
+<div id="game-screen" class="hidden">
+  <div id="stage">
+    <canvas id="view"></canvas>
+    <div id="hud-top">
+      <div class="hud-item"><i>深度</i><b id="h-depth">1 / 4</b></div>
+      <div class="hud-item"><i>击杀</i><b id="h-kills">0</b></div>
+      <div class="hud-item"><i>回合</i><b id="h-turn">0</b></div>
+      <div class="hud-item"><i>潮汐</i><b id="h-tide" class="h-tide lv0">平静 0</b></div>
+      <div class="hud-item gold"><i>金币</i><b id="h-gold">0</b></div>
+      <div class="hud-btns">
+        <button id="btn-skill" class="mini skill" title="魂技（Q）">魂技</button>
+        <button id="btn-bag" class="mini" title="背包 / 商店（E）">背包</button>
+        <button id="btn-help2" class="mini" title="说明（H）">说明</button>
+        <button id="btn-restart" class="mini" title="返回标题">标题</button>
+      </div>
+    </div>
+    <!-- 区域横幅（v11-5）：进入一个新区域时的一句通报。
+         和 toast 的分工是「事件 vs 流水账」——
+         掉一件装备是流水账（挤在左下角就行），踏进危险区是事件，
+         后者值得挡住画面中央两秒。 -->
+    <div id="region-banner"></div>
+    <!-- 局内左侧「操作指南」（v11-8）——
+         内容从 data.js 的 KEYS 渲染，并跟着当前界面变一套（局内 / 背包 / 选牌）。
+         放在地图左侧而不是并进右侧栏：右侧栏回答"我现在是什么状态"，
+         指南回答"我现在能做什么" —— 混在一起时，紧张的那几秒里没人找得到该看哪边。 -->
+    <aside id="guide-panel" class="hidden">
+      <header id="guide-head">
+        <span>操作指南</span>
+        <button id="guide-toggle" title="折叠 / 展开（G）">－</button>
+      </header>
+      <div id="guide-body"></div>
+    </aside>
+    <div id="log-box"></div>
+  </div>
+
+  <aside id="sidebar">
+    <div id="hero-card">
+      <img id="hero-art" alt="">
+      <div class="hero-top">
+        <b id="hero-name">破军</b>
+        <i id="hero-title">重刃武士</i>
+        <span id="hero-lv">Lv 1</span>
+      </div>
+      <div class="hero-bar hp"><span id="hero-hp-text">0 / 0</span><i id="hero-hp-fill"></i></div>
+      <div class="hero-bar xp"><i id="hero-xp-fill"></i></div>
+      <div id="hero-pass"></div>
+      <div id="hero-buffs" class="hero-buffs"></div>
+      <div id="hero-foot"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">属性面板</div>
+      <div id="stat-panel"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">魂技 <span class="count">Q</span></div>
+      <div id="skill-panel"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">装备 <span class="count">点击打开背包</span></div>
+      <div id="equip-panel"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">背包 <span id="bag-count" class="count">0/40</span></div>
+      <div class="panel-body center">
+        <button id="btn-inv-open" class="btn ghost small" onclick="TideUI.openInventory('bag')">打开背包与商店（E）</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">潮汐秘藏</div>
+      <div id="relic-list" class="relic-list"></div>
+    </div>
+  </aside>
+</div>
+
+<!-- ============================================================
+     整屏背包 / 商店
+     ============================================================ -->
+<div id="inv-screen" class="hidden">
+  <div class="inv-box">
+    <header class="inv-head">
+      <nav class="inv-tabs">
+        <button id="inv-tab-bag" class="inv-tab on">背包</button>
+        <button id="inv-tab-shop" class="inv-tab">商店</button>
+      </nav>
+      <div id="inv-gold" class="inv-gold"></div>
+      <button id="inv-close" class="inv-x" title="关闭（E / Esc）">✕</button>
+    </header>
+
+    <section id="inv-pane-bag" class="inv-pane">
+      <div class="inv-left">
+        <div class="inv-hero">
+          <img id="inv-hero-art" alt="">
+          <div class="inv-hero-meta">
+            <b id="inv-hero-name"></b>
+            <i id="inv-hero-sub"></i>
+          </div>
+          <div class="inv-hero-hp"><span>生命</span><b id="inv-hero-hp"></b></div>
+        </div>
+        <div id="inv-equip" class="inv-equip"></div>
+        <div id="inv-sell" class="inv-sell" data-tip="sell">
+          <span id="inv-sell-hint">拖到这里出售</span>
+          <b id="inv-sell-value"></b>
+        </div>
+      </div>
+      <div class="inv-right">
+        <div class="inv-right-head">
+          <span>背包 <i id="inv-bag-count">0 / 40</i></span>
+          <button id="btn-sell-junk" class="mini">一键出售劣质品</button>
+        </div>
+        <div id="inv-grid" class="inv-grid"></div>
+        <div class="inv-hint">拖拽装备到左侧槽位穿戴 · 拖到出售区变卖 · 拖到<b>同品质</b>的另一件上融合升档 · 悬停查看与身上那件的逐项差值</div>
+      </div>
+    </section>
+
+    <section id="inv-pane-shop" class="inv-pane hidden">
+      <div id="inv-shop-note" class="inv-shop-note"></div>
+      <div id="inv-shop" class="inv-shop"></div>
+      <div class="inv-shop-foot">
+        <button id="btn-shop-refresh" class="btn ghost small"></button>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- 敌人信息 -->
+<div id="enemy-info" class="hidden"></div>
+<!-- 物品提示 -->
+<div id="tooltip" class="hidden"></div>
+<div id="toast"></div>
+
+<!-- 秘藏三选一 -->
+<div id="relic-modal" class="modal hidden">
+  <div class="modal-box narrow">
+    <h3>潮汐秘藏</h3>
+    <p class="modal-sub">三选一。秘藏不可更换，会把这一局的构筑推向某个方向。<br>
+      <b>← →</b> 选择 · <b>空格 / 回车</b> 确定（也可以直接用鼠标点）</p>
+    <div id="relic-cards" class="relic-cards"></div>
+    <button id="btn-close-relic" class="hidden"></button>
+  </div>
+</div>
+
+<!-- 结算 -->
+<div id="over-modal" class="modal hidden">
+  <div class="modal-box">
+    <h3 id="over-title">潮水退去</h3>
+    <div id="over-body"></div>
+    <div class="modal-actions">
+      <button id="btn-again" class="btn primary">再来一局</button>
+      <button id="btn-title" class="btn">返回标题</button>
+    </div>
+  </div>
+</div>
+
+<!-- 说明 -->
+<div id="help-modal" class="modal hidden">
+  <div class="modal-box wide">
+    <h3>玩法说明</h3>
+    <div class="help-cols">
+      <section>
+        <h4>战斗怎么算</h4>
+        <p>走进敌人格就会开战，整场对决一次算完。</p>
+        <pre class="formula">伤害 = 攻击 × 50 / (有效防御 + 50)
+有效防御 = max(0, 防御 − 对方穿透)</pre>
+        <p>防御的收益是递减的：50 点减半，100 点减 2/3，200 点减 80%。
+          所以堆防御能扛，但堆不出无敌。</p>
+        <p><b>物理和法术各算一遍，系统自动挑伤害高的那一路。</b>
+          你要判断的不是"怎么打"，而是"打谁、绕开谁、把属性堆到哪条线上"。</p>
+      </section>
+      <section>
+        <h4>敌人是偏科的</h4>
+        <p>石甲兽物防 26、法防 0；幽魂法防 28、物防 0。
+          用错伤害类型会打得非常慢，而每一轮你都在挨打。</p>
+        <p>鼠标移到敌人身上会直接告诉你建议用哪一路、几轮能杀掉、
+          这一场大概要掉多少血。</p>
+      </section>
+      <section>
+        <h4>移动</h4>
+        <p><b>按方向键 / WASD</b>：走一格（最基础的方式）。</p>
+        <p><b>按住不放</b>：连续走，松手即停。</p>
+        <p><b>点击远处</b>：自动寻路走过去，青色小点就是路线。长按鼠标则边走边跟踪目标。</p>
+        <p><b>空格</b>：原地等一回合。</p>
+      </section>
+      <section>
+        <h4>魂技</h4>
+        <p>每个职业有一个<b>主动技能 + 冷却</b>。按 <b>Q</b>，或点右上角的技能键释放。</p>
+        <p>技能和普攻是两种东西：普攻负责"一直有输出"，技能负责
+          <b>在正确的时机换一个局面</b> —— 被贴身时反打、隔着半个房间先手、
+          换一次额外行动、残血时硬顶三回合。</p>
+        <p>冷却<b>会写在技能键上</b>，侧栏也有一条冷却进度。
+          范围里没有目标时释放失败<b>不会消耗冷却</b>，不必怕点空。</p>
+        <p>四个技能各有招牌机制：<b>裂地斩</b>把身边的敌人掀开一格，掀不动的会被
+          <b>震晕</b>一回合；<b>潮语洪流</b>让敌人<b>潮湿</b>两回合，之后用法术打它更疼；
+          <b>疾影</b>给两次免费行动，且期间你的攻击 <b>+35%</b>；
+          <b>不退之壁</b>三回合双防 ×2.5，还会<b>反弹一半</b>受到的伤害。</p>
+        <p>「震晕」「潮湿」会画在敌人身上（头顶转圈的星 / 一层水光），
+          把鼠标移上去还能看到各剩几回合。</p>
+      </section>
+      <section>
+        <h4>潮汐</h4>
+        <p>水位按 <b>0 → 1 → 2 → 3 → 3 → 2 → 1 → 0</b> 循环。
+          涨潮时水面从水洼扩散开，通路变窄，而且<b>站在水里每回合掉血</b>；
+          退潮时水面退回原位，是绕路、开宝箱、找泉水的窗口。</p>
+        <p>所以压力不是"血条在漏"，而是"窗口在关闭"。</p>
+      </section>
+      <section>
+        <h4>背包 / 装备 / 出售</h4>
+        <p>按 <b>E</b> 打开整屏背包。把装备<b>拖到左侧槽位</b>穿戴，
+          拖到<b>出售区</b>换成金币，拖到其它格子只是整理顺序。</p>
+        <p>悬停任何一件会显示<b>和身上那件的逐项差值</b>，不用自己心算。
+          「一键出售劣质品」会卖掉所有不如当前装备的。</p>
+        <p>把一件拖到<b>另一件同品质的装备</b>上就是<b>融合</b>：两件合成一件高一档的，
+          费用按产物的身价算。松手<b>之前</b>气泡里会先写清结果和花费 ——
+          融合会消耗掉两件材料，别手滑。</p>
+      </section>
+      <section>
+        <h4>商店与金币</h4>
+        <p>每层地图上有 <b>2 处潮汐商栈</b>（金色摊位，小地图上也是金色）。
+          走到上面会自动打开商店。</p>
+        <p>金币来自击杀、宝箱和出售装备。商栈里可以买装备、买<b>潮汐圣水</b>回血，
+          也可以花金币<b>刷新货架</b>。每下一层货架会整体换新。</p>
+      </section>
+    </div>
+    <div class="modal-actions">
+      <button id="btn-help-close" class="btn primary" onclick="TideUI.closeHelp()">知道了（Esc）</button>
+    </div>
+  </div>
+</div>
+
+<!-- 潮汐结晶（局外成长）——
+     刻意做成弹窗，而不是标题页上的第三块区块。
+     标题页在 exe 的 1380×880 窗口里已经只剩这么点高度，再加一块会把
+     「开始下潜」挤出可视区（真事：v10.7 就这么翻的车，而且冒烟测不出来，
+     因为程序化 click() 不关心元素在不在屏幕里）。
+     标题页的职责只有三件：选职业、选难度、开始。 -->
+<div id="meta-modal" class="modal hidden">
+  <div class="modal-box wide">
+    <h3>潮汐结晶 <span class="muted" id="meta-modal-count">0</span></h3>
+    <p class="modal-sub">
+      每一局结束按「深度 ×12 + 击杀 ×2 + 通关加成」结算成结晶。
+      兑换的是<b>永久</b>增益，下一局开场就生效；只影响你自己的存档，不动平衡数据。
+    </p>
+    <div id="meta-grid" class="meta-grid"></div>
+    <p class="meta-hint" id="meta-hint"></p>
+    <div class="modal-actions">
+      <button id="btn-meta-close" class="btn primary" onclick="TideUI.closeMeta()">知道了（Esc）</button>
+    </div>
+  </div>
+</div>
+
+<!-- ESC 暂停菜单 ——
+     本作唯一一个"不属于游戏"的界面，职责只有一个：让玩家在**不记得快捷键**的时候
+     也能找到出口。所以里面不放假东西，只放会把玩家卡住的那几件事。
+
+     注意本作是回合制，"暂停"在这里不是冻住模拟（本来也不会自己跑），
+     而是**拔掉输入**：菜单开着时键盘和鼠标都不再驱动角色。
+     见 main.js 的两处门禁（键盘 / 长按与鼠标）。 -->
+<div id="pause-modal" class="modal hidden">
+  <div class="modal-box narrow">
+    <h3>暂停</h3>
+    <p class="modal-sub" id="pause-stats"></p>
+    <div class="pause-list">
+      <button class="btn primary" onclick="TideUI.closePause()">继续游戏<i class="kbd">Esc</i></button>
+      <button class="btn" onclick="TideUI.pauseHelp()">玩法说明<i class="kbd">H</i></button>
+      <button class="btn" id="btn-pause-sound" onclick="TideUI.pauseSound()">音效</button>
+      <button class="btn" onclick="TideUI.pauseRestart()">重新开始这一局</button>
+      <button class="btn ghost" onclick="TideUI.pauseTitle()">放弃并返回标题</button>
+    </div>
+    <p class="pause-keys">
+      方向键 / WASD 移动 · 空格 等待一回合 · Q 魂技 · E 背包与商店<br>
+      H 玩法说明 · M 静音开关 · F11 全屏 · Esc 这个菜单
+    </p>
+  </div>
+</div>
+
+<!-- 设置 ——
+     音量做成两条独立滑块（音效 / BGM），不是一条总音量：
+     两者的合理比例因人而异，合成一条之后「音乐太吵」就只剩
+     「把刀剑声一起关掉」这一个解法了。 -->
+<div id="settings-modal" class="modal hidden">
+  <div class="modal-box narrow">
+    <h3>设置</h3>
+    <div class="set-rows">
+      <label class="set-row">
+        <span class="set-label">音效音量</span>
+        <input type="range" id="set-vol-sfx" min="0" max="100" step="5" value="100">
+        <b class="set-num" id="set-vol-sfx-num">100%</b>
+      </label>
+      <label class="set-row">
+        <span class="set-label">背景音乐</span>
+        <input type="range" id="set-vol-bgm" min="0" max="100" step="5" value="100">
+        <b class="set-num" id="set-vol-bgm-num">100%</b>
+      </label>
+      <label class="set-row">
+        <span class="set-label">视角缩放</span>
+        <input type="range" id="set-zoom" min="0" max="8" step="1" value="4">
+        <b class="set-num" id="set-zoom-num">100%</b>
+      </label>
+      <div class="set-row">
+        <span class="set-label">操作指南</span>
+        <button id="set-guide-toggle" class="btn ghost small">展开</button>
+        <b class="set-num muted">局内左侧</b>
+      </div>
+    </div>
+    <p class="modal-sub" id="set-note">设置立即生效，自动保存。</p>
+    <div class="modal-actions">
+      <button id="btn-wipe" class="btn ghost small">清空全部存档</button>
+      <button class="btn primary" onclick="TideUI.closeSettings()">完成（Esc）</button>
+    </div>
+  </div>
+</div>
+
+<!-- 排行榜 —— 本机榜。
+     这是一份绿色免安装单机包，**没有服务器**，所以分数只存在你自己的存档里。
+     界面上要直说这件事，否则玩家会以为"我的分数上传了、别人能看到"。 -->
+<div id="board-modal" class="modal hidden">
+  <div class="modal-box narrow">
+    <h3>排行榜 <span class="muted" id="board-scope">本机</span></h3>
+    <p class="modal-sub">本机历史最高分。绿色免安装单机包没有服务器，分数只存在你自己的存档里。</p>
+    <div id="board-list" class="board-list"></div>
+    <div class="modal-actions">
+      <button class="btn primary" onclick="TideUI.closeBoard()">关闭（Esc）</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/data.js?v=15"></script>
+<script src="js/meta.js?v=15"></script>
+<script src="js/settings.js?v=15"></script>
+<script src="js/icons.js?v=15"></script>
+<script src="js/art.js?v=15"></script>
+<script src="js/fx.js?v=15"></script>
+<script src="js/audio.js?v=15"></script>
+<script src="js/core.js?v=15"></script>
+<script src="js/render.js?v=15"></script>
+<script src="js/ui.js?v=15"></script>
+<script src="js/main.js?v=15"></script>
+</body>
+</html>

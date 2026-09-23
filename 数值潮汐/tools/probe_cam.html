@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>相机 / 地形对齐取证</title>
+<style>
+  html,body{margin:0;background:#05070d;color:#9fe6f2;font:12px/1.5 Consolas,monospace}
+  #fr{position:absolute;left:0;top:0;width:1360px;height:820px;border:0}
+  #out{position:absolute;left:0;top:824px;width:100%;white-space:pre;z-index:9;background:#05070d}
+</style>
+</head>
+<body>
+<!-- 用 iframe 载入真实游戏（?auto 让它自己开局），然后在外面把状态摆到指定位置再读像素。
+     游戏本身一行都不用改 —— 这是"取证"，不是"测试替身"。 -->
+<iframe id="fr" src="../src/index.html?auto=warlord,standard,20260922&walk=5"></iframe>
+<pre id="out">running...</pre>
+<script>
+/* ============================================================
+   相机 / 地形对齐取证
+
+   要回答的问题：**地形层画的位置，和玩家/敌人画的位置一致吗？**
+
+   为什么必须显式查：地形层被烘焙成一张离屏画布再 blit 上屏，
+   它的偏移量写错了既不会报错、也不会崩、更不会让像素统计失败 ——
+   它只会让"地形"和"站在地形上的人"错开，而且**相机停在原点时恰好正确**，
+   于是表现得像偶发故障。
+
+   做法：
+     1) 等游戏自己开局（?auto），把玩家挪到地图正中；
+     2) 强制全图已探索（把"迷雾本来就是黑的"这个干扰项排除掉）；
+     3) **交给游戏自己的 rAF 循环**渲染若干帧让相机收敛
+        —— 相机是指数平滑的，靠外部循环渲染是驱动不动的（dt 由主循环给）；
+     4) 读回画布像素：测"视口边缘有没有本该是地形、却是空白的黑带"，
+        并打印一张 ASCII 亮度图，用 @ 标出玩家应该在的位置。
+
+   判据：相机滚到地图中央时，视口四边都必须被地形铺满 —— 黑带必须 ≈ 0。
+   ============================================================ */
+var TILE = 32;
+var out = document.getElementById('out');
+var lines = ['PROBE'];
+var BG = [0x05, 0x07, 0x0d];
+var posed = false;
+
+function log(s) { lines.push(s); flush(); }
+function flush() { out.textContent = lines.join('\n'); }
+
+function isBG(d, i) {
+  return Math.abs(d[i] - BG[0]) <= 2 && Math.abs(d[i + 1] - BG[1]) <= 2 && Math.abs(d[i + 2] - BG[2]) <= 2;
+}
+
+function report() {
+  var fw = document.getElementById('fr').contentWindow;
+  var g = fw.TideMain.game, R = fw.TideRender;
+  var cam = R.cam, view = R.view;
+  var cv = fw.document.getElementById('view');
+  var dpr = cv.width / view.w;
+
+  log('视口(逻辑) = ' + view.w + ' x ' + view.h + '   dpr = ' + dpr +
+    '   画布(物理) = ' + cv.width + ' x ' + cv.height);
+  log('玩家格 = (' + g.px + ',' + g.py + ')   相机 = (' + cam.x + ',' + cam.y + ')');
+  var psx = g.px * TILE + TILE / 2 - cam.x, psy = g.py * TILE + TILE / 2 - cam.y;
+  log('玩家此刻应该画在屏幕 = (' + psx.toFixed(1) + ',' + psy.toFixed(1) +
+    ')   视口中心 = (' + (view.w / 2) + ',' + (view.h / 2) + ')');
+
+  var ctx = cv.getContext('2d');
+  var img = ctx.getImageData(0, 0, cv.width, cv.height);
+  var D = img.data, CW = cv.width, CH = cv.height;
+
+  function colBlank(x) {
+    for (var y = 0; y < CH; y += 2) { if (!isBG(D, (y * CW + x) * 4)) return false; }
+    return true;
+  }
+  function rowBlank(y) {
+    for (var x = 0; x < CW; x += 2) { if (!isBG(D, (y * CW + x) * 4)) return false; }
+    return true;
+  }
+  var left = 0; while (left < CW && colBlank(left)) left++;
+  var right = 0; while (right < CW - left && colBlank(CW - 1 - right)) right++;
+  var top = 0; while (top < CH && rowBlank(top)) top++;
+  var bot = 0; while (bot < CH - top && rowBlank(CH - 1 - bot)) bot++;
+
+  log('');
+  log('空白（纯背景色）带宽度   物理像素 / 逻辑像素');
+  log('  左 ' + left + ' / ' + (left / dpr).toFixed(0) +
+    '      右 ' + right + ' / ' + (right / dpr).toFixed(0));
+  log('  上 ' + top + ' / ' + (top / dpr).toFixed(0) +
+    '      下 ' + bot + ' / ' + (bot / dpr).toFixed(0));
+  log('  若地形层漏掉了 -cam 偏移，预期会出现：左 ' +
+    (Math.max(0, cam.x) * dpr).toFixed(0) + ' 、上 ' + (Math.max(0, cam.y) * dpr).toFixed(0) +
+    ' 的同宽黑带');
+  log('  ⇒ 判据：四边都应为 0');
+
+  var COLS = 54, ROWS = 22, ramp = ' .:-=+*#%@';
+  log('');
+  log('ASCII 亮度图（' + COLS + 'x' + ROWS + '，@ = 玩家位置）：');
+  var pcx = Math.floor(psx / view.w * COLS), pcy = Math.floor(psy / view.h * ROWS);
+  for (var r = 0; r < ROWS; r++) {
+    var s = '  ';
+    for (var c = 0; c < COLS; c++) {
+      if (r === pcy && c === pcx) { s += '@'; continue; }
+      var x0 = Math.floor(c * CW / COLS), x1 = Math.floor((c + 1) * CW / COLS);
+      var y0 = Math.floor(r * CH / ROWS), y1 = Math.floor((r + 1) * CH / ROWS);
+      var sum = 0, n = 0;
+      for (var y = y0; y < y1; y += 2) {
+        for (var x = x0; x < x1; x += 2) {
+          var i4 = (y * CW + x) * 4;
+          sum += D[i4] * 0.299 + D[i4 + 1] * 0.587 + D[i4 + 2] * 0.114;
+          n++;
+        }
+      }
+      var v = n ? sum / n : 0;
+      s += ramp[Math.max(0, Math.min(ramp.length - 1, Math.floor(v / 26)))];
+    }
+    log(s);
+  }
+  log('');
+  log('DONE');
+  flush();
+}
+
+var phase = 0, ticks = 0;
+var t = setInterval(function () {
+  ticks++;
+  var fw = document.getElementById('fr').contentWindow;
+  if (!fw || !fw.TideMain || !fw.TideMain.game) {
+    if (ticks > 60) { log('等不到游戏开局'); log('DONE'); flush(); clearInterval(t); }
+    return;
+  }
+  var g = fw.TideMain.game;
+  if (!posed) {
+    posed = true;
+    g.px = Math.floor(g.W / 2);
+    g.py = Math.floor(g.H / 2);
+    g.explored.fill(1);
+    if (g._recomputeFOV) g._recomputeFOV();
+    fw.TideRender.markDirty();
+    log('已把玩家摆到地图中心 (' + g.px + ',' + g.py + ') 并强制全图已探索，等待相机收敛…');
+    return;                       // 让游戏自己的 rAF 循环去渲染
+  }
+  // 摆好之后再等一段时间，等相机平滑到位
+  var waited = (ticks - 1) * 250;
+  if (waited < 2000) return;
+  try { report(); } catch (e) { log('EXC: ' + (e && e.stack ? e.stack : e)); }
+  clearInterval(t);
+}, 250);
+</script>
+</body>
+</html>

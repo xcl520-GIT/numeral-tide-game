@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>开局报错取证</title>
+<style>
+  html,body{margin:0;background:#05070d;color:#9fe6f2;font:12px/1.6 Consolas,monospace}
+  #fr{position:absolute;left:0;top:0;width:1360px;height:820px;border:0;opacity:0.97}
+  #out{position:absolute;left:0;top:824px;width:100%;white-space:pre-wrap;z-index:9;background:#05070d}
+</style>
+</head>
+<body>
+<!-- 用 iframe 载入真实页面，走一遍「切换角色 → 切换难度 → 开始下潜」，
+     把过程中所有未捕获错误抓下来。
+     查询参数 ?src=<url> 可以换成发行版或 http 地址，用来复现不同运行环境。 -->
+<iframe id="fr"></iframe>
+<pre id="out">running...</pre>
+<script>
+/* ============================================================
+   开局报错取证
+
+   为什么单独做一个：
+   "一开局就报错"这类问题，错误发生在**标题页的交互**里，
+   而集成冒烟测试是自己调 API 开局的，走不到那条路径 ——
+   它在冒烟里全绿，在玩家手里一按就炸。
+   所以这里专门模拟玩家的手指：点职业卡、点难度卡、点开始。
+   ============================================================ */
+var q = {};
+location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+  if (!kv) return;
+  var p = kv.split('=');
+  q[p[0]] = decodeURIComponent(p[1] || '');
+});
+var SRC = q.src || '../src/index.html';
+
+var out = document.getElementById('out');
+var fr = document.getElementById('fr');
+var lines = ['PROBE-ERR   目标 = ' + SRC];
+var errs = [];
+function log(s) { lines.push(s); out.textContent = lines.join('\n'); }
+function flush() { out.textContent = lines.join('\n'); }
+
+function dumpErr(tag, ev) {
+  var msg = (ev && ev.message) ? ev.message : String(ev);
+  var where = (ev && ev.filename) ? (' @ ' + ev.filename + ':' + ev.lineno + ':' + ev.colno) : '';
+  var stack = (ev && ev.error && ev.error.stack)
+    ? '\n        ' + String(ev.error.stack).split('\n').slice(0, 5).join('\n        ') : '';
+  errs.push(tag + ' ' + msg + where + stack);
+  log('!! ' + tag + ' ' + msg + where + stack);
+}
+
+fr.src = SRC;
+fr.addEventListener('load', function () {
+  var w = fr.contentWindow, d = fr.contentDocument;
+  w.addEventListener('error', function (ev) { dumpErr('【未捕获错误】', ev); });
+  w.addEventListener('unhandledrejection', function (ev) {
+    dumpErr('【Promise 未处理】', { message: String(ev.reason && ev.reason.message || ev.reason) });
+  });
+  setTimeout(step1, 800);
+});
+
+function hasFatal(d) { return !!d.getElementById('fatal-restart'); }
+
+function step1() {
+  var d = fr.contentDocument, w = fr.contentWindow;
+  log('');
+  log('--- 步骤 1：标题页 ---');
+  var cards = d.querySelectorAll('#class-pick .cls-card');
+  log('职业卡数量 = ' + cards.length + '，当前选中 = ' + (w.TideUI && w.TideUI.pick ? w.TideUI.pick.cls : '?'));
+  if (!cards.length) { log('拿不到职业卡，中止'); return finish(); }
+  var i = 0;
+  function clickNextClass() {
+    if (i >= cards.length) { step2(); return; }
+    var c = cards[i];
+    var key = c.dataset.key || c.dataset.cls || ('#' + i);
+    log('点击职业卡 ' + key + ' …');
+    try { c.click(); } catch (e) { dumpErr('【点击抛错】', e); }
+    i++;
+    setTimeout(function () {
+      log('   → 当前选中 = ' + (w.TideUI.pick ? w.TideUI.pick.cls : '?') +
+        '，致命浮层 = ' + (hasFatal(d) ? '出现了！' : '无'));
+      clickNextClass();
+    }, 260);
+  }
+  clickNextClass();
+}
+
+function step2() {
+  var d = fr.contentDocument, w = fr.contentWindow;
+  log('');
+  log('--- 步骤 2：难度卡 ---');
+  var diffs = d.querySelectorAll('#diff-pick .diff-card');
+  log('难度卡数量 = ' + diffs.length);
+  for (var i = 0; i < diffs.length; i++) {
+    try { diffs[i].click(); } catch (e) { dumpErr('【点击难度抛错】', e); }
+  }
+  log('   → 当前难度 = ' + (w.TideUI.pick ? w.TideUI.pick.diff : '?'));
+  setTimeout(step3, 400);
+}
+
+function step3() {
+  var d = fr.contentDocument, w = fr.contentWindow;
+  log('');
+  log('--- 步骤 3：点「开始下潜」 ---');
+  var btn = d.getElementById('btn-start');
+  if (!btn) { log('找不到开始按钮'); return finish(); }
+  try { btn.click(); } catch (e) { dumpErr('【点击开始抛错】', e); }
+  setTimeout(function () {
+    var gs = d.getElementById('game-screen');
+    log('   → 游戏页可见 = ' + (gs && !gs.classList.contains('hidden')));
+    log('   → 有对局 = ' + !!(w.TideMain && w.TideMain.game));
+    log('   → 致命浮层 = ' + (hasFatal(d) ? '出现了！' : '无'));
+    var g = w.TideMain && w.TideMain.game;
+    if (g) {
+      log('   → 职业 = ' + g.cls.key + '  难度 = ' + g.difficultyId);
+      // 再按一次 Q（魂技），玩家反馈"技能没感觉"也要在这里能看到
+      log('');
+      log('--- 步骤 4：按 Q 放魂技 ---');
+      var c0 = (w.TideFX && w.TideFX.counts) ? w.TideFX.counts() : null;
+      w.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'q', bubbles: true }));
+      log('   → skillUses = ' + g.skillUses + '，冷却 = ' + g.skillCd);
+      log('   → 特效前: ' + JSON.stringify(c0));
+      setTimeout(function () {
+        log('   → 特效后: ' + JSON.stringify((w.TideFX && w.TideFX.counts) ? w.TideFX.counts() : null));
+      }, 120);
+    }
+    setTimeout(step5, 600);
+  }, 1400);
+}
+
+function step5() {
+  var d = fr.contentDocument, w = fr.contentWindow;
+  log('');
+  log('--- 步骤 5：切换职业再开一局 ---');
+  try {
+    w.TideUI.showTitle();
+  } catch (e) { dumpErr('【返回标题抛错】', e); }
+  setTimeout(function () {
+    var cards = d.querySelectorAll('#class-pick .cls-card');
+    if (cards.length > 1) {
+      try { cards[cards.length - 1].click(); } catch (e) { dumpErr('【切职业抛错】', e); }
+    }
+    setTimeout(function () {
+      try { d.getElementById('btn-start').click(); } catch (e) { dumpErr('【二次开局抛错】', e); }
+      setTimeout(finish, 1400);
+    }, 400);
+  }, 500);
+}
+
+function finish() {
+  log('');
+  log('===================================');
+  if (errs.length) {
+    log('结论: 抓到 ' + errs.length + ' 个错误');
+    for (var i = 0; i < errs.length; i++) log('  ' + (i + 1) + ') ' + errs[i].split('\n')[0]);
+  } else {
+    log('结论: 全程没有未捕获错误');
+  }
+  log('===================================');
+  log('DONE');
+  flush();
+}
+</script>
+</body>
+</html>

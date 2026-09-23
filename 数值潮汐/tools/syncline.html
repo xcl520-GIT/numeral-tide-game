@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>语法错误行号定位</title>
+</head>
+<body>
+<pre id="out">RUNNING</pre>
+<script>
+/* ============================================================
+   语法错误「行号」定位器
+
+   为什么需要它：
+   loadcheck.html 用的是 new Function(源码)，它能指出"哪个文件坏了"，
+   但 V8 对 new Function 的编译错误**不给行号**，只说 "Unexpected token ':'"，
+   还得靠肉眼一行行找 —— 这是最耗时间的一类 bug。
+
+   这里换成**外链脚本 + Blob URL**：浏览器解析外链脚本失败时，
+   window.onerror 会带上精确的 文件名/行/列；blob 是同源的，
+   错误也不会被掩码成 "Script error."。
+
+   输出两类：
+     PARSE-BAD  真问题：这个文件根本没法解析（模块会整体失效）
+     RUNTIME    只是信息：单独加载该模块必然报的错（缺 DOM、缺前置模块），
+                不代表文件有问题。判断标准是**没有 PARSE-BAD**。
+
+   用法：用浏览器打开本文件，或
+   msedge --headless=new --dump-dom --virtual-time-budget=20000 tools\syncline.html
+   ============================================================ */
+var FILES = ['data.js', 'icons.js', 'art.js', 'fx.js', 'audio.js',
+  'core.js', 'render.js', 'ui.js', 'main.js'];
+var BASE = '../src/js/';
+
+var out = document.getElementById('out');
+var lines = ['SYNCLINE'];
+var current = '';     // 正在测试的文件名
+var cache = {};       // blobUrl -> 源文本（用于打印出错行附近的代码）
+
+function readText(path) {
+  var x = new XMLHttpRequest();
+  x.open('GET', path, false);
+  x.send(null);
+  return x.responseText;
+}
+
+window.onerror = function (msg, url, line, col) {
+  var isParse = /SyntaxError/.test(msg);
+  var name = cache[url] ? cache[url].name : current;
+  lines.push((isParse ? 'PARSE-BAD' : 'RUNTIME  ') + '  ' + name + ' → ' +
+    msg + '  @ 行 ' + line + ':' + col);
+  if (isParse && cache[url]) {
+    var src = cache[url].src.split('\n');
+    for (var i = Math.max(0, line - 7); i < Math.min(src.length, line + 3); i++) {
+      lines.push((i + 1 === line ? ' >> ' : '    ') + (i + 1) + ' | ' + src[i]);
+    }
+  }
+  return false;      // 不吞错误，DevTools 里也看得到
+};
+
+var idx = 0;
+function step() {
+  if (idx >= FILES.length) {
+    lines.push('-'.repeat(46));
+    lines.push(lines.some(function (l) { return l.indexOf('PARSE-BAD') === 0; })
+      ? '结果: 存在无法解析的文件'
+      : '结果: 全部文件语法正确');
+    out.textContent = lines.join('\n');
+    return;
+  }
+  current = FILES[idx++];
+  var src;
+  try { src = readText(BASE + current); }
+  catch (e) { lines.push('读取失败 ' + current + ': ' + e.message); return step(); }
+
+  var url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+  cache[url] = { name: current, src: src };
+  var el = document.createElement('script');
+  el.src = url;
+  el.onload = function () { lines.push('OK         ' + current); URL.revokeObjectURL(url); step(); };
+  el.onerror = function () { URL.revokeObjectURL(url); step(); };
+  document.head.appendChild(el);
+}
+step();
+</script>
+</body>
+</html>

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>tide-ai-probe</title>
+<style>body{background:#05070d;color:#ccd6e6;font:12px Consolas,monospace;margin:0}
+#out{white-space:pre-wrap;padding:10px}iframe{position:fixed;left:-6000px;top:0;width:1180px;height:820px}</style>
+</head>
+<body>
+<pre id="out">booting...</pre>
+<iframe id="fr" src="../src/index.html"></iframe>
+<script>
+/* 把「模拟器 AI 到底做了什么」摊开成事实，而不是靠读代码猜。
+   起因：改完战力口径后，冒烟里「AI 一件都没融合」开始失败。
+   需要知道的不是"结论对不对"，而是**它这一局究竟发生了几次融合、
+   融合出来的东西去哪了**。 */
+var L = [];
+function p(s) { L.push(s); document.getElementById('out').textContent = L.join('\n'); }
+var fr = document.getElementById('fr');
+
+fr.addEventListener('load', function () {
+  var w = fr.contentWindow;
+  w.addEventListener('error', function (ev) { if (ev.message) p('!! JS错误: ' + ev.message); });
+  setTimeout(function () { run(w); }, 900);
+});
+
+function run(w) {
+  try {
+    var C = w.TideCore, D = w.TideData;
+    var g = new C.Game({ classKey: 'warden', difficulty: 'standard', seed: 99 });
+
+    // 包一层观测：融合被调了几次、成功几次、装备被换了几次
+    var fuseCall = 0, fuseOk = 0, lastFuseReason = '';
+    var origFuse = g.fuseItems.bind(g);
+    g.fuseItems = function (a, b) {
+      fuseCall++;
+      var r = origFuse(a, b);
+      if (r.ok) fuseOk++; else lastFuseReason = r.reason || '?';
+      return r;
+    };
+    var eqCall = 0;
+    var origEquip = g.equipFromBag.bind(g);
+    g.equipFromBag = function (i) { eqCall++; return origEquip(i); };
+
+    g.gold = 5000;
+    g.bag = [];
+    for (var i = 0; i < 8; i++) g.bag.push(g.makeItem({ depth: 3, slot: 'helm', rarity: 'rare' }));
+
+    p('=== 场景：8 件稀有头盔 + 5000 金币，让 AI 自己玩 400 回合 ===');
+    p('开局 bag 品质 = ' + g.bag.map(function (x) { return x.rarity; }).join(','));
+    p('开局 gold = ' + g.gold);
+    p('');
+
+    var out = g.playHeadless(400);
+
+    p('结局 = ' + JSON.stringify(out));
+    p('回合 = ' + g.turn + '  状态 = ' + g.status + '  深度 = ' + g.depth);
+    p('');
+    p('--- AI 行为计数 ---');
+    p('fuseItems 被调用 ' + fuseCall + ' 次，成功 ' + fuseOk + ' 次' +
+      (lastFuseReason ? '（最后一次失败原因 ' + lastFuseReason + '）' : ''));
+    p('equipFromBag 被调用 ' + eqCall + ' 次');
+    p('金币剩余 = ' + g.gold + '   （融合要求 gold >= cost + 80）');
+    p('');
+    p('--- 背包/身上现状 ---');
+    var inBag = {};
+    for (var j = 0; j < g.bag.length; j++) {
+      inBag[g.bag[j].rarity] = (inBag[g.bag[j].rarity] || 0) + 1;
+    }
+    p('背包 ' + g.bag.length + ' 件，品质分布 = ' + JSON.stringify(inBag));
+    p('身上 = ' + JSON.stringify({
+      helm: g.equip.helm ? g.equip.helm.rarity + '/' + g.equip.helm.name : null,
+      weapon: g.equip.weapon ? g.equip.weapon.rarity : null
+    }));
+    p('');
+    p('--- 手工验证：现在还能不能融合 ---');
+    var g2 = new C.Game({ classKey: 'warden', difficulty: 'standard', seed: 99 });
+    g2.gold = 5000;
+    g2.bag = [];
+    for (var k = 0; k < 2; k++) g2.bag.push(g2.makeItem({ depth: 3, slot: 'helm', rarity: 'rare' }));
+    var cost = g2.fuseCost(g2.bag[0], g2.bag[1]);
+    var r2 = g2.fuseItems(0, 1);
+    p('两件稀有头盔：fuseCost = ' + cost + '，结果 = ' + JSON.stringify({ ok: r2.ok, reason: r2.reason }));
+    p('');
+    p('--- 装备判定现状（战力口径）---');
+    var a1 = g2.makeItem({ depth: 3, slot: 'helm', rarity: 'rare' });
+    var a2 = g2.makeItem({ depth: 3, slot: 'helm', rarity: 'epic' });
+    p('稀有头盔战力 = ' + g2.power(a1) + '   史诗头盔战力 = ' + g2.power(a2));
+    p('canUpgrade(史诗 → 稀有空槽) = ' + JSON.stringify(g2.canUpgrade(a2, 'helm')));
+    p('');
+    p('=== DONE ===');
+  } catch (e) {
+    p('!! 探针异常: ' + (e && e.stack ? e.stack : e));
+    p('=== DONE ===');
+  }
+}
+</script>
+</body>
+</html>

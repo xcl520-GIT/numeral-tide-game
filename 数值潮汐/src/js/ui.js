@@ -1,0 +1,1698 @@
+/* ============================================================
+   数值潮汐 · 界面层 v4.1
+
+   主要变化：
+   1. 背包从「侧栏里挤 20 个小格子」改成**独立整屏界面**（参考《我的世界》）：
+      左边是角色 + 装备槽，右边是 40 格网格，底下是出售区。
+      装备靠**拖拽**完成 —— 25px 的小格子用点击来"装备/卸下"太容易误操作。
+   2. 新增金币与商店。商店与背包共用同一个界面，切成两个标签页。
+   3. 侧栏保留属性面板（这是决策依据，必须常驻），
+      但背包/装备槽改为"入口 + 摘要"，详细操作进整屏界面。
+   ============================================================ */
+(function (global) {
+  'use strict';
+
+  const D = global.TideData;
+  const A = global.TideArt;
+  const I = global.TideIcons;
+  const C = global.TideCore;
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+  function icon(name, size, cls) { return I ? I.svg(name, size || 18, cls) : ''; }
+
+  function statVal(key, v) {
+    const meta = D.STATS[key] || {};
+    if (meta.pct) return Math.round(v * 100) + '%';
+    return String(Math.round(v));
+  }
+  function statName(key) { return (D.STATS[key] || {}).name || key; }
+  function slotLabel(slot) {
+    for (const s of D.EQUIP_SLOTS) if (s.key === slot) return s.name;
+    return slot;
+  }
+
+  const pick = { cls: 'warlord', diff: 'standard' };
+  let invOpen = false;
+  let invTab = 'bag';
+
+  /* ============================================================
+     开始界面的动态潮汐背景
+     ============================================================ */
+  let bgRaf = 0;
+  function tideBackground(cv) {
+    const c = cv.getContext('2d');
+    // 拿不到 2D 上下文就别画背景。它只是标题页的装饰 ——
+    // 而这个是**每帧**都在跑的循环：一旦 getContext 返回 null，
+    // 就会每帧抛一次错。配上"任何错误都全屏停机"的兜底，
+    // 几帧之内游戏就被锁死在标题页外面（"一开局就弹出错误、无法开始游戏"）。
+    // 原则：**装饰不该有能力弄坏游戏。**
+    if (!c) return;
+    let t = 0;
+    const motes = [];
+    for (let i = 0; i < 70; i++) {
+      motes.push({ x: Math.random(), y: Math.random(), r: 0.6 + Math.random() * 2.2, s: 0.0004 + Math.random() * 0.0016 });
+    }
+    function frame() {
+      try {
+        drawFrame();
+      } catch (e) {
+        // 画不出来就安静地停掉这个循环，别让它每帧污染错误日志
+        return;
+      }
+      t += 1;
+      bgRaf = requestAnimationFrame(frame);
+    }
+    function drawFrame() {
+      const w = cv.width, h = cv.height;
+      const g = c.createLinearGradient(0, 0, 0, h);
+      g.addColorStop(0, '#080c18');
+      g.addColorStop(0.45, '#0a1526');
+      g.addColorStop(1, '#061019');
+      c.fillStyle = g;
+      c.fillRect(0, 0, w, h);
+      c.save();
+      for (let i = 0; i < 5; i++) {
+        const x = w * (0.12 + i * 0.19) + Math.sin(t * 0.004 + i) * 26;
+        const lg = c.createLinearGradient(x, 0, x + 90, h);
+        lg.addColorStop(0, 'rgba(90,180,210,0.055)');
+        lg.addColorStop(1, 'rgba(90,180,210,0)');
+        c.fillStyle = lg;
+        c.beginPath();
+        c.moveTo(x, 0); c.lineTo(x + 70, 0); c.lineTo(x + 190, h); c.lineTo(x + 60, h);
+        c.closePath(); c.fill();
+      }
+      c.restore();
+      for (const m of motes) {
+        m.y -= m.s * 16;
+        if (m.y < -0.05) { m.y = 1.05; m.x = Math.random(); }
+        c.fillStyle = 'rgba(150,220,235,' + (0.10 + m.r * 0.06).toFixed(3) + ')';
+        c.beginPath();
+        c.arc(m.x * w + Math.sin(t * 0.01 + m.y * 9) * 12, m.y * h, m.r, 0, Math.PI * 2);
+        c.fill();
+      }
+      const layers = [
+        { y: 0.72, a: 16, f: 0.0042, s: 0.9, col: 'rgba(24,74,104,0.55)' },
+        { y: 0.79, a: 22, f: 0.0033, s: 1.4, col: 'rgba(31,92,128,0.60)' },
+        { y: 0.86, a: 14, f: 0.0055, s: 2.0, col: 'rgba(43,126,160,0.55)' },
+        { y: 0.93, a: 20, f: 0.0026, s: 2.7, col: 'rgba(70,170,200,0.42)' }
+      ];
+      for (const L of layers) {
+        c.beginPath();
+        c.moveTo(0, h);
+        for (let x = 0; x <= w; x += 6) {
+          const y = h * L.y + Math.sin(x * L.f + t * 0.02 * L.s) * L.a
+            + Math.sin(x * L.f * 2.7 + t * 0.031 * L.s) * L.a * 0.35;
+          c.lineTo(x, y);
+        }
+        c.lineTo(w, h);
+        c.closePath();
+        c.fillStyle = L.col;
+        c.fill();
+        c.beginPath();
+        for (let x = 0; x <= w; x += 6) {
+          const y = h * L.y + Math.sin(x * L.f + t * 0.02 * L.s) * L.a
+            + Math.sin(x * L.f * 2.7 + t * 0.031 * L.s) * L.a * 0.35;
+          if (x === 0) c.moveTo(x, y); else c.lineTo(x, y);
+        }
+        c.strokeStyle = 'rgba(150,235,255,0.16)';
+        c.lineWidth = 1.2;
+        c.stroke();
+      }
+    }
+    const resize = function () {
+      const r = cv.parentElement.getBoundingClientRect();
+      // 容器还没布局时宽高可能是 0/NaN：给画布一个最小值，
+      // 免得后面 createLinearGradient 之类拿到非有限值直接抛错
+      cv.width = Math.max(1, Math.floor(r.width || 0));
+      cv.height = Math.max(1, Math.floor(r.height || 0));
+    };
+    resize();
+    global.addEventListener('resize', resize);
+    frame();
+  }
+
+  /* ============================================================
+     开始菜单（第 0 层）
+     游戏的第一个界面，职责只有「去哪」：开始 / 无尽 / 排行榜 / 设置 / 退出。
+     选职业与选难度往后挪一层 —— 那一步是「配置这一局」，不是「启动游戏」。
+     ============================================================ */
+  function buildMenu() {
+    if (!$('menu-screen')) return;
+    tideBackground($('menu-bg'));
+    $('btn-menu-start').onclick = function () { global.TideAudio.ui(); showTitle(); };
+    $('btn-menu-endless').onclick = function () {
+      const MU = global.TideMeta;
+      if (!MU.load().wins) { global.TideAudio.ui(true); toast('无尽模式要先通关一次'); return; }
+      // 无尽模式的规则还没接上时**不许开局** —— 宁可按钮没反应，
+      // 也不要进到一个"规则没定义"的局里（那种局面最难排查）
+      if (!global.TideEndless) { global.TideAudio.ui(true); toast('无尽模式还没就绪'); return; }
+      global.TideAudio.ui();
+      global.TideMain.start({ mode: 'endless' });
+    };
+    $('btn-menu-board').onclick = function () { global.TideAudio.ui(); showBoard(); };
+    $('btn-menu-settings').onclick = function () { global.TideAudio.ui(); showSettings(); };
+    $('btn-menu-quit').onclick = function () { quitGame(); };
+    bindSettings();
+    if ($('guide-toggle')) $('guide-toggle').onclick = function () { global.TideAudio.ui(); toggleGuide(); };
+    renderMenu();
+  }
+
+  /** 菜单上会变的部分：无尽模式的解锁状态、排行榜的一句话摘要 */
+  function renderMenu() {
+    const m = global.TideMeta ? global.TideMeta.load() : { wins: 0, best: 0 };
+    const unlocked = !!m.wins;
+    const eb = $('btn-menu-endless');
+    if (eb) {
+      eb.disabled = !unlocked;
+      eb.classList.toggle('locked', !unlocked);
+    }
+    const note = $('menu-endless-note');
+    if (note) note.textContent = unlocked ? '一直往下打 · 按分数排名' : '未解锁 · 先通关一次';
+    const bn = $('menu-board-note');
+    if (bn) {
+      const b = m.board && m.board.length ? m.board[0] : null;
+      bn.textContent = b ? ('最高 ' + b.score + ' 分 · ' + b.clsName) : '本机最高分 · 还没有记录';
+    }
+  }
+
+  function showMenu() {
+    closeHelp(); closeSettings(); closeBoard(); closePause();
+    invOpen = false; syncInventory();
+    $('menu-screen').classList.remove('hidden');
+    $('title-screen').classList.add('hidden');
+    $('game-screen').classList.add('hidden');
+    $('over-modal').classList.add('hidden');
+    relicShown = '';
+    renderMenu();
+    global.TideAudio.music('title');
+    global.TideMain.game = null;
+    setTimeout(function () { global.TideRender.resize(); }, 30);
+  }
+
+  /* ============================================================
+     设置
+     ============================================================ */
+  let settingsOpen = false, boardOpen = false;
+  function isSettingsOpen() { return settingsOpen; }
+  function isBoardOpen() { return boardOpen; }
+
+  /** 把存档里的设置应用到运行时。开局、清档、启动都走这一个函数 ——
+      散着写迟早会漏一处，症状是"设置了但这次没生效"。 */
+  function applySettings() {
+    const s = global.TideSettings.load();
+    global.TideAudio.setVolume(s.volSfx, s.volBgm);
+    global.TideRender.setZoom(s.zoom);
+    return s;
+  }
+
+  function renderSettings() {
+    const s = global.TideSettings.load();
+    if (!$('set-vol-sfx')) return;
+    const pct = function (v) { return Math.round(v * 100) + '%'; };
+    $('set-vol-sfx').value = Math.round(s.volSfx * 100);
+    $('set-vol-bgm').value = Math.round(s.volBgm * 100);
+    $('set-vol-sfx-num').textContent = pct(s.volSfx);
+    $('set-vol-bgm-num').textContent = pct(s.volBgm);
+    const steps = global.TideRender.ZOOM_STEPS;
+    let zi = steps.indexOf(global.TideRender.zoom);
+    if (zi < 0) zi = 0;
+    $('set-zoom').min = 0;
+    $('set-zoom').max = steps.length - 1;
+    $('set-zoom').value = zi;
+    $('set-zoom-num').textContent = pct(global.TideRender.zoom);
+    const s2 = global.TideSettings.load();
+    $('set-guide-toggle').textContent = s2.guide ? '展开' : '收起';
+    $('set-note').textContent = '设置立即生效，自动保存。清空存档不会动设置，反之亦然。';
+  }
+
+  function showSettings() {
+    settingsOpen = true;
+    renderSettings();
+    $('settings-modal').classList.remove('hidden');
+  }
+  function closeSettings() {
+    settingsOpen = false;
+    if ($('settings-modal')) $('settings-modal').classList.add('hidden');
+  }
+
+  function bindSettings() {
+    if (!$('settings-modal')) return;
+    const onRange = function (id, fn) {
+      const el = $(id);
+      if (!el) return;
+      el.addEventListener('input', function () { fn(Number(el.value)); renderSettings(); });
+      el.addEventListener('change', function () { fn(Number(el.value)); renderSettings(); });
+    };
+    onRange('set-vol-sfx', function (v) {
+      global.TideSettings.set('volSfx', v / 100);
+      global.TideAudio.setVolume(v / 100, null);
+      global.TideAudio.ui();          // 每动一格给一声，边调边听
+    });
+    onRange('set-vol-bgm', function (v) {
+      global.TideSettings.set('volBgm', v / 100);
+      global.TideAudio.setVolume(null, v / 100);
+    });
+    onRange('set-zoom', function (v) {
+      const steps = global.TideRender.ZOOM_STEPS;
+      const z = steps[Math.max(0, Math.min(steps.length - 1, Math.round(v)))];
+      global.TideSettings.set('zoom', z);
+      global.TideRender.setZoom(z);
+    });
+    $('set-guide-toggle').onclick = function () {
+      const s = global.TideSettings.load();
+      global.TideSettings.set('guide', !s.guide);
+      global.TideAudio.ui();
+      renderSettings();
+      if (global.TideUI.applyGuide) global.TideUI.applyGuide();
+    };
+    $('btn-wipe').onclick = function () {
+      const b = $('btn-wipe');
+      // 两步确认：清档不可逆，一次点击就抹掉几十局进度太狠了。
+      // 但也不能用 window.confirm（WebView2 里会打断渲染且样式突兀）。
+      if (b.dataset.armed !== '1') {
+        b.dataset.armed = '1';
+        b.textContent = '再点一次确认清空';
+        global.TideAudio.ui(true);
+        setTimeout(function () {
+          if (b.dataset.armed === '1') {
+            b.dataset.armed = '';
+            b.textContent = '清空全部存档';
+            renderSettings();
+          }
+        }, 4000);
+        return;
+      }
+      b.dataset.armed = '';
+      b.textContent = '清空全部存档';
+      global.TideMeta.reset();
+      global.TideSettings.reset();
+      applySettings();
+      renderSettings();
+      renderMenu();
+      global.TideAudio.ui(true);
+      toast('存档与设置已清空');
+    };
+  }
+
+  /* ---- 排行榜 ---- */
+  function showBoard() {
+    boardOpen = true;
+    renderBoard();
+    $('board-modal').classList.remove('hidden');
+  }
+  function closeBoard() {
+    boardOpen = false;
+    if ($('board-modal')) $('board-modal').classList.add('hidden');
+  }
+  function renderBoard() {
+    const box = $('board-list');
+    if (!box) return;
+    const m = global.TideMeta.load();
+    const list = m.board || [];
+    if (!list.length) {
+      box.innerHTML = '<div class="board-empty">还没有记录。打完一局就会出现在这里 ——' +
+        '普通模式按通关/最深层计，无尽模式按分数计。</div>';
+      return;
+    }
+    box.innerHTML = list.map(function (b, i) {
+      const medal = i === 0 ? 'gold' : (i === 1 ? 'silver' : (i === 2 ? 'bronze' : ''));
+      return '<div class="board-row ' + medal + '">' +
+        '<span class="board-rank">' + (i + 1) + '</span>' +
+        '<span class="board-score">' + b.score + '</span>' +
+        '<span class="board-meta">' + esc(b.mode) + ' · ' + esc(b.clsName) + ' · ' +
+        esc(b.diffName) + ' · 第 ' + b.depth + ' 层 · ' + esc(b.date) + '</span>' +
+        '</div>';
+    }).join('');
+  }
+
+  /* ---- 退出游戏 ---- */
+  /**
+   * WebView2 里网页不能自己关窗，必须由宿主（启动器）来关，
+   * 所以给宿主发一条消息，由 launcher.cs 处理。
+   * 在普通浏览器里没有宿主 —— 这时要**说实话**，而不是让按钮看起来坏了。
+   */
+  function quitGame() {
+    global.TideAudio.ui(true);
+    try {
+      const wv = global.chrome && global.chrome.webview;
+      if (wv && wv.postMessage) { wv.postMessage('quit'); return; }
+    } catch (e) { }
+    toast('浏览器里请直接关掉标签页；桌面版（数值潮汐.exe）在这里会退出游戏');
+  }
+
+  /* ============================================================
+     开始界面
+     ============================================================ */
+  function buildStart() {
+    tideBackground($('title-bg'));
+    try {
+      const saved = global.localStorage && global.localStorage.getItem('tide.pick');
+      if (saved) { const o = JSON.parse(saved); pick.cls = o.cls || pick.cls; pick.diff = o.diff || pick.diff; }
+    } catch (e) { }
+    renderClassPicker();
+    renderDiffPicker();
+    $('btn-start').onclick = function () { global.TideMain.start({ mode: 'normal' }); global.TideAudio.ui(); };
+    $('btn-daily').onclick = function () { global.TideMain.start({ mode: 'daily' }); global.TideAudio.ui(); };
+    $('btn-help').onclick = function () { showHelp(); global.TideAudio.ui(); };
+    const snd = $('btn-sound');
+    snd.onclick = function () {
+      const on = !global.TideAudio.isOn();
+      global.TideAudio.toggle(on);
+      snd.classList.toggle('off', !on);
+      global.TideAudio.ui();
+    };
+  }
+  function savePick() {
+    try { global.localStorage.setItem('tide.pick', JSON.stringify(pick)); } catch (e) { }
+  }
+
+  function renderClassPicker() {
+    const box = $('class-pick');
+    box.innerHTML = D.CLASSES.map(function (c) {
+      const s = c.stats;
+      const bars = [['hp', 190], ['atkP', 52], ['atkM', 52], ['defP', 22], ['spd', 30], ['crit', 0.20]]
+        .map(function (b) {
+          const v = s[b[0]] || 0;
+          const pct = Math.max(3, Math.min(100, Math.round(v / b[1] * 100)));
+          const meta = D.STATS[b[0]];
+          return '<div class="bar-row"><span class="bl">' + meta.short + '</span>' +
+            '<span class="bar"><i style="width:' + pct + '%;background:' + meta.color + '"></i></span></div>';
+        }).join('');
+      return '<button class="cls-card' + (pick.cls === c.key ? ' on' : '') + '" data-cls="' + c.key + '">' +
+        '<img class="cls-art" src="' + A.heroDataURL(c, 104) + '" alt="">' +
+        '<div class="cls-info">' +
+        '<div class="cls-name">' + esc(c.name) + '<em>' + esc(c.title) + '</em></div>' +
+        '<div class="cls-play">' + esc(c.playstyle) + '</div>' +
+        '<div class="cls-bars">' + bars + '</div>' +
+        '<div class="cls-pass"><b>' + esc(c.passive.name) + '</b>' + esc(c.passive.text) + '</div>' +
+        '<div class="cls-blurb">' + esc(c.blurb) + '</div>' +
+        '</div></button>';
+    }).join('');
+    box.querySelectorAll('.cls-card').forEach(function (el) {
+      el.onclick = function () { pick.cls = el.dataset.cls; savePick(); global.TideAudio.ui(); renderClassPicker(); };
+    });
+  }
+
+  function renderDiffPicker() {
+    const box = $('diff-pick');
+    box.innerHTML = D.DIFF_ORDER.map(function (k) {
+      const d = D.DIFFICULTIES[k];
+      return '<button class="diff-card' + (pick.diff === k ? ' on' : '') + '" data-diff="' + k + '">' +
+        '<div class="d-name">' + esc(d.name) + '</div>' +
+        '<div class="d-tag">' + esc(d.tag) + '</div>' +
+        '<div class="d-blurb">' + esc(d.blurb) + '</div>' +
+        '<div class="d-meta">层数 ' + d.depth + ' · 潮汐每 ' + d.tideEvery + ' 回合</div>' +
+        '</button>';
+    }).join('');
+    box.querySelectorAll('.diff-card').forEach(function (el) {
+      el.onclick = function () { pick.diff = el.dataset.diff; savePick(); global.TideAudio.ui(); renderDiffPicker(); };
+    });
+  }
+
+  /* ============================================================
+     提示气泡（v10.2 重构）
+
+     旧做法是给每个容器各挂一个 mousemove（侧栏装备槽一个、背包一个、
+     商店一个、秘藏一个），结果是"漏一个地方就少一处提示"，
+     而且每加一个新界面都要记得再挂一次。
+
+     现在改成**整份文档上挂一个委托**：任何带 data-tip 属性的元素
+     都会被自动识别。新增界面只要写上属性，提示就自动有。
+     ============================================================ */
+  let ttEl = null, tipTarget = null;
+
+  function tooltip(html, ev) {
+    if (!ttEl) ttEl = $('tooltip');
+    if (!html) { ttEl.classList.add('hidden'); return; }
+    ttEl.innerHTML = html;
+    ttEl.classList.remove('hidden');
+    if (ev) positionTip(ev);
+  }
+  function positionTip(ev) {
+    if (!ttEl || ttEl.classList.contains('hidden')) return;
+    const r = ttEl.getBoundingClientRect();
+    let x = ev.clientX + 18, y = ev.clientY + 14;
+    if (x + r.width > global.innerWidth - 10) x = ev.clientX - r.width - 18;
+    if (y + r.height > global.innerHeight - 10) y = global.innerHeight - r.height - 10;
+    ttEl.style.left = Math.max(6, x) + 'px';
+    ttEl.style.top = Math.max(6, y) + 'px';
+  }
+  function hideTip() {
+    if (ttEl) ttEl.classList.add('hidden');
+    tipTarget = null;
+  }
+
+  /** 从元素上的 data-* 还原出要显示的内容 */
+  function resolveTip(el) {
+    const g = global.TideMain.game;
+    if (!g) return '';
+    const kind = el.dataset.tip;
+    if (kind === 'stat') return statTooltip(el.dataset.stat);
+    if (kind === 'sell') {
+      return '<div class="tt-name">出售区</div><div class="tt-desc">把背包装备拖到这里换成金币。' +
+        '出售价是身价的 ' + Math.round(D.LOOT.sellRate * 100) + '%。<br>' +
+        '商店定价是身价的 ' + Math.round(D.LOOT.shopMarkup * 100) + '%，' +
+        '所以买回来再卖出去永远亏。</div>';
+    }
+    if (kind === 'relic') {
+      let r = null;
+      for (const x of D.RELICS) if (x.id === el.dataset.relic) r = x;
+      if (!r) return '';
+      const sc = D.SCHOOLS[r.school] || {};
+      return '<div class="tt-head" style="--rc:' + (sc.color || '#cbb994') + '">' +
+        '<span class="tt-ico">' + icon(r.icon, 26) + '</span>' +
+        '<span><b class="tt-name">' + esc(r.name) + '</b><i class="tt-sub">' +
+        esc(sc.name || '') + '秘藏 · 已生效</i></span></div>' +
+        '<div class="tt-body"><div class="tt-line mech"><span>' + icon('shining-heart', 14) +
+        '效果</span><em>' + esc(r.text) + '</em></div></div>' +
+        '<div class="tt-hint">秘藏不可更换，一局内持续生效</div>';
+    }
+    // 商栈的消耗品（潮汐圣水）不是装备，单独一张卡
+    if (kind === 'heal') {
+      const s = g.shopStock[+el.dataset.idx];
+      if (!s) return '';
+      return '<div class="tt-head"><span class="tt-ico">' + icon(s.icon, 26) + '</span>' +
+        '<span><b class="tt-name">' + esc(s.name) + '</b>' +
+        '<i class="tt-sub">潮汐商栈 · 补给</i></span></div>' +
+        '<div class="tt-body"><div class="tt-line mech"><span>' + icon('shining-heart', 14) +
+        '效果</span><em>' + esc(s.text) + '</em></div></div>' +
+        '<div class="tt-cmp"><b>售价 ' + s.price + ' 金币</b></div>' +
+        '<div class="tt-hint">点击右侧按钮购买</div>';
+    }
+    if (kind !== 'item') return '';
+
+    const k = el.dataset.kind;
+    const opts = { ctx: k };
+    let item = null;
+    if (k === 'equip') {
+      item = g.equip[el.dataset.slot];
+      // 空槽位也给一张卡：告诉玩家这里装什么、怎么装 —— 比什么都不弹更好懂
+      if (!item) {
+        return '<div class="tt-name">' + esc(slotLabel(el.dataset.slot)) + '</div>' +
+          '<div class="tt-desc">空槽位。把背包装备拖到左侧对应槽位就能穿上。</div>';
+      }
+    } else if (k === 'bag') {
+      item = g.bag[+el.dataset.idx];
+    } else if (k === 'shop') {
+      const s = g.shopStock[+el.dataset.idx];
+      if (!s || !s.item) return '';
+      item = s.item;
+      opts.price = s.price;
+      // 商店里同样显示与身上那件的差值 —— 这才是"该不该买"的判断依据
+      opts.compare = true;
+    }
+    if (!item) return '';
+    return itemTooltip(item, g, opts);
+  }
+
+  function bindTips() {
+    document.addEventListener('mousemove', function (ev) {
+      if (dragItem) { hideTip(); return; }
+      const el = ev.target && ev.target.closest ? ev.target.closest('[data-tip]') : null;
+      if (!el) { hideTip(); return; }
+      if (el === tipTarget) { positionTip(ev); return; }
+      tipTarget = el;
+      tooltip(resolveTip(el), ev);
+    });
+    document.addEventListener('mouseleave', hideTip);
+    global.addEventListener('blur', hideTip);
+  }
+
+  function statTooltip(key) {
+    const m = D.STATS[key];
+    if (!m) return '';
+    const g = global.TideMain.game;
+    const v = g ? (g.stats()[key] || 0) : 0;
+    return '<div class="tt-name">' + esc(m.name) + '</div>' +
+      '<div class="tt-line imp"><span>当前值</span><b>' + statVal(key, v) + '</b></div>' +
+      '<div class="tt-desc">' + esc(m.desc) + '</div>';
+  }
+
+  /**
+   * 装备详情卡。
+   * 这是玩家最需要的一张卡 —— 掉落装备的全部意义都在这里，
+   * 所以必须写全：基础属性 / 词条 / 机制效果 / 与身上那件的逐项差值 / 身价。
+   */
+  function itemTooltip(item, game, opts) {
+    opts = opts || {};
+    const rar = D.rarityByKey(item.rarity);
+    const compare = (opts.compare === false) ? null : (game ? game.equip[item.slot] : null);
+    const isEquipped = compare === item;
+    const diff = {};
+    if (compare && !isEquipped) {
+      const keys = {};
+      for (const k in item.total) keys[k] = 1;
+      for (const k in compare.total) keys[k] = 1;
+      for (const k in keys) diff[k] = (item.total[k] || 0) - (compare.total[k] || 0);
+    }
+
+    let h = '<div class="tt-head" style="--rc:' + rar.color + '">' +
+      '<span class="tt-ico">' + icon(item.icon, 28) + '</span>' +
+      '<span><b class="tt-name" style="color:' + rar.color + '">' + esc(item.name) + '</b>' +
+      '<i class="tt-sub">' + esc(rar.name) + ' · ' + esc(slotLabel(item.slot)) +
+      ' · 深度 ' + item.depth + (isEquipped ? ' · <em class="tt-now">已装备</em>' : '') +
+      '</i></span></div>';
+
+    // —— 属性与词条 ——
+    const impl = [], affix = [], mech = [];
+    for (const line of item.text) {
+      if (line.kind === 'imp') impl.push(line);
+      else if (line.kind === 'affix') affix.push(line);
+      else mech.push(line);
+    }
+    h += '<div class="tt-body">';
+    if (impl.length) {
+      h += '<div class="tt-sec">基础属性</div>';
+      for (const l of impl) {
+        h += '<div class="tt-line imp"><span>' + esc(statName(l.stat)) + '</span>' +
+          '<b>' + (l.value >= 0 ? '+' : '') + statVal(l.stat, l.value) + '</b>' +
+          (diff[l.stat] ? cmpTag(diff[l.stat], l.stat) : '') + '</div>';
+      }
+    }
+    if (affix.length) {
+      h += '<div class="tt-sec">词条</div>';
+      for (const l of affix) {
+        h += '<div class="tt-line affix"><span>' + icon(l.icon, 14) + esc(l.name) + '</span>' +
+          '<b>' + (l.value >= 0 ? '+' : '') + statVal(l.stat, l.value) + '</b>' +
+          (diff[l.stat] ? cmpTag(diff[l.stat], l.stat) : '') + '</div>';
+      }
+    }
+    if (mech.length) {
+      h += '<div class="tt-sec">机制效果</div>';
+      for (const l of mech) {
+        h += '<div class="tt-line mech"><span>' + icon(l.icon, 14) + esc(l.name) + '</span>' +
+          '<em>' + esc(l.text) + '</em></div>';
+      }
+    }
+    h += '</div>';
+
+    // —— 战力：一个能一眼比较的数 ——
+    // 没有它，"这件是不是更好"就只能靠感觉，而感觉恰恰是玩家最不信任的东西。
+    // 战力在模型层算（core.power），界面只负责显示 —— 与自动装备判定同源。
+    if (game && typeof game.power === 'function') {
+      const pw = game.power(item);
+      let line = '战力 <em class="tt-pw">' + pw + '</em>';
+      if (!isEquipped && compare) {
+        const d = pw - game.power(compare);
+        line += ' <span class="' + (d > 0 ? 'up' : (d < 0 ? 'dn' : 'eq')) + '">(' +
+          (d > 0 ? '+' : '') + d + ')</span>';
+      }
+      // 用独立的 tt-power 类、不要复用 tt-cmp：
+      // 复用会让"对比区块"这个选择器命中错元素（旧断言就这么被我搞挂过一次）。
+      h += '<div class="tt-power"><b>' + line + '</b></div>';
+    }
+
+    // —— 与已装备的对比 ——
+    if (compare && !isEquipped) {
+      const parts = [];
+      for (const k in diff) {
+        if (!diff[k]) continue;
+        const m = D.STATS[k] || {};
+        parts.push('<span class="' + (diff[k] > 0 ? 'up' : 'dn') + '">' + (m.short || k) +
+          ' ' + (diff[k] > 0 ? '+' : '') + statVal(k, diff[k]) + '</span>');
+      }
+      h += '<div class="tt-cmp"><b>对比已装备的「' + esc(compare.name) + '」</b>' +
+        (parts.length ? parts.join('') : '<span class="eq">完全一致</span>') + '</div>';
+    } else if (!compare) {
+      h += '<div class="tt-cmp"><b>' + esc(slotLabel(item.slot)) + '槽位为空</b>' +
+        '<span class="eq">穿上后立刻生效</span></div>';
+    }
+
+    // —— 价值 ——
+    if (game) {
+      let v = '身价 ' + game.itemValue(item);
+      if (opts.price !== undefined) v += ' · 商店售价 ' + opts.price + ' 金币';
+      else v += ' · 可卖 ' + game.sellPrice(item) + ' 金币';
+      h += '<div class="tt-cmp"><b>' + v + '</b></div>';
+    }
+
+    // —— 操作提示：按上下文给，不写通用废话 ——
+    if (opts.hint !== false) {
+      const k = opts.ctx || '';
+      h += '<div class="tt-hint">' + (k === 'shop' ? '点击右侧按钮购买'
+        : k === 'equip' ? '拖到背包或出售区可以卸下 / 变卖'
+          : '拖到左侧槽位穿戴 · 拖到出售区变卖') + '</div>';
+    }
+    return h;
+  }
+  function cmpTag(d, statKey) {
+    return '<i class="tt-d ' + (d > 0 ? 'up' : 'dn') + '">' + (d > 0 ? '+' : '') + statVal(statKey, d) + '</i>';
+  }
+
+  /* ============================================================
+     游戏 HUD / 侧栏
+     ============================================================ */
+  let lastSig = '';
+  const logSeen = { n: 0 };
+
+  function buildGame() {
+    $('btn-bag').onclick = function () { toggleInventory(); };
+    // 点 HUD 上的魂技键 = 按 Q。走 TideMain 是为了复用同一套音效/飘字/震屏反馈
+    $('btn-skill').onclick = function () {
+      if (global.TideMain && global.TideMain.castSkill) global.TideMain.castSkill();
+    };
+    $('btn-help2').onclick = function () { global.TideAudio.ui(); showHelp(); };
+    $('btn-restart').onclick = function () { global.TideAudio.ui(); showTitle(); };
+    $('btn-close-relic').classList.add('hidden');
+
+    // 属性行的悬停由 document 级委托统一处理（见 bindTips），这里不再单独挂
+
+    // 侧栏的装备槽是只读摘要，点击打开完整界面
+    $('equip-panel').addEventListener('click', function () { openInventory('bag'); });
+
+    // 秘藏条的悬停同样走 document 级委托
+  }
+
+  function toggleInventory(tab) {
+    if (tab) invTab = tab;
+    invOpen = !invOpen;
+    syncInventory();
+    global.TideAudio.ui();
+  }
+  function openInventory(tab) {
+    invTab = tab || invTab;
+    invOpen = true;
+    syncInventory();
+  }
+  function closeInventory() { invOpen = false; syncInventory(); }
+
+  function syncInventory() {
+    const el = $('inv-screen');
+    if (!el) return;
+    el.classList.toggle('hidden', !invOpen);
+    $('btn-bag').classList.toggle('on', invOpen);
+    if (invOpen) renderInventory(global.TideMain.game);
+  }
+
+  /* ============================================================
+     主渲染
+     ============================================================ */
+  function render(game) {
+    if (!game) return;
+    const st = game.stats();
+    const fl = game.flags();
+
+    // BGM 强度：涨潮（水位 ≥2）或残血时切到危机段落。
+    // 这里用**氛围**而不是提示条，是因为它是持续状态而不是事件：
+    // 事件用提示条（会消失），状态用氛围（一直在，玩家不看也知道情况不对）。
+    // 这个调用会每帧经过，所以 music() 必须幂等 —— 见 audio.js 的 bgmApply。
+    global.TideAudio.music('game', (game.tideLevel >= 2 || game.hp / st.hp < 0.35) ? 2 : 1);
+
+    // 无尽模式没有"总层数"这回事。写 "4 / 4" 会让玩家以为快结束了
+    $('h-depth').textContent = game.endless
+      ? (game.depth + ' / \u221e')
+      : (game.depth + ' / ' + game.diff.depth);
+    $('h-kills').textContent = game.kills;
+    $('h-turn').textContent = game.turn;
+    renderGuide(game);
+    $('h-gold').textContent = game.gold;
+    const tideWord = ['平静', '微涨', '上涨', '满潮'][Math.min(3, game.tideLevel)] || '满潮';
+    const tideEl = $('h-tide');
+    tideEl.textContent = tideWord + ' ' + game.tideLevel;
+    tideEl.className = 'h-tide lv' + game.tideLevel;
+
+    const hpPct = Math.max(0, Math.min(100, game.hp / st.hp * 100));
+    $('hero-hp-fill').style.width = hpPct + '%';
+    $('hero-hp-text').textContent = Math.max(0, Math.round(game.hp)) + ' / ' + Math.round(st.hp);
+    $('hero-hp-fill').classList.toggle('low', hpPct < 32);
+    $('hero-lv').textContent = 'Lv ' + game.level();
+    const need = D.PROGRESSION.levelEvery;
+    $('hero-xp-fill').style.width = ((game.kills % need) / need * 100) + '%';
+    $('hero-name').textContent = game.cls.name;
+    $('hero-title').textContent = game.cls.title;
+    if ($('hero-art').dataset.key !== game.cls.key) {
+      $('hero-art').src = A.heroDataURL(game.cls, 76);
+      $('hero-art').dataset.key = game.cls.key;
+    }
+    $('hero-pass').innerHTML = '<b>' + esc(game.cls.passive.name) + '</b>' + esc(game.cls.passive.text);
+    $('hero-foot').textContent = '剩余机会 ' + game.lives + ' · 秘藏 ' + game.relics.length;
+
+    /* ============================================================
+       魂技（设计取自《元气骑士》）
+       冷却必须一眼看得见：技能类设计的挫败感几乎都来自"按了没反应"，
+       而玩家分不清"没反应"和"还在冷却"。
+       签名挂在下元素身上（_sig），省一个模块级变量，也避免每帧重建 DOM。
+       ============================================================ */
+    const sk = game.skill();
+    const skReady = game.skillReady();
+    const skBtn = $('btn-skill');
+    if (skBtn) {
+      skBtn.textContent = game.skillCd > 0 ? (sk.name + ' · ' + game.skillCd) : sk.name;
+      skBtn.classList.toggle('ready', skReady);
+      skBtn.classList.toggle('cooling', !skReady);
+      skBtn.title = sk.name + '（Q）· ' + sk.text +
+        (game.skillCd > 0 ? '　冷却还有 ' + game.skillCd + ' 回合' : '　已就绪');
+      // 冷却刚好转好时弹一下。技能类设计的标配是"主动告诉玩家好了" ——
+      // 否则玩家要么一直盯着冷却条，要么干脆想不起来还有这个技能。
+      if (skReady && skBtn._wasReady === false) {
+        skBtn.classList.remove('cast');
+        void skBtn.offsetWidth;
+        skBtn.classList.add('cast');
+        setTimeout(function () { skBtn.classList.remove('cast'); }, 480);
+      }
+      skBtn._wasReady = skReady;
+    }
+
+    const sp = $('skill-panel');
+    if (sp) {
+      const sig = sk.key + '|' + game.skillCd + '|' + (skReady ? 1 : 0);
+      if (sp._sig !== sig) {
+        sp._sig = sig;
+        const pct = sk.cd > 0
+          ? Math.max(0, Math.min(100, Math.round((1 - game.skillCd / sk.cd) * 100))) : 100;
+        sp.innerHTML =
+          '<div class="sk-head">' +
+          '<span class="sk-ico">' + icon(sk.icon, 18) + '</span>' +
+          '<span class="sk-meta"><b>' + esc(sk.name) + '</b><i>' +
+          (skReady ? '就绪 · 按 Q 释放' : '冷却中 · 还有 ' + game.skillCd + ' 回合') +
+          '</i></span></div>' +
+          '<div class="sk-text">' + esc(sk.text) + '</div>' +
+          '<div class="sk-cd' + (skReady ? ' ready' : '') + '">' +
+          '<span>' + (skReady ? '就绪' : (game.skillCd + ' / ' + sk.cd)) + '</span>' +
+          '<span class="bar"><i style="width:' + pct + '%"></i></span></div>';
+      }
+    }
+
+    const bb = $('hero-buffs');
+    if (bb) {
+      const chips = [];
+      for (const b of (game.buffs || [])) {
+        chips.push('<span class="buff-chip">' + icon(b.icon, 12) + '<b>' + esc(b.name) +
+          '</b> ' + b.turns + ' 回合</span>');
+      }
+      if (game.freeMoves > 0) {
+        chips.push('<span class="buff-chip">' + icon('running-shoe', 12) +
+          '<b>免费行动</b> ' + game.freeMoves + ' 次</span>');
+      }
+      const bsig = chips.join('');
+      if (bb._sig !== bsig) { bb._sig = bsig; bb.innerHTML = bsig; }
+    }
+
+    // 属性面板：只有值变了才重建 DOM。这是整屏刷新里最贵的一块。
+    const sig = D.CORE_STATS.concat(D.SUB_STATS).map(function (k) {
+      return statVal(k, k === 'dodge' ? (st[k] || 0) : (st[k] || 0));
+    }).join('|') + '#' + (fl.doubleAtSpd || 0) + '#' + (st.spd || 0);
+    if (sig !== lastSig) {
+      lastSig = sig;
+      const rows = [];
+      for (const k of D.CORE_STATS) rows.push(statRow(k, st[k], st, fl));
+      for (const k of D.SUB_STATS) rows.push(statRow(k, st[k] || 0, st, fl, true));
+      $('stat-panel').innerHTML = rows.join('');
+    }
+
+    $('equip-panel').innerHTML = D.EQUIP_SLOTS.map(function (s) {
+      const it = game.equip[s.key];
+      const rar = it ? D.rarityByKey(it.rarity) : null;
+      return '<button class="eq-slot' + (it ? ' filled' : '') + '" data-tip="item"' +
+        ' data-kind="equip" data-slot="' + s.key + '"' +
+        (it ? ' style="--rc:' + rar.color + '"' : '') + '>' +
+        '<span class="eq-ico">' + icon(it ? it.icon : s.icon, 24) + '</span>' +
+        '<span class="eq-meta"><i>' + esc(s.name) + '</i><b>' + (it ? esc(it.name) : '空') + '</b></span>' +
+        '</button>';
+    }).join('');
+
+    $('bag-count').textContent = game.bag.length + '/' + game.bagCap();
+
+    $('relic-list').innerHTML = game.relics.length
+      ? game.relics.map(function (id) {
+        let r = null;
+        for (const x of D.RELICS) if (x.id === id) r = x;
+        if (!r) return '';
+        const sc = D.SCHOOLS[r.school] || {};
+        return '<span class="relic-chip" data-tip="relic" style="--rc:' + (sc.color || '#cbb994') + '" data-relic="' + r.id + '">' +
+          icon(r.icon, 15) + '</span>';
+      }).join('')
+      : '<span class="muted">尚未获得秘藏。每击杀 ' + D.PROGRESSION.relicEvery + ' 个敌人给一次三选一。</span>';
+
+    const logs = game.logs.slice(-7);
+    $('log-box').innerHTML = logs.map(function (l) {
+      return '<div class="log ' + (KIND_CLASS[l.kind] || 'i') + '">' + esc(l.text) + '</div>';
+    }).join('');
+
+    if (game.pendingRelic && game.pendingRelic.length) showRelicModal(game);
+    else $('relic-modal').classList.add('hidden');
+
+    if (invOpen) renderInventory(game);
+  }
+
+  const KIND_CLASS = { info: 'i', good: 'g', warn: 'w', bad: 'b', loot: 'l' };
+  function statRow(key, v, st, fl, sub) {
+    const m = D.STATS[key];
+    let extra = '';
+    if (key === 'spd' && fl && fl.doubleAtSpd && st.spd >= fl.doubleAtSpd) extra = '<i class="on">连击</i>';
+    return '<div class="stat-row' + (sub ? ' sub' : '') + '" data-tip="stat" data-stat="' + key + '">' +
+      '<span class="s-ico" style="color:' + m.color + '">' + icon(m.icon, 16) + '</span>' +
+      '<span class="s-name">' + esc(m.short) + '</span>' +
+      '<span class="s-val" style="color:' + m.color + '">' + statVal(key, v) + extra + '</span>' +
+      '</div>';
+  }
+
+  /* ============================================================
+     整屏背包 / 商店
+     ============================================================ */
+  function itemCellHTML(item, attrs, size) {
+    if (!item) return '<div class="inv-slot empty" ' + attrs + '></div>';
+    const rar = D.rarityByKey(item.rarity);
+    return '<div class="inv-slot filled" ' + attrs + ' style="--rc:' + rar.color + '">' +
+      icon(item.icon, size || 26) + '<i class="inv-dot" style="background:' + rar.color + '"></i></div>';
+  }
+
+  function renderInventory(game) {
+    if (!game) return;
+    const st = game.stats();
+
+    $('inv-gold').innerHTML = icon('coins', 18) + '<b>' + game.gold + '</b>';
+    $('inv-tab-bag').classList.toggle('on', invTab === 'bag');
+    $('inv-tab-shop').classList.toggle('on', invTab === 'shop');
+    $('inv-pane-bag').classList.toggle('hidden', invTab !== 'bag');
+    $('inv-pane-shop').classList.toggle('hidden', invTab !== 'shop');
+
+    if (invTab === 'bag') {
+      $('inv-hero-art').src = A.heroDataURL(game.cls, 132);
+      $('inv-hero-name').textContent = game.cls.name;
+      $('inv-hero-sub').textContent = game.cls.title + ' · Lv ' + game.level();
+      $('inv-hero-hp').textContent = Math.round(game.hp) + ' / ' + Math.round(st.hp);
+
+      $('inv-equip').innerHTML = D.EQUIP_SLOTS.map(function (s) {
+        const it = game.equip[s.key];
+        return '<div class="inv-eq-wrap">' +
+          itemCellHTML(it, 'data-tip="item" data-kind="equip" data-slot="' + s.key + '"', 30) +
+          '<span class="inv-eq-label">' + esc(s.name) + '</span></div>';
+      }).join('');
+
+      const cells = [];
+      for (let i = 0; i < game.bagCap(); i++) {
+        cells.push(itemCellHTML(game.bag[i], 'data-tip="item" data-kind="bag" data-idx="' + i + '"', 26));
+      }
+      $('inv-grid').innerHTML = cells.join('');
+      $('inv-bag-count').textContent = game.bag.length + ' / ' + game.bagCap();
+      $('inv-sell-hint').textContent = '拖到这里出售';
+      $('inv-sell-value').textContent = dragItem ? ('+' + game.sellPrice(dragItem) + ' 金币') : '';
+      $('inv-sell').classList.toggle('hot', !!dragItem);
+    } else {
+      const atShop = game.tileAt(game.px, game.py) === C.T.SHOP;
+      $('inv-shop-note').innerHTML = atShop
+        ? '<b class="ok">已抵达潮汐商栈</b> —— 可以直接交易'
+        : '<b class="warn">需要站在潮汐商栈上才能交易</b> —— 地图上的金色摊位，小地图上也是金色标记';
+      $('btn-shop-refresh').disabled = !atShop || game.gold < D.LOOT.refreshCost;
+      $('btn-shop-refresh').innerHTML = '刷新货架 · ' + icon('coins', 13) + ' ' + D.LOOT.refreshCost;
+
+      $('inv-shop').innerHTML = game.shopStock.map(function (s, i) {
+        if (s.type === 'heal') {
+          return '<div class="shop-card heal" data-tip="heal" data-idx="' + i + '">' +
+            '<span class="sc-ico">' + icon(s.icon, 30) + '</span>' +
+            '<span class="sc-main"><b>' + esc(s.name) + '</b><i>' + esc(s.text) + '</i></span>' +
+            '<button class="sc-buy" data-buy="' + i + '"' + (atShop && game.gold >= s.price ? '' : ' disabled') + '>' +
+            '<span>' + s.price + '</span></button></div>';
+        }
+        const rar = D.rarityByKey(s.item.rarity);
+        const afford = atShop && game.gold >= s.price;
+        return '<div class="shop-card" data-tip="item" data-kind="shop" data-idx="' + i + '"' +
+          ' style="--rc:' + rar.color + '">' +
+          '<span class="sc-ico">' + icon(s.item.icon, 30) + '</span>' +
+          '<span class="sc-main"><b style="color:' + rar.color + '">' + esc(s.item.name) + '</b>' +
+          '<i>' + esc(rar.name) + ' · ' + esc(slotLabel(s.item.slot)) + '</i></span>' +
+          '<button class="sc-buy" data-buy="' + i + '"' + (afford ? '' : ' disabled') + '>' +
+          '<span>' + s.price + '</span></button></div>';
+      }).join('') || '<div class="muted" style="padding:18px">货架空了。刷新或者继续下潜。</div>';
+    }
+  }
+
+  /* ============================================================
+     拖拽
+     用指针事件手写，不用 HTML5 DnD ——
+     原生 DnD 在 file:// 与 WebView2 里的行为不一致，而且拖影无法自定义。
+     ============================================================ */
+  let dragItem = null, dragFrom = null, ghost = null;
+  let flashIdx = -1;        // 刚融合出来的那件在背包里的下标（要高亮一下）
+
+  function beginDrag(ev, kind, ref, item) {
+    dragItem = item;
+    dragFrom = { kind: kind, ref: ref };
+    ghost = document.createElement('div');
+    ghost.className = 'drag-ghost';
+    ghost.style.setProperty('--rc', D.rarityByKey(item.rarity).color);
+    ghost.innerHTML = icon(item.icon, 30);
+    document.body.appendChild(ghost);
+    moveGhost(ev);
+    document.addEventListener('mousemove', onDragMove);
+    document.addEventListener('mouseup', onDragUp);
+    tooltip('');
+    if (invOpen) renderInventory(global.TideMain.game);
+  }
+  function moveGhost(ev) {
+    if (!ghost) return;
+    ghost.style.left = (ev.clientX - 20) + 'px';
+    ghost.style.top = (ev.clientY - 20) + 'px';
+  }
+  function onDragMove(ev) {
+    moveGhost(ev);
+    const t = document.elementFromPoint(ev.clientX, ev.clientY);
+    const sell = t && t.closest('#inv-sell');
+    $('inv-sell').classList.toggle('over', !!sell);
+    if (t) {
+      const cell = t.closest('.inv-slot, .inv-eq-wrap');
+      document.querySelectorAll('.drop-hot').forEach(function (e) { e.classList.remove('drop-hot'); });
+      if (cell) {
+        const target = cell.classList.contains('inv-eq-wrap') ? cell.firstChild : cell;
+        if (target) target.classList.add('drop-hot');
+        hintFuse(target, ev);
+      }
+    }
+  }
+
+  /**
+   * 拖拽经过一个"可以融合"的目标时，把结果写进气泡。
+   * 融合是破坏性操作（吃掉两件装备 + 金币），**绝不能松手之后才知道会发生什么** ——
+   * 这一条比"能不能融合"本身更重要。
+   */
+  function hintFuse(target, ev) {
+    if (!target || !dragFrom || dragFrom.kind !== 'bag' || !target.dataset) return;
+    const toIdx = target.dataset.idx;
+    if (toIdx === undefined || +toIdx === dragFrom.ref) return;
+    const g = global.TideMain.game;
+    if (!g) return;
+    const a = g.bag[dragFrom.ref], b = g.bag[+toIdx];
+    const cost = g.fuseCost(a, b);
+    if (cost < 0) return;
+    const r = g.fuseResult(a, b);
+    const afford = g.gold >= cost;
+    tooltip('<div class="tt-name">融合 → ' + esc(r.rarity.name) + '「' + esc(b.name) + '」</div>' +
+      '<div class="tt-desc">用「' + esc(a.name) + '」+「' + esc(b.name) + '」合成一件 ' +
+      esc(r.rarity.name) + ' 装备，占用' + esc(slotLabel(r.slot)) + '槽位。<br>花费 ' +
+      cost + ' 金币' + (afford ? '' : ' —— <b>金币不够，还差 ' + (cost - g.gold) + '</b>') + '。</div>' +
+      '<div class="tt-hint">松手即融合，两件材料都会被消耗</div>', ev);
+  }
+  function onDragUp(ev) {
+    document.removeEventListener('mousemove', onDragMove);
+    document.removeEventListener('mouseup', onDragUp);
+    if (ghost) { ghost.remove(); ghost = null; }
+    document.querySelectorAll('.drop-hot').forEach(function (e) { e.classList.remove('drop-hot'); });
+    $('inv-sell').classList.remove('over');
+
+    const g = global.TideMain.game;
+    if (!g || !dragItem) { dragItem = null; dragFrom = null; return; }
+    const t = document.elementFromPoint(ev.clientX, ev.clientY);
+    const item = dragItem, from = dragFrom;
+    dragItem = null; dragFrom = null;
+    if (!t) { renderInventory(g); return; }
+
+    // 1) 拖到出售区
+    if (t.closest('#inv-sell')) {
+      if (from.kind === 'bag') {
+        const before = g.gold;
+        g.sellItem(from.ref);
+        if (g.gold > before) global.TideAudio.play('loot', 'rare');
+      }
+      afterInvAction(g);
+      return;
+    }
+
+    // 2) 拖到装备槽
+    const eqWrap = t.closest('.inv-eq-wrap');
+    if (eqWrap) {
+      const slot = eqWrap.querySelector('.inv-slot').dataset.slot;
+      if (from.kind === 'bag') {
+        const it = g.bag[from.ref];
+        if (it && it.slot === slot) g.equipFromBag(from.ref);
+        else if (it) toast(it.name + ' 不能装在「' + slotLabel(slot) + '」');
+      } else if (from.kind === 'equip' && from.ref !== slot) {
+        toast('装备不能跨槽位拖拽');
+      }
+      afterInvAction(g);
+      return;
+    }
+
+    // 3) 拖到背包格
+    const bagCell = t.closest('#inv-grid .inv-slot');
+    if (bagCell) {
+      const toIdx = +bagCell.dataset.idx;
+      if (from.kind === 'equip') {
+        g.unequip(from.ref);                       // 走一步"卸下"，落在背包末尾
+      } else if (from.kind === 'bag' && toIdx !== from.ref) {
+        const a = g.bag[from.ref], b = g.bag[toIdx];
+        const cost = g.fuseCost(a, b);
+        if (cost >= 0) {
+          // 同品质 → 融合（设计取自《元气骑士》的武器融合）。
+          // 拖拽过程中已经用气泡写清了结果与花费，所以这里直接执行。
+          const r = g.fuseItems(from.ref, toIdx);
+          if (r.ok) {
+            global.TideAudio.play('loot', 'epic');
+            toast('融合出「' + r.item.name + '」· ' + r.item.rarityName + '（-' + r.cost + ' 金币）');
+            flashIdx = g.bag.length - 1;      // 产物落在背包末尾，得让它自己闪一下
+          } else if (r.reason === 'gold') {
+            toast('融合需要 ' + r.cost + ' 金币，还差 ' + (r.cost - g.gold));
+          }
+        } else {
+          // 其余情况是单纯换位：只整理顺序，不动数值
+          const moved = g.bag.splice(from.ref, 1)[0];
+          if (moved) g.bag.splice(Math.min(toIdx, g.bag.length), 0, moved);
+        }
+      }
+      afterInvAction(g);
+      // 融合产物的高亮：只弹一句提示是不够的 ——
+      // 玩家一定会去背包里找"刚合出来的那件"，那就得让它自己跳出来
+      if (flashIdx >= 0) {
+        const grid = $('inv-grid');
+        const cell = grid ? grid.querySelector('.inv-slot[data-idx="' + flashIdx + '"]') : null;
+        if (cell) {
+          cell.classList.add('just-made');
+          setTimeout(function () { cell.classList.remove('just-made'); }, 1000);
+        }
+        flashIdx = -1;
+      }
+      return;
+    }
+    renderInventory(g);
+  }
+
+  function afterInvAction(g) {
+    // 必须走 flush（= 消费一次事件队列），不能只 refresh：
+    // 融合/出售/购买都会产生事件，音效、飘字、提示条全靠这一步
+    global.TideMain.flush();
+    if (invOpen) renderInventory(g);
+  }
+
+  function bindInventory() {
+    /* 双击 / Shift+右键 → 自动装备。
+       两条入口走**同一个函数**，判定口径也只有一份（在模型层 core.canUpgrade）。
+       失败也一定要说话：玩家点了却没反应，只会认为这个功能坏了。 */
+    function autoEquipAt(el, g) {
+      if (!g || !el) return false;
+      const idx = parseInt(el.dataset.idx, 10);
+      if (!(idx >= 0)) return false;
+      const item = g.bag[idx];
+      const r = g.autoEquip(idx);
+      global.TideAudio.ui(!r.ok);
+      const nm = item ? item.name : '装备';
+      if (r.ok) {
+        toast(r.reason === 'empty'
+          ? ('已穿戴「' + nm + '」')
+          : ('已换上「' + nm + '」· 战力 ' + r.oldPower + ' → ' + r.newPower));
+      } else if (r.reason === 'rarity-lower') {
+        toast('未替换：' + nm + ' 品质更低，战力也没强过 10%（' +
+          r.newPower + ' vs ' + r.oldPower + '）');
+      } else {
+        toast('未替换：' + nm + ' 战力 ' + r.newPower + ' 低于已穿戴的 ' + r.oldPower);
+      }
+      // 走既有的「背包里做完一件事」路径：它内部会 flush（消费事件队列）。
+      // 只调 renderInventory 的话，装备事件的音效与飘字会被静默丢掉
+      // —— 症状是"换了装备但没声音"，而且很难联想到是刷新路径的问题。
+      afterInvAction(g);
+      return r.ok;
+    }
+
+    $('inv-screen').addEventListener('dblclick', function (ev) {
+      const el = ev.target.closest('.inv-slot.filled');
+      if (!el || el.dataset.kind !== 'bag') return;
+      autoEquipAt(el, global.TideMain.game);
+    });
+    $('inv-screen').addEventListener('contextmenu', function (ev) {
+      const el = ev.target.closest('.inv-slot.filled');
+      if (!el || el.dataset.kind !== 'bag') return;
+      // 只有 Shift+右键才接管；普通右键仍然拦掉（不弹浏览器菜单），但不做别的
+      ev.preventDefault();
+      if (!ev.shiftKey) return;
+      autoEquipAt(el, global.TideMain.game);
+    });
+
+    $('inv-screen').addEventListener('mousedown', function (ev) {
+      const cell = ev.target.closest('.inv-slot.filled');
+      const g = global.TideMain.game;
+      if (!cell || !g) return;
+      const kind = cell.dataset.kind;
+      if (kind === 'bag') {
+        const it = g.bag[+cell.dataset.idx];
+        if (it) { ev.preventDefault(); beginDrag(ev, 'bag', +cell.dataset.idx, it); }
+      } else if (kind === 'equip') {
+        const it = g.equip[cell.dataset.slot];
+        if (it) { ev.preventDefault(); beginDrag(ev, 'equip', cell.dataset.slot, it); }
+      }
+    });
+    // 背包/装备槽/出售区的悬停统一由 document 级委托处理
+
+    $('inv-close').onclick = function () { closeInventory(); global.TideAudio.ui(); };
+    $('inv-tab-bag').onclick = function () { invTab = 'bag'; renderInventory(global.TideMain.game); global.TideAudio.ui(); };
+    $('inv-tab-shop').onclick = function () { invTab = 'shop'; renderInventory(global.TideMain.game); global.TideAudio.ui(); };
+    $('btn-sell-junk').onclick = function () {
+      const g = global.TideMain.game;
+      if (!g) return;
+      const got = g.sellJunk();
+      if (got) global.TideAudio.play('loot', 'rare');
+      afterInvAction(g);
+    };
+    $('btn-shop-refresh').onclick = function () {
+      const g = global.TideMain.game;
+      if (!g) return;
+      if (g.refreshShop()) { global.TideAudio.play('loot', 'uncommon'); afterInvAction(g); }
+    };
+    $('inv-shop').addEventListener('click', function (ev) {
+      const btn = ev.target.closest('.sc-buy');
+      if (!btn) return;
+      const g = global.TideMain.game;
+      if (!g) return;
+      const i = +btn.dataset.buy;
+      if (g.tileAt(g.px, g.py) !== C.T.SHOP) { toast('需要站在潮汐商栈上才能交易'); return; }
+      if (g.buyItem(i)) { global.TideAudio.play('loot', 'epic'); afterInvAction(g); }
+    });
+    // 商店卡片的悬停也走 document 级委托（data-tip="item" data-kind="shop"）
+  }
+
+  /* ============================================================
+     敌人信息面板
+     ============================================================ */
+  let hoveredEnemy = null;
+  function enemyInfo(game, e, ev) {
+    const el = $('enemy-info');
+    if (!el) return;
+    if (!e || !game.isVisible(e.x, e.y)) {
+      if (hoveredEnemy !== null) { el.classList.add('hidden'); hoveredEnemy = null; }
+      return;
+    }
+    if (hoveredEnemy === e) { placeEnemyInfo(el, ev); return; }
+    hoveredEnemy = e;
+    const st = game.stats();
+    const K = D.COMBAT.K;
+    const dp = C.rawDamage(st.atkP, st.penP, e.stats.defP, K);
+    const dm = C.rawDamage(st.atkM, st.penM, e.stats.defM, K);
+    const useMagic = dm > dp;
+    const mine = Math.max(dp, dm);
+    const theirs = Math.max(
+      C.rawDamage(e.stats.atkP, e.stats.penP, st.defP, K),
+      C.rawDamage(e.stats.atkM, e.stats.penM, st.defM, K));
+    const myRounds = mine > 0 ? Math.ceil(e.hp / mine) : 99;
+    const cost = Math.round(Math.min(myRounds, theirs > 0 ? Math.ceil(st.hp / theirs) : 99) * theirs);
+    const kindWord = e.kind === 'boss' ? '首领' : e.kind === 'elite' ? '精英' : e.kind === 'treasure' ? '宝箱' : '普通';
+
+    let h = '<div class="ei-head"><b>' + esc(e.name) + '</b><i>' + kindWord + '</i></div>';
+    h += '<div class="ei-hp"><span>生命</span><b>' + Math.round(e.hp) + ' / ' + e.maxHp + '</b></div>';
+    h += '<div class="ei-grid">';
+    for (const k of ['atkP', 'atkM', 'defP', 'defM', 'spd']) {
+      const v = Math.round(e.stats[k] || 0);
+      const m = D.STATS[k];
+      if (!v) continue;
+      h += '<div class="ei-s"><i style="color:' + m.color + '">' + icon(m.icon, 13) + '</i>' +
+        m.short + '<b>' + v + '</b></div>';
+    }
+    h += '</div>';
+    h += '<div class="ei-verdict ' + (useMagic ? 'm' : 'p') + '">建议' +
+      (useMagic ? '法术' : '物理') + '：每轮约 <b>' + Math.round(mine) + '</b>，' +
+      myRounds + ' 轮击杀</div>';
+    h += '<div class="ei-cost ' + (cost / st.hp > 0.35 ? 'bad' : cost / st.hp > 0.15 ? 'warn' : 'ok') +
+      '">预计这场要掉 <b>' + cost + '</b> 血（当前 ' + Math.round(game.hp) + '）</div>';
+    if (e.stats.leech) h += '<div class="ei-warn">它吸血 ' + Math.round(e.stats.leech * 100) + "%</div>";
+    // 状态行：这两个状态直接改变"该怎么打"，必须写在玩家看得到的地方
+    if (e.stun > 0) {
+      h += '<div class="ei-warn" style="color:#ffe08a">✦ 被震晕 ' + e.stun + ' 回合 · 这期间它不会动</div>';
+    }
+    if (e.wet > 0) {
+      h += '<div class="ei-warn" style="color:#8fdff0">≈ 潮湿 ' + e.wet + ' 回合 · 受到的法术伤害 +' +
+        Math.round(D.COMBAT.wetAmp * 100) + '%</div>';
+    }
+    el.innerHTML = h;
+    el.classList.remove('hidden');
+    placeEnemyInfo(el, ev);
+  }
+  function placeEnemyInfo(el, ev) {
+    const r = el.getBoundingClientRect();
+    let x = ev.clientX + 18, y = ev.clientY - r.height / 2;
+    if (x + r.width > global.innerWidth - 8) x = ev.clientX - r.width - 18;
+    if (y < 8) y = 8;
+    if (y + r.height > global.innerHeight - 8) y = global.innerHeight - r.height - 8;
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+  }
+
+  /* ============================================================
+     弹窗
+     ============================================================ */
+  let relicShown = '';
+  /* 选牌界面的键盘选中项。
+     为什么要有它：三选一是"这一局的走向"，而鼠标是唯一入口的话，
+     键盘玩家会在这里被迫摸鼠标 —— 恰好是节奏最要紧的一刻。
+     存的是**下标**而不是 id：卡片顺序由 pendingRelic 决定，
+     存下标才能让 ← → 的语义稳定（相邻就是相邻）。 */
+  let relicSel = 0;
+
+  function showRelicModal(game) {
+    const sig = game.pendingRelic.map(function (r) { return r.id; }).join(',');
+    // 弹窗**已经关着**时，即使候选 id 与上一轮完全相同也要重画：
+    // 只比 sig 就提前返回的话，上一轮留下的键盘光标会被带进新一次选择
+    // （而 sig 相同恰恰意味着我们一定会提前返回 —— 这俩是同一件事的两面）。
+    const wasHidden = $('relic-modal').classList.contains('hidden');
+    if (!wasHidden && relicShown === sig) return;
+    relicShown = sig;
+    relicSel = 0;                       // 每次新开都回到第一张，别沿用上一轮的光标
+    const box = $('relic-modal');
+    box.classList.remove('hidden');
+    $('relic-cards').innerHTML = game.pendingRelic.map(function (r) {
+      const sc = D.SCHOOLS[r.school] || {};
+      return '<button class="relic-card" data-id="' + r.id + '" style="--rc:' + (sc.color || '#cbb994') + '">' +
+        '<span class="rc-ico">' + icon(r.icon, 42) + '</span>' +
+        '<span class="rc-school">' + esc(sc.name || '') + '</span>' +
+        '<b class="rc-name">' + esc(r.name) + '</b>' +
+        '<span class="rc-text">' + esc(r.text) + '</span>' +
+        '</button>';
+    }).join('');
+    const cards = $('relic-cards').querySelectorAll('.relic-card');
+    Array.prototype.forEach.call(cards, function (el, i) {
+      el.onclick = function () {
+        global.TideAudio.relic();
+        global.TideMain.chooseRelic(el.dataset.id);
+        relicShown = '';
+      };
+      // 鼠标移上去也同步键盘光标：两套输入不该各记一套状态，
+      // 否则"我明明指着 B，按空格却选了 A"。
+      el.onmouseenter = function () { relicSel = i; applyRelicSel(); };
+    });
+    applyRelicSel();
+    global.TideAudio.relic();
+  }
+
+  /** 把选中态画到卡片上。键盘光标与鼠标悬停必须长得**不一样** ——
+      悬停是"可能会点"，选中是"按空格就选它"。分不清的话，
+      玩家不知道自己那一按会落到谁头上。 */
+  function applyRelicSel() {
+    const cards = $('relic-cards') ? $('relic-cards').querySelectorAll('.relic-card') : [];
+    if (!cards.length) return;
+    if (relicSel < 0) relicSel = 0;
+    if (relicSel >= cards.length) relicSel = cards.length - 1;
+    Array.prototype.forEach.call(cards, function (el, i) {
+      el.classList.toggle('on', i === relicSel);
+    });
+  }
+
+  /** ← → 移动选中项（两端回绕） */
+  function relicMove(dir) {
+    const cards = $('relic-cards') ? $('relic-cards').querySelectorAll('.relic-card') : [];
+    if (!cards.length) return -1;
+    relicSel = (relicSel + (dir > 0 ? 1 : -1) + cards.length) % cards.length;
+    applyRelicSel();
+    global.TideAudio.ui();
+    return relicSel;
+  }
+
+  /** 空格 / 回车确认**当前选中**的那一张 */
+  function relicConfirm() {
+    const cards = $('relic-cards') ? $('relic-cards').querySelectorAll('.relic-card') : [];
+    if (!cards.length) return false;
+    const el = cards[Math.max(0, Math.min(cards.length - 1, relicSel))];
+    if (!el) return false;
+    global.TideAudio.relic();
+    global.TideMain.chooseRelic(el.dataset.id);
+    relicShown = '';
+    return el.dataset.id;
+  }
+
+  function relicSelectedIndex() { return relicSel; }
+
+  function showOver(game) {
+    const win = game.status === 'win';
+    const box = $('over-modal');
+    box.classList.remove('hidden');
+    /* 局外结算。一局只结一次 —— 标记直接打在**这一局的 game 对象**上。
+       为什么不用外部 runId：game 对象天然是每局一个新的，于是"幂等"
+       不依赖调用方记得传 id（那种约定迟早会被漏掉，而漏掉的后果是
+       同一局结晶翻倍，不可逆 —— 玩家可能已经花掉了）。 */
+    if (!game._metaSettled) {
+      game._metaSettled = true;
+      const r = global.TideMeta.settle(game);
+      game._metaGain = r.gain;
+      game._metaCrystals = r.meta.crystals;
+      /* 写榜跑在**同一道幂等闸门里面**，不是外面。
+         结算界面会被重绘、玩家会连点「再来一局」——
+         排在闸门外的写榜会把这些重复调用变成榜上好几条同样的记录，
+         而榜是删不掉的。 */
+      game._score = global.TideData.scoreOf(game);
+      game._boardRank = global.TideMeta.addScore({
+        score: game._score.total,
+        mode: game.endless ? '无尽' : (win ? '通关' : '阵亡'),
+        clsName: game.cls.name,
+        diffName: game.diff.name,
+        depth: game.depth,
+        kills: game.kills,
+        elites: game.eliteKills || 0,
+        bosses: game.bossKills || 0,
+        win: win ? 1 : 0,
+        turns: game.turn,
+        seed: game.seed,
+        date: new Date().toISOString().slice(0, 10),
+        parts: game._score.parts
+      });
+    }
+    $('over-title').textContent = win ? '潮水退去' : '你沉下去了';
+    $('over-title').className = win ? 'win' : 'lose';
+    /* 分数块放在结算最上面：这一屏要回答的第一个问题是
+       "我这一局值多少"，结晶是第二位的（那是局外的账）。 */
+    const sc = game._score || global.TideData.scoreOf(game);
+    $('over-body').innerHTML =
+      '<div class="ov-score">' +
+      '<b>' + sc.total + '</b><i>分</i>' +
+      (game._boardRank ? '<span class="rank">本机第 ' + game._boardRank + ' 名</span>' : '') +
+      '</div>' +
+      '<div class="ov-parts">' +
+      sc.parts.map(function (p) {
+        return '<span><i>' + esc(p.label) + '</i><b>' + p.value + '</b></span>';
+      }).join('') +
+      (sc.mul !== 1 ? '<span class="mul"><i>难度系数</i><b>×' + sc.mul + '</b></span>' : '') +
+      '</div>' +
+      '<div class="ov-grid">' +
+      ov('到达深度', game.endless
+        ? (game.depth + ' 层（无尽）')
+        : (game.depth + ' / ' + game.diff.depth)) +
+      ov('击杀', game.kills) +
+      ov('回合', game.turn) +
+      ov('秘藏', game.relics.length) +
+      ov('金币', game.gold) +
+      ov('难度', game.diff.name) +
+      '</div>' +
+      '<div class="ov-crystal">' + icon('gems', 17) +
+      '<b>潮汐结晶 +' + game._metaGain + '</b>' +
+      '<span class="muted">（共 ' + game._metaCrystals + '，回标题页可兑换永久增益）</span></div>' +
+      '<div class="ov-sub">' + (game.endless
+        ? '潮汐没有底 —— 这一口气撑到了第 ' + game.depth + ' 层。种子 ' + game.seed
+        : (win
+          ? '第 ' + game.diff.depth + ' 层的潮汐之主已经倒下。种子 ' + game.seed
+          : '死因：' + esc(game.reason || '未知') + '。种子 ' + game.seed)) + '</div>';
+    $('btn-again').onclick = function () { global.TideAudio.ui(); global.TideMain.restart(); };
+    $('btn-title').onclick = function () { global.TideAudio.ui(); showTitle(); };
+  }
+  function ov(k, v) {
+    return '<div class="ov-item"><i>' + esc(k) + '</i><b>' + esc(v) + '</b></div>';
+  }
+
+  let helpOpen = false;
+  function showHelp() { helpOpen = !helpOpen; $('help-modal').classList.toggle('hidden', !helpOpen); }
+  function closeHelp() { helpOpen = false; $('help-modal').classList.add('hidden'); }
+
+  /* 潮汐结晶弹窗。
+     为什么是弹窗而不是标题页上的第三块区块：标题页在 exe 的 1380×880
+     窗口里已经装满了，再加一块会把「开始下潜」挤出可视区。
+     而**程序化 click() 测不出这个** —— 它不关心元素在不在屏幕里，
+     所以冒烟全绿、真人一打开就是"卡住"。这是测试的结构性盲区，见第 28 节断言。 */
+  let metaOpen = false;
+  function showMeta() {
+    metaOpen = true;
+    renderMetaPanel();
+    $('meta-modal').classList.remove('hidden');
+  }
+  function closeMeta() { metaOpen = false; $('meta-modal').classList.add('hidden'); }
+  function isMetaOpen() { return metaOpen; }
+
+  /* ============================================================
+     ESC 暂停菜单
+     规则都在这里，界面只负责画；按钮走 inline onclick（和「玩法说明」同一套），
+     省得在 buildStart 里再挂一遍监听。
+     ============================================================ */
+  let pauseOpen = false;
+  function isPauseOpen() { return pauseOpen; }
+
+  function showPause() {
+    pauseOpen = true;
+    renderPausePanel();
+    $('pause-modal').classList.remove('hidden');
+  }
+  function closePause() {
+    pauseOpen = false;
+    $('pause-modal').classList.add('hidden');
+  }
+
+  /** 把"这一局打到哪了"写在菜单上 —— 暂停时最想知道的就是这个 */
+  function renderPausePanel() {
+    const g = global.TideMain.game;
+    const sub = $('pause-stats');
+    if (sub && g) {
+      const st = g.stats();
+      sub.textContent = g.cls.name + ' · ' + g.diff.name +
+        ' · 深度 ' + g.depth + ' / ' + g.diff.depth +
+        ' · 击杀 ' + g.kills + ' · 回合 ' + g.turn +
+        ' · 生命 ' + Math.round(g.hp) + ' / ' + Math.round(st.hp);
+    }
+    const sb = $('btn-pause-sound');
+    if (sb) sb.textContent = global.TideAudio.isOn() ? '音效：开' : '音效：关';
+  }
+
+  function pauseHelp() { closePause(); showHelp(); }
+  function pauseSound() {
+    const on = !global.TideAudio.isOn();
+    global.TideAudio.toggle(on);
+    const b = document.getElementById('btn-sound');
+    if (b) b.classList.toggle('off', !on);
+    renderPausePanel();
+    toast(on ? '音效已开' : '音效已关');
+  }
+  function pauseRestart() {
+    closePause();
+    global.TideAudio.ui();
+    global.TideMain.restart();
+  }
+  function pauseTitle() {
+    closePause();
+    global.TideAudio.ui();
+    showMenu();          // "放弃并返回"回的是主菜单：那一层才是真正的出口
+  }
+
+  /* ============================================================
+     局内左侧「操作指南」（v11-8）
+
+     内容全部来自 data.js 的 KEYS —— 那是全项目唯一一份"按什么键做什么事"的表。
+     这里只负责**按当前界面过滤**并画出来。
+
+     为什么必须跟着界面变：一份"什么都列"的静态表在背包打开时是错的 ——
+     那时 WASD 不走位、Q 不放技能。指南写着能按、实际按不动，
+     玩家会先怀疑自己按错了（这类 bug 几乎不会被反馈回来）。
+     ============================================================ */
+  let guideOpen = null;      // null = 还没从存档里读过
+
+  function guideScope(game) {
+    if (game && game.pendingRelic) return 'relic';
+    if (invOpen) return 'inv';
+    return 'game';
+  }
+
+  function renderGuide(game) {
+    const panel = $('guide-panel'), body = $('guide-body');
+    if (!panel || !body || !game) return;
+    if (guideOpen === null) guideOpen = global.TideSettings.get('guide') !== false;
+    panel.classList.remove('hidden');
+    panel.classList.toggle('collapsed', !guideOpen);
+    const scope = guideScope(game);
+    const rows = (D.KEYS || []).filter(function (k) { return k.scope.indexOf(scope) >= 0; });
+    const sig = scope + '|' + rows.length + '|' + (guideOpen ? 1 : 0);
+    if (body._sig === sig) return;      // 没变就不重画（render 每帧都会经过这里）
+    body._sig = sig;
+    body.innerHTML = rows.map(function (k) {
+      return '<div class="gd-row"><b>' + esc(k.label) + '</b><i>' + esc(k.text) + '</i></div>';
+    }).join('');
+  }
+
+  function toggleGuide() {
+    guideOpen = !(guideOpen === null ? (global.TideSettings.get('guide') !== false) : guideOpen);
+    global.TideSettings.set('guide', guideOpen);
+    const body = $('guide-body');
+    if (body) body._sig = '';           // 逼它重画
+    if (global.TideMain && global.TideMain.game) renderGuide(global.TideMain.game);
+    return guideOpen;
+  }
+
+  /* ============================================================
+     区域横幅（v11-5）
+
+     进入一个新区域时报一句"我到了哪儿"。
+     它和 toast 的分工是「事件 vs 流水账」：
+       掉一件装备是流水账 —— toast，窄条、靠边、错过了也不心疼；
+       踏进危险区是事件 —— 横幅，居中、带危险度星、挡住中央两秒。
+     事件值得被看见、流水账不该，所以没有把两者合并成一个组件。
+     ============================================================ */
+  let bannerT = 0;
+
+  function regionBanner(ev) {
+    const el = $('region-banner');
+    if (!el || !ev) return;
+    const n = Math.max(1, Math.min(3, ev.danger || 1));
+    el.innerHTML = '<i>进入</i><b>' + esc(ev.name || '未知区') + '</b><span>' +
+      '\u2605'.repeat(n) + '</span>';
+    el.className = 'show r-' + (ev.rtype || 'normal');
+    clearTimeout(bannerT);
+    bannerT = setTimeout(function () {
+      el.className = 'r-' + (ev.rtype || 'normal');
+    }, 2200);
+  }
+
+  function toast(msg) {
+    const el = $('toast');
+    el.textContent = msg;
+    el.classList.add('on');
+    clearTimeout(el._t);
+    el._t = setTimeout(function () { el.classList.remove('on'); }, 1700);
+  }
+
+  /* ============================================================
+     场景切换
+     ============================================================ */
+  /* ============================================================
+     潮汐结晶：局外永久解锁
+     规则全在 data.js（META）与 meta.js（存档），这里只负责画出来。
+     ============================================================ */
+  function renderMetaPanel() {
+    const MU = global.TideMeta;
+    const m = MU.load();
+    const grid = $('meta-grid');
+    if (!grid) return;        // 面板不在当前页面上（比如局内）→ 直接跳过，别把界面搞崩
+    // 结晶数量显示在两处：标题页按钮上、弹窗标题里。两处都判空 ——
+    // 少一个元素不该让整个面板挂掉（标题页和弹窗本来就可以分开调整）。
+    const cry1 = $('meta-crystals'), cry2 = $('meta-modal-count');
+    if (cry1) cry1.textContent = m.crystals;
+    if (cry2) cry2.textContent = m.crystals;
+    const hint = $('meta-hint');
+    if (hint) {
+      hint.textContent = m.runs
+        ? ('已下潜 ' + m.runs + ' 次 · 通关 ' + m.wins + ' 次 · 最深层 ' + m.best +
+          ' · 累计结晶 ' + m.total)
+        : '还没有结晶。死一次就有了 —— 深度和击杀都算数。';
+    }
+
+    grid.innerHTML = D.META.unlocks.map(function (u) {
+      const has = !!m.owned[u.id];
+      const v = D.META.canBuy(m.owned, m.crystals, u.id);
+      // 四种状态各自要能说清"为什么现在买不了"。
+      // 只把按钮置灰而不给理由，玩家会以为坏了 —— 这是界面层最容易偷的懒。
+      let state = 'buy', note = '花费 ' + u.cost + ' 结晶';
+      if (has) { state = 'owned'; note = '已解锁'; }
+      else if (v.reason === 'req') {
+        const pre = D.META.unlockById(u.req);
+        state = 'locked'; note = '需先解锁「' + (pre ? pre.name : u.req) + '」';
+      } else if (v.reason === 'poor') { state = 'poor'; note = '还差 ' + v.need + ' 结晶'; }
+      return '<button class="meta-card ' + state + '" data-meta="' + u.id + '">' +
+        '<span class="meta-ico">' + icon(u.icon, 22) + '</span>' +
+        '<span class="meta-body"><b>' + esc(u.name) + '</b><i>' + esc(u.desc) + '</i></span>' +
+        '<span class="meta-cost">' + (has ? '✓' : u.cost) + '</span>' +
+        '<span class="meta-note">' + esc(note) + '</span>' +
+        '</button>';
+    }).join('');
+
+    Array.prototype.forEach.call(grid.querySelectorAll('[data-meta]'), function (el) {
+      el.onclick = function () {
+        const r = MU.buy(el.dataset.meta);
+        global.TideAudio.ui(!r.ok);
+        if (!r.ok) {
+          if (r.reason === 'poor') toast('结晶不够，还差 ' + r.need);
+          else if (r.reason === 'req') toast('要先解锁前置项');
+          else if (r.reason === 'owned') toast('已经解锁过了');
+          return;
+        }
+        toast('已解锁「' + r.unlock.name + '」—— 下一局开始生效');
+        renderMetaPanel();
+      };
+    });
+  }
+
+  function showTitle() {
+    closeHelp();
+    invOpen = false; syncInventory();
+    $('title-screen').classList.remove('hidden');
+    if ($('menu-screen')) $('menu-screen').classList.add('hidden');
+    $('game-screen').classList.add('hidden');
+    $('over-modal').classList.add('hidden');
+    $('meta-modal').classList.add('hidden');
+    metaOpen = false;
+    $('pause-modal').classList.add('hidden');
+    pauseOpen = false;
+    relicShown = '';
+    renderClassPicker();
+    renderDiffPicker();
+    renderMetaPanel();                        // 刷新标题页按钮上的结晶数
+    global.TideAudio.music('title');          // 标题页：静谧段（只有低音，慢）
+    global.TideMain.game = null;
+    setTimeout(function () { global.TideRender.resize(); }, 30);
+  }
+  function showGame() {
+    closeHelp();
+    invOpen = false; syncInventory();
+    $('title-screen').classList.add('hidden');
+    if ($('menu-screen')) $('menu-screen').classList.add('hidden');
+    $('game-screen').classList.remove('hidden');
+    $('over-modal').classList.add('hidden');
+    relicShown = '';
+    lastSig = '';
+    $('pause-modal').classList.add('hidden');
+    pauseOpen = false;
+    global.TideAudio.music('game', 1);        // 局内：探索段，强度随后由 render() 接管
+    setTimeout(function () { global.TideRender.init(); global.TideRender.resize(); }, 30);
+  }
+
+  global.TideUI = {
+    init: function () { buildMenu(); buildStart(); buildGame(); bindInventory(); bindTips(); },
+    showMenu: showMenu,
+    renderMenu: renderMenu,
+    showSettings: showSettings,
+    closeSettings: closeSettings,
+    isSettingsOpen: isSettingsOpen,
+    renderSettings: renderSettings,
+    showBoard: showBoard,
+    closeBoard: closeBoard,
+    isBoardOpen: isBoardOpen,
+    renderBoard: renderBoard,
+    applySettings: applySettings,
+    quitGame: quitGame,
+    render: render,
+    enemyInfo: enemyInfo,
+    showTitle: showTitle,
+    showGame: showGame,
+    showOver: showOver,
+    renderMetaPanel: renderMetaPanel,
+    showMeta: showMeta,
+    closeMeta: closeMeta,
+    relicMove: relicMove,
+    relicConfirm: relicConfirm,
+    relicSelectedIndex: relicSelectedIndex,
+    isMetaOpen: isMetaOpen,
+    showPause: showPause,
+    closePause: closePause,
+    isPauseOpen: isPauseOpen,
+    pauseHelp: pauseHelp,
+    pauseSound: pauseSound,
+    pauseRestart: pauseRestart,
+    pauseTitle: pauseTitle,
+    showHelp: showHelp,
+    closeHelp: closeHelp,
+    tooltip: tooltip,
+    toast: toast,
+    regionBanner: regionBanner,
+    toggleGuide: toggleGuide,
+    /* 指南的观测量：当前是哪一套、画了几行、展开还是收起。
+       "指南有没有跟着界面变"必须能断言 —— 它正是这个面板存在的理由。 */
+    guideState: function () {
+      const panel = $('guide-panel'), body = $('guide-body');
+      if (!panel || !body) return null;
+      const g = global.TideMain ? global.TideMain.game : null;
+      return {
+        scope: g ? guideScope(g) : null,
+        rows: body.querySelectorAll('.gd-row').length,
+        open: !panel.classList.contains('collapsed'),
+        hidden: panel.classList.contains('hidden'),
+        text: body.textContent || ''
+      };
+    },
+    /* 横幅是不是正显示着、显示的是哪一类、里面的字是什么 ——
+       这三件事都要能断言，否则"进新区域会报一声"只是口头承诺。 */
+    regionBannerState: function () {
+      const el = $('region-banner');
+      if (!el) return null;
+      const cls = el.className || '';
+      const m = /r-([a-z]+)/.exec(cls);
+      return { shown: cls.indexOf('show') >= 0, rtype: m ? m[1] : null, text: el.textContent || '' };
+    },
+    openInventory: openInventory,
+    closeInventory: closeInventory,
+    toggleInventory: toggleInventory,
+    isInventoryOpen: function () { return invOpen; },
+    get pick() { return pick; },
+    isHelpOpen: function () { return helpOpen; }
+  };
+})(window);

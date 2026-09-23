@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>load-check</title>
+<style>body{background:#0a0e18;color:#ccd6e6;font:13px Consolas,monospace}
+pre{padding:12px;white-space:pre-wrap}</style>
+</head>
+<body>
+<pre id="out">checking...</pre>
+<script>
+/* ============================================================
+   脚本语法自检。
+
+   为什么需要它：file:// 下浏览器会把脚本错误掩码成 "Script error."，
+   集成测试里只能看到二手现象（"某某模块未加载"），看不到真正的原因。
+   这里用同步 XHR 把源文件读成文本，交给 new Function 解析 ——
+   语法错误会带出确切信息，而且不依赖任何外部工具。
+
+   注意：new Function(body) 把整份源码当成函数体解析，
+   本项目每个模块都是 (function(global){...})(window) 形式，正好适用。
+   ============================================================ */
+var files = ['data.js', 'meta.js', 'settings.js', 'icons.js', 'art.js', 'fx.js', 'audio.js',
+  'core.js', 'render.js', 'ui.js', 'main.js'];
+var lines = ['LOADCHECK'];
+var bad = 0;
+
+function readText(path) {
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', path, false);
+  xhr.send(null);
+  return xhr.responseText;
+}
+
+files.forEach(function (f) {
+  var src;
+  try { src = readText('../src/js/' + f); }
+  catch (e) { lines.push('  读取失败 ' + f + ': ' + e.message); bad++; return; }
+  try {
+    new Function(src);
+    lines.push('  OK   ' + f + '  (' + src.length + ' 字符)');
+  } catch (e) {
+    bad++;
+    lines.push('  BAD  ' + f + '  → ' + e.name + ': ' + e.message);
+    // 定位到具体行：二分注释法太慢，这里直接报出可疑行号附近的内容
+    var m = /line (\d+)/i.exec(e.message);
+    if (m) {
+      var ln = parseInt(m[1], 10);
+      var arr = src.split('\n');
+      for (var k = Math.max(0, ln - 3); k < Math.min(arr.length, ln + 2); k++) {
+        lines.push('        ' + (k + 1) + '| ' + arr[k]);
+      }
+    }
+  }
+});
+
+// 再检查 CSS 里的括号是否配平（样式表出错同样是静默的）
+try {
+  var css = readText('../src/css/style.css');
+  var ob = (css.match(/\{/g) || []).length, cb = (css.match(/\}/g) || []).length;
+  lines.push('  ' + (ob === cb ? 'OK  ' : 'BAD ') + ' style.css  花括号 ' + ob + ' / ' + cb);
+  if (ob !== cb) bad++;
+} catch (e) { lines.push('  读取失败 style.css'); bad++; }
+
+lines.push('');
+lines.push(bad ? ('结果: ' + bad + ' 个文件有问题') : '结果: 全部文件语法正确');
+document.getElementById('out').textContent = lines.join('\n');
+</script>
+</body>
+</html>

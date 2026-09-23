@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>tide-region-probe</title>
+<style>body{background:#05070d;color:#ccd6e6;font:12px Consolas,monospace;margin:0}
+#out{white-space:pre-wrap;padding:10px}iframe{position:fixed;left:-6000px;top:0;width:1180px;height:820px}</style>
+</head>
+<body>
+<pre id="out">booting...</pre>
+<iframe id="fr" src="../src/index.html"></iframe>
+<script>
+/* 把区域划分单独跑一遍，看是不是它把渲染进程搞崩的。
+   只做"造一局 + 打印区域统计"这一件事，不带任何界面。 */
+var L = [];
+function p(s) { L.push(s); document.getElementById('out').textContent = L.join('\n'); }
+var fr = document.getElementById('fr');
+
+fr.addEventListener('load', function () {
+  var w = fr.contentWindow;
+  w.addEventListener('error', function (ev) { if (ev.message) p('!! JS错误: ' + ev.message); });
+  setTimeout(function () { run(w); }, 900);
+});
+
+function run(w) {
+  try {
+    p('=== 区域划分探针 ===');
+    p('TideData.REGIONS 存在 = ' + !!(w.TideData && w.TideData.REGIONS));
+    var C = w.TideCore;
+    var t0 = Date.now();
+
+    // ① 造一层，看区域是否成形
+    var g = new C.Game({ classKey: 'warlord', difficulty: 'standard', seed: 20260922 });
+    p('建局耗时 = ' + (Date.now() - t0) + 'ms');
+    p('地图 = ' + g.W + 'x' + g.H + '  敌人 = ' + g.enemies.length);
+    p('regionOf 存在 = ' + !!g.regionOf + '  区域数 = ' + (g.regions ? g.regions.length : -1));
+    if (g.regions) {
+      for (var i = 0; i < g.regions.length; i++) {
+        var r = g.regions[i];
+        p('  区域 ' + i + ': 类型=' + r.type + ' 格数=' + r.tiles +
+          ' 中心=(' + r.cx + ',' + r.cy + ') 种子=(' + r.seed.x + ',' + r.seed.y + ')');
+      }
+      p('守门区 = ' + g.gateRegion + '（出口在 (' + g.exit.x + ',' + g.exit.y +
+        ') 的类型 = ' + g.regionTypeAt(g.exit.x, g.exit.y) + '）');
+      // ② 划分必须是一个"划分"：每个可走格恰好一个区域
+      var WALK = null, noRegion = 0, walkTotal = 0;
+      for (var y = 0; y < g.H; y++) for (var x = 0; x < g.W; x++) {
+        // 用 regionAt 判断：可走格必须有区域
+        if (!g.walkable(x, y)) continue;
+        walkTotal++;
+        if (g.regionAt(x, y) < 0) noRegion++;
+      }
+      p('可走格 = ' + walkTotal + '，其中没有区域的 = ' + noRegion +
+        (noRegion === 0 ? '  ✓（划分完整）' : '  ✗（有漏格）'));
+      // ③ 出口区域必须真的可达（守门区不能是个孤岛）
+      var gp = g.regions[g.gateRegion];
+      var reach = g.findPath(g.px, g.py, g.exit.x, g.exit.y, 2000);
+      p('玩家能走到出口 = ' + !!reach + (reach ? '（' + reach.length + ' 步）' : ''));
+      p('出口区域标注 = ' + JSON.stringify(g.exitRegionInfo()));
+      // ④ 敌人区域绑定率
+      var bound = 0, unbound = 0;
+      for (var ei = 0; ei < g.enemies.length; ei++) {
+        if (g.enemies[ei].region >= 0) bound++; else unbound++;
+      }
+      p('敌人绑定区域 = ' + bound + ' 只，未绑定 = ' + unbound + ' 只');
+      // ⑤ 敌人寻路不许越界（这是区域规则的核心）
+      var cross = 0, tested = 0;
+      for (var ej = 0; ej < g.enemies.length; ej++) {
+        var e = g.enemies[ej];
+        if (e.region < 0) continue;
+        var path = g.findPath(e.x, e.y, g.px, g.py, 400, 0, e.region);
+        if (!path) continue;
+        tested++;
+        for (var k = 0; k < path.length; k++) {
+          if (g.regionAt(path[k].x, path[k].y) !== e.region) { cross++; break; }
+        }
+      }
+      p('测试敌人寻路 ' + tested + ' 条，越界的 = ' + cross +
+        (cross === 0 ? '  ✓（怪物不会离开自己的区域）' : '  ✗'));
+    }
+    p('');
+    p('=== DONE ===');
+  } catch (e) {
+    p('!! 探针异常: ' + (e && e.stack ? e.stack : e));
+    p('=== DONE ===');
+  }
+}
+</script>
+</body>
+</html>

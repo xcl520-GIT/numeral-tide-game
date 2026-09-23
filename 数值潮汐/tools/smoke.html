@@ -1,0 +1,2737 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>tide-smoke</title>
+<style>body{background:#05070d;color:#ccd6e6;font:13px Consolas,monospace;margin:0}
+#out{white-space:pre-wrap;padding:12px}iframe{position:fixed;left:-4000px;top:0;width:1280px;height:800px}</style>
+</head>
+<body>
+<pre id="out">booting...</pre>
+<iframe id="fr" src="../src/index.html"></iframe>
+<script>
+/* ============================================================
+   集成冒烟测试。
+   为什么要单独做这一步（而不是"打开浏览器看一眼"）：
+   这个游戏的绝大部分代码是 DOM 与 canvas 交互，逻辑模拟器碰不到它们。
+   渲染层引用错一个函数名、UI 里查一个不存在的 id，
+   在无头模拟里全都看不出来，但玩家一进去就是白屏。
+   这里把真实页面塞进 iframe，驱动真实流程并捕获所有未处理异常。
+   需要 Edge 参数 --allow-file-access-from-files（file:// 下跨 frame 访问）。
+
+   参数：
+     ?page=../release/数值潮汐/www/index.html   ← 换一个页面来测（用于验证分发包）
+   ============================================================ */
+var qp = {};
+location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+  if (!kv) return; var p = kv.split('='); qp[p[0]] = decodeURIComponent(p[1] || '');
+});
+if (qp.page) document.getElementById('fr').src = qp.page;
+var out = [];
+var errors = [];
+var fr = document.getElementById('fr');
+
+function log(s) { out.push(s); flush(); }
+function flush() { document.getElementById('out').textContent = 'SMOKE\n' + out.join('\n'); }
+function fail(s) { errors.push(s); log('  FAIL ' + s); }
+function ok(s) { log('  ok   ' + s); }
+
+function approx(a, b, tol) { return Math.abs(a - b) <= (tol === undefined ? 1 : tol); }
+
+fr.addEventListener('load', function () {
+  var w = fr.contentWindow;
+  var d = fr.contentDocument;
+  w.addEventListener('error', function (ev) {
+    // 资源型错误（没有 message / error，比如 favicon 404）**不是**游戏的问题 ——
+    // 游戏自己也会忽略它们，第 27 节还会故意注入这种事件来验证这一点。
+    // 脚手架如果把这种事件记成失败，就等于重复了游戏上一版犯的那个错：
+    // 拿一个无害的 404 当崩溃。
+    if (!ev.message && !ev.error) return;
+    if (/^烟雾测试/.test(ev.message || '')) return;   // 第 27 节故意注入的假错误
+    fail('window.onerror: ' + ev.message + ' @' + ev.filename + ':' + ev.lineno);
+  });
+  w.addEventListener('unhandledrejection', function (ev) {
+    fail('unhandledrejection: ' + ev.reason);
+  });
+
+  setTimeout(function () {
+    run(w, d);
+  }, 700);
+});
+
+function run(w, d) {
+  try {
+    // ---------- 1. 模块加载 ----------
+    ['TideData', 'TideMeta', 'TideSettings', 'TideIcons', 'TideArt', 'TideFX', 'TideAudio', 'TideCore',
+      'TideRender', 'TideUI', 'TideMain'].forEach(function (m) {
+        if (w[m]) ok('module ' + m); else fail('module ' + m + ' 未加载');
+      });
+    if (errors.length) return finish();
+
+    // 测试必须可复现：先把玩家设置复位。
+    // 真机存档里可能存着任意缩放倍率/音量，而"视口尺寸 950x800"这类断言
+    // 是按 1× 写的 —— 不复位就会随上一个玩家的存档飘。
+    // （同族教训：**不可复现的测试等于没有测试**。）
+    try { w.TideSettings.reset(); w.TideRender.setZoom(1); } catch (e) { }
+
+    // ---------- 2. 图标模块 ----------
+    var icons = w.TideIcons.PATHS;
+    var wantIcons = ['hearts', 'broadsword', 'magic-swirl', 'armor-punch', 'magic-shield',
+      'checked-shield', 'shield-reflect', 'wingfoot', 'crossed-swords', 'droplets',
+      'dodging', 'clover', 'visored-helm', 'breastplate', 'leather-boot', 'ring', 'backpack'];
+    var missing = wantIcons.filter(function (n) { return !icons[n]; });
+    if (missing.length) fail('缺少图标: ' + missing.join(',')); else ok('图标完整 (' + Object.keys(icons).length + ')');
+    // 每个装备基底 / 词条引用的图标都要真的存在，否则界面上会出现空白方块
+    var refs = {};
+    w.TideData.BASES.forEach(function (b) { refs[b.icon] = 1; });
+    w.TideData.EQUIP_SLOTS.forEach(function (s) { refs[s.icon] = 1; });
+    w.TideData.AFFIXES.forEach(function (a) { refs[a.icon] = 1; });
+    w.TideData.RELICS.forEach(function (r) { refs[r.icon] = 1; });
+    Object.keys(w.TideData.STATS).forEach(function (k) { refs[w.TideData.STATS[k].icon] = 1; });
+    var bad = Object.keys(refs).filter(function (n) { return !icons[n]; });
+    if (bad.length) fail('数据层引用了不存在的图标: ' + bad.join(',')); else ok('数据层图标引用全部有效');
+
+    // ---------- 3. 瓦片生成 ----------
+    var tiles = w.TideArt.tiles;
+    var tileKeys = ['floor0', 'water1', 'lava2', 'moss1', 'stairs1', 'chest',
+      'prop_brazier1', 'wall0', 'wall7', 'shop0', 'fountain'];
+    var missT = tileKeys.filter(function (k) { return !tiles[k]; });
+    if (missT.length) fail('缺少瓦片: ' + missT.join(',')); else ok('瓦片全部就绪');
+
+    // ---------- 4. 开始界面 DOM ----------
+    if (d.querySelectorAll('#class-pick .cls-card').length !== 4) fail('职业卡数量不是 4');
+    else ok('职业卡 4 张');
+    if (d.querySelectorAll('#diff-pick .diff-card').length !== 3) fail('难度卡数量不是 3');
+    else ok('难度卡 3 张');
+    var artImg = d.querySelector('#class-pick .cls-art');
+    if (!artImg || artImg.src.indexOf('data:image/png') !== 0) fail('职业立绘未生成');
+    else ok('职业立绘 dataURL 已生成');
+
+    // ---------- 5. 开局 ----------
+    var core = w.TideCore;
+    w.TideUI.pick.cls = 'warlord';
+    w.TideUI.pick.diff = 'standard';
+    w.TideMain.start({ mode: 'normal', seed: 20260922 });
+    var g = w.TideMain.game;
+    if (!g) { fail('start() 之后没有 game'); return finish(); }
+    ok('开局 depth=' + g.depth + ' enemies=' + g.enemies.length + ' hp=' + g.hp);
+
+    if (g.W !== 45 || g.H !== 35) fail('地图尺寸不是 45x35: ' + g.W + 'x' + g.H);
+    else ok('地图 45x35');
+    if (!g.base || g.base.length !== g.W * g.H) fail('缺少基准地形快照 base');
+    else ok('基准地形快照存在');
+
+    // 出生点必须可站立，且周围没有水
+    if (!g.walkable(g.px, g.py)) fail('玩家出生点不可站立');
+    else ok('出生点合法');
+
+    // 出口必须可达（这是之前真实踩过的坑）
+    var reach = g._reachable(g.px, g.py);
+    if (!reach[g.exit.y * g.W + g.exit.x]) fail('潮汐之门不可达');
+    else ok('潮汐之门可达');
+    var unreach = 0;
+    g.enemies.forEach(function (e) { if (!reach[e.y * g.W + e.x]) unreach++; });
+    if (unreach) fail(unreach + ' 个敌人不可达'); else ok('全部敌人可达');
+
+    // ---------- 6. 战斗数学 ----------
+    if (!approx(core.rawDamage(50, 0, 50, 50), 25, 0.01)) fail('伤害公式：50攻打50防应为25');
+    else ok('伤害公式 radDamage 正确');
+    if (!approx(core.rawDamage(100, 50, 50, 50), 100, 0.01)) fail('穿透应把防御削到0');
+    else ok('穿透计算正确');
+    if (core.rawDamage(10, 0, 0, 50) !== 10) fail('零防御时伤害应等于攻击');
+    else ok('零防御边界正确');
+    // NaN 传染是上一版的经典事故，必须守住
+    var nanTests = [
+      ['缺 penP', { atkP: 10, defP: 5 }, { defP: 5 }],
+      ['缺 defM', { atkM: 10, penM: 3 }, {}],
+      ['全空', {}, {}]
+    ];
+    var nanBad = 0;
+    nanTests.forEach(function (t) {
+      var v = core.rawDamage(t[1].atkP || t[1].atkM, t[1].penP || t[1].penM, t[2].defP || t[2].defM, 50);
+      if (!isFinite(v)) { nanBad++; fail('NaN 传染: ' + t[0]); }
+    });
+    if (!nanBad) ok('缺字段不会产生 NaN');
+
+    // ---------- 7. 装备与掉落 ----------
+    var rar = {};
+    var flagItems = 0;
+    for (var i = 0; i < 400; i++) {
+      var it = g.makeItem({ depth: 1 + (i % 5), bonus: i % 3 });
+      rar[it.rarity] = (rar[it.rarity] || 0) + 1;
+      if (!it.name || !it.slot || !it.text.length) { fail('装备字段不全: ' + JSON.stringify(it).slice(0, 120)); break; }
+      for (var k in it.total) if (!isFinite(it.total[k])) { fail('装备属性 NaN: ' + k); break; }
+      for (var f in it.flags) flagItems++;
+    }
+    ok('400 件随机装备生成成功，品质分布 ' + JSON.stringify(rar));
+    if (Object.keys(rar).length < 4) fail('品质分布过窄: ' + JSON.stringify(rar));
+    else ok('品质分布覆盖 ' + Object.keys(rar).length + ' 档');
+
+    // 掉率抽样
+    var drops = 0, N = 3000;
+    var fakeEnemy = { kind: 'normal', x: 0, y: 0 };
+    for (var j = 0; j < N; j++) if (g._rollDrop(fakeEnemy)) drops++;
+    var rate = drops / N;
+    ok('普通怪掉率抽样 ' + (rate * 100).toFixed(1) + '% (配置 ' + (w.TideData.LOOT.baseChance * 100) + '%)');
+    if (Math.abs(rate - w.TideData.LOOT.baseChance) > 0.05) fail('掉率偏离配置过多');
+
+    // ---------- 8. 装备穿戴 / 卸下 ----------
+    g.bag = [];
+    for (var s = 0; s < 6; s++) g.bag.push(g.makeItem({ depth: 3 }));
+    var before0 = g.bag.length;
+    g.equipFromBag(0);
+    if (g.bag.length !== before0 - 1) fail('穿戴后背包数量不对');
+    else ok('穿戴装备 ok');
+    var slot0 = Object.keys(g.equip).filter(function (k) { return g.equip[k]; })[0];
+    if (!slot0) fail('穿戴后 equip 仍为空');
+    else {
+      var hpBefore = g.hp, maxBefore = g.stats().hp;
+      g.unequip(slot0);
+      if (g.equip[slot0]) fail('卸下失败');
+      else ok('卸下装备 ok (生命 ' + hpBefore + '→' + g.hp + ', 上限 ' + maxBefore + '→' + g.stats().hp + ')');
+      if (g.hp > g.stats().hp) fail('卸下后当前生命超过上限');
+    }
+
+    // ---------- 9. 潮汐 ----------
+    var t0 = g.tideLevel;
+    var lvls = [];
+    g.turn = 0;
+    var tideEvery = w.TideData.DIFFICULTIES.standard.tideEvery;
+    for (var turn = 0; turn < 60; turn++) {
+      g.turn += tideEvery;
+      g._tideTick();
+      lvls.push(g.tideLevel);
+    }
+    ok('潮汐水位序列 ' + lvls.slice(0, 14).join('') + '  (完整周期 ' + lvls.slice(0, 7).join('') + ')');
+    if (lvls.indexOf(0) < 0) fail('潮汐从不回落 —— 水位会变成单向死亡时钟');
+    else ok('潮汐有涨有落');
+    if (lvls.indexOf(3) < 0) fail('潮汐涨不到满潮');
+    else ok('潮汐能到满潮');
+    // 水面必须真的跟着变
+    var waterAt = function () {
+      var n = 0;
+      for (var q = 0; q < g.tiles.length; q++) if (g.tiles[q] === core.T.WATER) n++;
+      return n;
+    };
+    g.tideLevel = 0; g._applyTide();
+    var w0 = waterAt();
+    g.tideLevel = 3; g._applyTide();
+    var w3 = waterAt();
+    if (w3 <= w0) fail('水位3 的水面没有比水位0 大 (' + w0 + ' → ' + w3 + ')');
+    else ok('水面随水位变化 ' + w0 + ' → ' + w3 + ' 格');
+    g.tideLevel = 0; g._applyTide();
+    if (waterAt() !== w0) fail('退潮没有退回到基准 (' + waterAt() + ' vs ' + w0 + ')');
+    else ok('退潮能回到基准');
+
+    // ---------- 10. 走完整局（走真实 action 路径，含界面刷新） ----------
+    w.TideMain.start({ mode: 'normal', seed: 20260922 });
+    g = w.TideMain.game;
+    var steps = 0, killed = 0, levels = 1;
+    var guard = 0;
+    while (g.status === 'playing' && guard++ < 1500) {
+      if (g.pendingRelic) { w.TideMain.chooseRelic(g.pendingRelic[0].id); continue; }
+      var beforeTurn = g.turn;
+      // 复刻 AI 的一步，但每次都走 TideMain 的公开入口
+      var st = g.stats();
+      var tgt = null, bestSc = -1e9;
+      for (var ei = 0; ei < g.enemies.length; ei++) {
+        var e2 = g.enemies[ei];
+        var dd = Math.abs(e2.x - g.px) + Math.abs(e2.y - g.py);
+        var sc = -dd + (e2.isBoss ? -30 : 0);
+        if (sc > bestSc) { bestSc = sc; tgt = e2; }
+      }
+      var path = tgt ? g.findPath(g.px, g.py, tgt.x, tgt.y, 400, 0) : null;
+      if (!path) path = g.findPath(g.px, g.py, g.exit.x, g.exit.y, 400, 5);
+      if (!path || path.length < 2) break;
+      if (!g.stepTo(path[1].x, path[1].y)) break;
+      if (g.turn === beforeTurn && g.status === 'playing') break;
+      steps++;
+      w.TideMain.refresh();
+      if (steps % 40 === 0) w.TideRender.render(g, {}, { x: 0, y: 0 });
+    }
+    ok('实战推进 ' + steps + ' 步，结局=' + g.status + '，回合=' + g.turn +
+      '，击杀=' + g.kills + '，深度=' + g.depth + '，秘藏=' + g.relics.length + '，背包=' + g.bag.length);
+    if (g.hp > g.stats().hp) fail('生命超过上限: ' + g.hp + ' > ' + g.stats().hp);
+
+    // 渲染在 showGame() 里是延时初始化的，这里显式确保它已经就绪
+    w.TideRender.init();
+    var vw = w.TideRender.view;
+    if (vw.w < 100 || vw.h < 100) fail('视口尺寸异常: ' + vw.w + 'x' + vw.h);
+    else ok('视口尺寸 ' + vw.w + 'x' + vw.h);
+
+    // ---------- 11. 渲染不炸 ----------
+    var threw = 0;
+    try {
+      w.TideRender.markDirty();
+      for (var r = 0; r < 8; r++) {
+        w.TideRender.render(g, { waterFrame: r % 3, lavaFrame: r % 3, path: path }, { x: 1, y: -1 }, 16);
+      }
+    } catch (e) { threw = 1; fail('render 抛异常: ' + (e && e.message)); }
+    if (!threw) ok('render 连续 8 帧无异常（含插值与 dt）');
+
+    // ---------- 11b. 画面不是黑屏 / 纯色 ----------
+    // 看不到画面，就只能用像素统计兜底：
+    // 全黑、全单色、对比度为零，这三种情况肉眼一看就知道坏了，
+    // 但它们不会抛异常，必须靠检查才能发现。
+    try {
+      var cv = d.getElementById('view');
+      var ictx = cv.getContext('2d');
+      var img = ictx.getImageData(0, 0, cv.width, cv.height).data;
+      var sum = 0, n = 0, buckets = {}, minL = 255, maxL = 0;
+      for (var p = 0; p < img.length; p += 4 * 29) {
+        var R = img[p], G = img[p + 1], B = img[p + 2];
+        var L = (R * 0.299 + G * 0.587 + B * 0.114);
+        sum += L; n++;
+        if (L < minL) minL = L;
+        if (L > maxL) maxL = L;
+        buckets[(R >> 4) + ',' + (G >> 4) + ',' + (B >> 4)] = 1;
+      }
+      var mean = sum / n;
+      var nc = Object.keys(buckets).length;
+      ok('画面统计: 平均亮度=' + mean.toFixed(1) + ' 亮度范围=[' + minL.toFixed(0) + ',' +
+        maxL.toFixed(0) + '] 色块种类=' + nc + ' (采样 ' + n + ' 点)');
+      if (mean < 6) fail('画面几乎全黑（平均亮度 ' + mean.toFixed(1) + '）');
+      if (nc < 40) fail('画面色彩过于单一（仅 ' + nc + ' 种色块）');
+      if (maxL - minL < 60) fail('画面对比度过低（' + (maxL - minL).toFixed(0) + '）');
+      // 视野内（画面上最亮的那批像素）必须真的有东西，否则就是"一片黑"
+      var ls = [];
+      for (var yy = 0; yy < cv.height; yy += 17) {
+        for (var xx = 0; xx < cv.width; xx += 17) {
+          var idx4 = (yy * cv.width + xx) * 4;
+          ls.push(img[idx4] * 0.299 + img[idx4 + 1] * 0.587 + img[idx4 + 2] * 0.114);
+        }
+      }
+      ls.sort(function (a, b) { return b - a; });
+      var topMean = 0, topN = Math.max(1, Math.floor(ls.length * 0.15));
+      for (var q = 0; q < topN; q++) topMean += ls[q];
+      topMean /= topN;
+      ok('最亮的 15% 像素平均亮度=' + topMean.toFixed(1) + '（视野内实际内容）');
+      if (topMean < 30) fail('视野内几乎没有可见内容（最亮区仅 ' + topMean.toFixed(1) + '）');
+
+      // 定位用：可见格数量 + 玩家位置附近的亮度。
+      // 只报"整体偏暗"是没法修的，必须知道是"光照没打上"还是"视野没算出来"。
+      var vsum = 0;
+      for (var vi = 0; vi < g.visible.length; vi++) vsum += g.visible[vi];
+      var cam = w.TideRender.cam;
+      var scaleX = cv.width / vw.w, scaleY = cv.height / vw.h;
+      var pxc = Math.round((g.px * 32 + 16 - cam.x) * scaleX);
+      var pyc = Math.round((g.py * 32 + 16 - cam.y) * scaleY);
+      var pb = 0, pn = 0;
+      for (var dy2 = -6; dy2 <= 6; dy2++) {
+        for (var dx2 = -6; dx2 <= 6; dx2++) {
+          var Xi = pxc + dx2, Yi = pyc + dy2;
+          if (Xi < 0 || Yi < 0 || Xi >= cv.width || Yi >= cv.height) continue;
+          var id4 = (Yi * cv.width + Xi) * 4;
+          pb += img[id4] * 0.299 + img[id4 + 1] * 0.587 + img[id4 + 2] * 0.114;
+          pn++;
+        }
+      }
+      ok('可见格 ' + vsum + ' 个 · 玩家处亮度 ' + (pn ? (pb / pn).toFixed(1) : 'N/A') +
+        ' · 相机 ' + cam.x + ',' + cam.y);
+      if (vsum < 20) fail('视野几乎没算出来（可见格仅 ' + vsum + '）');
+    } catch (e) { fail('读取画布失败: ' + (e && e.message)); }
+
+    // ---------- 12. 界面各面板 ----------
+    w.TideUI.render(g);
+    if (!d.getElementById('stat-panel').children.length) fail('属性面板为空');
+    else ok('属性面板 ' + d.getElementById('stat-panel').children.length + ' 行');
+    if (d.querySelectorAll('#equip-panel .eq-slot').length !== 5) fail('装备槽不是 5 个');
+    else ok('装备槽 5 个');
+    if (w.TideData.LOOT.backpackSize !== 40) fail('背包容量不是 40: ' + w.TideData.LOOT.backpackSize);
+    else ok('背包容量 40 格');
+
+    // ---------- 13. 各职业 / 各难度都能起局 ----------
+    var combos = 0;
+    w.TideData.CLASSES.forEach(function (c) {
+      w.TideData.DIFF_ORDER.forEach(function (dd) {
+        var gg = new core.Game({ classKey: c.key, difficulty: dd, seed: 42 });
+        if (!gg.walkable(gg.px, gg.py)) fail('起局非法: ' + c.key + '/' + dd);
+        var rr = gg._reachable(gg.px, gg.py);
+        if (!rr[gg.exit.y * gg.W + gg.exit.x]) fail('出口不可达: ' + c.key + '/' + dd);
+        combos++;
+      });
+    });
+    ok(combos + ' 个职业×难度组合全部能起局且出口可达');
+
+    // ---------- 14. 结束弹窗 ----------
+    w.TideUI.showOver(g);
+    if (d.getElementById('over-modal').classList.contains('hidden')) fail('结算弹窗没弹出');
+    else ok('结算弹窗正常');
+
+    // ---------- 15. 真实点击路径 ----------
+    // 前面全是直接调模块 API，绕过了 DOM 事件。
+    // 但玩家走的是"点按钮"这条路，而按钮回调里的任何异常都不会被 API 测试发现 ——
+    // 曾经就是这样漏掉了一个"音频抛异常导致开始按钮失效"的 bug。
+    w.TideUI.showTitle();
+    var btnStart = d.getElementById('btn-start');
+    var before = errors.length;
+    btnStart.click();
+    if (errors.length > before) {
+      fail('点击「开始下潜」抛异常（见上方 window.onerror）');
+    } else if (!d.getElementById('title-screen').classList.contains('hidden')) {
+      fail('点击「开始下潜」后标题页没有隐藏');
+    } else if (d.getElementById('game-screen').classList.contains('hidden')) {
+      fail('点击「开始下潜」后游戏页没有显示');
+    } else if (!w.TideMain.game) {
+      fail('点击「开始下潜」后没有创建对局');
+    } else {
+      ok('点击「开始下潜」→ 进入游戏，depth=' + w.TideMain.game.depth);
+    }
+
+    // 难度 / 职业卡片的点击也要真的生效
+    var dcard = d.querySelector('#diff-pick .diff-card[data-diff="abyss"]');
+    if (dcard) {
+      dcard.click();
+      if (w.TideUI.pick.diff !== 'abyss') fail('点击难度卡没有改变选择');
+      else ok('难度卡点击生效');
+    }
+    var ccard = d.querySelector('#class-pick .cls-card[data-cls="arcanist"]');
+    if (ccard) {
+      ccard.click();
+      if (w.TideUI.pick.cls !== 'arcanist') fail('点击职业卡没有改变选择');
+      else ok('职业卡点击生效');
+    }
+    // 选中的职业真的会被开局采用
+    w.TideUI.showTitle();
+    d.getElementById('btn-start').click();
+    if (w.TideMain.game && w.TideMain.game.cls.key !== 'arcanist') {
+      fail('开局没有采用选中的职业: ' + w.TideMain.game.cls.key);
+    } else ok('开局采用选中的职业 arcanist');
+
+    // 说明弹窗
+    d.getElementById('btn-help2') && d.getElementById('btn-help2').click();
+    if (!d.getElementById('help-modal').classList.contains('hidden')) ok('说明弹窗可打开');
+    else fail('说明弹窗没打开');
+    w.TideUI.closeHelp();
+
+    // ---------- 16. 秘藏三选一 ----------
+    w.TideUI.showTitle();
+    d.getElementById('btn-start').click();
+    var g2 = w.TideMain.game;
+    g2.bag = [];
+    for (var bi = 0; bi < 4; bi++) g2.bag.push(g2.makeItem({ depth: 3 }));
+    g2.pendingRelic = g2._offerRelics();
+    var offered = g2.pendingRelic.length;
+    w.TideUI.render(g2);
+    var rmodal = d.getElementById('relic-modal');
+    if (rmodal.classList.contains('hidden')) fail('秘藏弹窗没有出现');
+    else ok('秘藏弹窗出现，' + offered + ' 个选项');
+    var rcards = d.querySelectorAll('#relic-cards .relic-card');
+    if (rcards.length !== offered) fail('秘藏卡片数量不符: ' + rcards.length + ' vs ' + offered);
+    else {
+      var pickId = rcards[0].dataset.id;
+      var relicsBefore = g2.relics.length;
+      rcards[0].click();
+      if (g2.relics.length !== relicsBefore + 1) fail('点击秘藏卡没有生效');
+      else if (g2.relics[g2.relics.length - 1] !== pickId) fail('获得的秘藏不是点的那张');
+      else if (g2.pendingRelic) fail('选择秘藏后 pendingRelic 没有清空');
+      else ok('秘藏三选一：点击即获得且状态清空');
+    }
+
+    // ---------- 17. 装备气泡（悬停路径） ----------
+    try {
+      // 气泡现在挂在整屏背包里，先把它打开
+      w.TideUI.openInventory('bag');
+      w.TideUI.render(g2);
+      g2.bag = [];
+      for (var ci = 0; ci < 4; ci++) g2.bag.push(g2.makeItem({ depth: 4 }));
+      w.TideUI.render(g2);
+      if (d.getElementById('inv-screen').classList.contains('hidden')) fail('背包界面没打开');
+      else ok('背包界面可打开');
+      if (d.querySelectorAll('#inv-grid .inv-slot').length !== 40) {
+        fail('背包网格不是 40 格: ' + d.querySelectorAll('#inv-grid .inv-slot').length);
+      } else ok('背包网格 40 格');
+
+      function hoverCell(sel) {
+        var c = d.querySelector(sel);
+        if (!c) return null;
+        var rr = c.getBoundingClientRect();
+        c.dispatchEvent(new w.MouseEvent('mousemove', {
+          bubbles: true, clientX: rr.left + rr.width / 2, clientY: rr.top + rr.height / 2
+        }));
+        return d.getElementById('tooltip');
+      }
+      var tt = hoverCell('#inv-grid .inv-slot.filled');
+      if (!tt) fail('背包里没有可悬停的物品');
+      else if (tt.classList.contains('hidden')) fail('悬停背包物品没有弹出气泡');
+      else if (!tt.querySelector('.tt-cmp')) fail('气泡缺少对比区块');
+      else ok('装备气泡（含身价/售价）正常: ' + (tt.textContent.match(/身价\s*\d+/) || [''])[0]);
+
+      // 同槽位已经装备了东西 → 必须给出逐项差值
+      g2.bag = [];
+      for (var ci2 = 0; ci2 < 4; ci2++) g2.bag.push(g2.makeItem({ depth: 4, slot: 'chest' }));
+      g2.equipFromBag(0);
+      w.TideUI.render(g2);
+      var tt2 = hoverCell('#inv-grid .inv-slot.filled');
+      var cmp2 = tt2 && tt2.querySelector('.tt-cmp');
+      // 文案会改（现在是"对比已装备的「布袍」"），但必须点出对比目标的**名字**
+      if (!cmp2 || cmp2.textContent.indexOf('对比') < 0 || cmp2.textContent.indexOf('「') < 0) {
+        fail('同槽位气泡没有显示对比目标: ' + (cmp2 ? cmp2.textContent : '(无)'));
+      } else {
+        var hasDelta = !!tt2.querySelector('.tt-cmp .up, .tt-cmp .dn, .tt-cmp .eq');
+        if (!hasDelta) fail('对比区块没有任何差值标记');
+        else ok('同槽位对比差值可见');
+      }
+      // ---- 委托路径回归测试 ----
+      // 重点不是"某个面板能弹气泡"，而是"任何带 data-tip 的元素都能弹"。
+      // 这些气泡原来由各面板各自挂 mousemove 实现，漏一处就少一处提示；
+      // 改成 document 级委托后，"属性没写进 DOM"或"bindTips 没被调用"都会在这里暴露。
+      w.TideUI.closeInventory();
+      w.TideUI.render(g2);
+      var dtCount = d.querySelectorAll('[data-tip]').length;
+      if (dtCount < 8) fail('带 data-tip 的元素太少（' + dtCount + '）：渲染层没把提示属性写进 DOM');
+      else ok('data-tip 属性已写入 DOM（' + dtCount + ' 个元素）');
+
+      var statTip = hoverCell('#stat-panel .stat-row');
+      if (!statTip || statTip.classList.contains('hidden') ||
+          statTip.textContent.indexOf('当前值') < 0) {
+        fail('侧栏属性行悬停没有气泡（document 委托未生效）');
+      } else ok('侧栏属性行悬停：委托自动生效');
+
+      w.TideUI.openInventory('bag');
+      var sellTip = hoverCell('#inv-sell');
+      if (!sellTip || sellTip.classList.contains('hidden') ||
+          sellTip.textContent.indexOf('出售区') < 0) {
+        fail('出售区悬停没有气泡（document 委托未生效）');
+      } else ok('出售区悬停：委托自动生效');
+
+      w.TideUI.tooltip('');
+    } catch (e) { fail('气泡测试异常: ' + (e && e.message)); }
+
+    // ---------- 19. 背包拖拽 / 出售 / 金币 / 商店 ----------
+    try {
+      w.TideUI.openInventory('bag');
+      g2.bag = [];
+      for (var di = 0; di < 3; di++) g2.bag.push(g2.makeItem({ depth: 3, slot: 'helm' }));
+      g2.equip.helm = null;
+      g2.gold = 0;
+      w.TideUI.render(g2);
+      w.TideUI.render(g2);
+
+      function rectOf(el) { var r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }
+      function dragTo(srcEl, dstEl) {
+        var a = rectOf(srcEl), b = rectOf(dstEl);
+        srcEl.dispatchEvent(new w.MouseEvent('mousedown', { bubbles: true, clientX: a.x, clientY: a.y }));
+        d.dispatchEvent(new w.MouseEvent('mousemove', { bubbles: true, clientX: b.x, clientY: b.y }));
+        d.dispatchEvent(new w.MouseEvent('mouseup', { bubbles: true, clientX: b.x, clientY: b.y }));
+      }
+
+      // (a) 拖到装备槽 → 穿戴
+      var fromCell = d.querySelector('#inv-grid .inv-slot.filled');
+      var helmWrap = d.querySelector('#inv-equip .inv-eq-wrap:nth-child(2)');
+      if (!fromCell || !helmWrap) fail('拖拽测试找不到源/目标元素');
+      else {
+        var bagBefore = g2.bag.length;
+        dragTo(fromCell, helmWrap.querySelector('.inv-slot'));
+        if (!g2.equip.helm) fail('拖到装备槽没有穿上头盔');
+        else if (g2.bag.length !== bagBefore - 1) fail('穿戴后背包数量不对');
+        else ok('拖拽穿戴成功: ' + g2.equip.helm.name);
+      }
+
+      // (b) 拖到出售区 → 换金币
+      w.TideUI.render(g2);
+      var sellZone = d.getElementById('inv-sell');
+      var goldBefore = g2.gold, bagN = g2.bag.length;
+      var sellCell = d.querySelector('#inv-grid .inv-slot.filled');
+      if (!sellCell) fail('没有可出售的物品');
+      else {
+        var expect = g2.sellPrice(g2.bag[0]);
+        dragTo(sellCell, sellZone);
+        if (g2.gold !== goldBefore + expect) {
+          fail('出售金币不对: ' + g2.gold + ' 期望 ' + (goldBefore + expect));
+        } else if (g2.bag.length !== bagN - 1) fail('出售后背包数量不对');
+        else ok('拖拽出售成功，+' + expect + ' 金币');
+      }
+
+      // (c) 无套利：买价必须严格高于卖价，否则可以无限刷钱
+      var bad = 0;
+      for (var ai = 0; ai < 60; ai++) {
+        var ti = g2.makeItem({ depth: 1 + (ai % 5), bonus: ai % 3 });
+        if (g2.buyPrice(ti) <= g2.sellPrice(ti)) bad++;
+      }
+      if (bad) fail('存在套利漏洞：' + bad + '/60 件装备的买价 <= 卖价');
+      else ok('买价恒高于卖价，无套利空间');
+
+      // (d) 击杀给金币
+      var g3b = g2.gold;
+      var anyE = g2.enemies[0];
+      if (anyE) {
+        g2.hp = 9999; g2.fight(anyE);
+        if (g2.gold <= g3b) fail('击杀没有产生金币');
+        else ok('击杀掉落金币 +' + (g2.gold - g3b));
+      }
+
+      // (e) 商店：不在商栈上不能买，站上去就能买
+      w.TideMain.start({ mode: 'normal', seed: 20260922 });
+      var g4 = w.TideMain.game;
+      g4.gold = 99999;
+      w.TideUI.openInventory('shop');
+      if (!g4.shopStock || g4.shopStock.length < 5) fail('商店货架为空');
+      else ok('商店货架 ' + g4.shopStock.length + ' 项');
+      var shopItemIdx = -1;
+      for (var si = 0; si < g4.shopStock.length; si++) if (g4.shopStock[si].type === 'item') { shopItemIdx = si; break; }
+      var stockBefore = g4.shopStock.length;
+      g4.buyItem(shopItemIdx);
+      if (g4.shopStock.length !== stockBefore) fail('不在商栈上竟然买成功了');
+      else ok('不在潮汐商栈上无法购买（这是有意的设计）');
+
+      // 把玩家挪到商栈上
+      var shopPos = null;
+      for (var sy2 = 0; sy2 < g4.H && !shopPos; sy2++)
+        for (var sx2 = 0; sx2 < g4.W; sx2++)
+          if (g4.tileAt(sx2, sy2) === w.TideCore.T.SHOP) { shopPos = { x: sx2, y: sy2 }; break; }
+      if (!shopPos) ok('本层没有商栈（随机生成，属正常）');
+      else {
+        g4.px = shopPos.x; g4.py = shopPos.y;
+        var bagB2 = g4.bag.length;
+        if (g4.buyItem(shopItemIdx)) {
+          if (g4.bag.length !== bagB2 + 1) fail('购买成功但背包没增加');
+          else ok('站在商栈上购买成功: ' + g4.bag[g4.bag.length - 1].name);
+        } else fail('站在商栈上仍然买不了');
+      }
+
+      // (f) 刷新货架花钱
+      var goldB3 = g4.gold;
+      g4.refreshShop();
+      if (g4.gold >= goldB3) fail('刷新货架没有扣钱');
+      else ok('刷新货架扣费 ' + (goldB3 - g4.gold) + ' 金币');
+
+      w.TideUI.closeInventory();
+      if (!d.getElementById('inv-screen').classList.contains('hidden')) fail('背包界面关不掉');
+      else ok('背包界面可关闭');
+    } catch (e) { fail('背包/商店测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 18. 敌人信息面板 ----------
+    try {
+      var anyE = g2.enemies[0];
+      if (!anyE) fail('场上没有敌人，无法测试信息面板');
+      else {
+        // 先把它标成可见，否则 UI 会因为"看不见"而主动隐藏
+        g2.visible[anyE.y * g2.W + anyE.x] = 1;
+        w.TideUI.enemyInfo(g2, anyE, { clientX: 300, clientY: 300 });
+        var ei = d.getElementById('enemy-info');
+        if (ei.classList.contains('hidden')) fail('敌人信息面板没有显示');
+        else if (ei.textContent.indexOf('建议') < 0) fail('敌人信息面板缺少用哪一路的建议');
+        else if (ei.textContent.indexOf('预计这场要掉') < 0) fail('敌人信息面板缺少掉血预估');
+        else ok('敌人信息面板：含伤害路线建议与掉血预估');
+      }
+      w.TideUI.enemyInfo(g2, null, { clientX: 0, clientY: 0 });
+      if (!d.getElementById('enemy-info').classList.contains('hidden')) fail('移开敌人后面板没有隐藏');
+      else ok('敌人信息面板能正确隐藏');
+    } catch (e) { fail('敌人信息面板测试异常: ' + (e && e.message)); }
+
+    // ---------- 20. 键盘输入 ----------
+    // 键盘是主操作方式，但前面所有测试都只覆盖了鼠标。
+    // 用真实 KeyboardEvent 打一遍，避免出现"能点不能走"这种低级但致命的问题。
+    try {
+      w.TideUI.closeInventory();
+      w.TideMain.start({ mode: 'normal', seed: 20260922 });
+      var gk = w.TideMain.game;
+
+      // (a) E 开关背包 —— 这个断言与地图无关，必定可复现
+      w.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'e', bubbles: true }));
+      if (!w.TideUI.isInventoryOpen()) fail('按 E 没有打开背包');
+      else ok('按 E 打开背包');
+      w.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'e', bubbles: true }));
+      if (w.TideUI.isInventoryOpen()) fail('再按 E 没有关掉背包');
+      else ok('再按 E 关闭背包');
+      // Esc 的语义是**逐层往回退**：先把弹窗关掉，全关完了才轮到暂停菜单。
+      // 这里本意只是"确保没有弹窗挡着后面的输入测试"，而现在无弹窗时按 Esc
+      // 会打开暂停菜单 —— 所以必须把它收掉，否则 (b)(c) 两段会被菜单挡住。
+      // （这不是产品问题，是这条测试要跟上新的按键语义；新语义由第 29 节专门验。）
+      w.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      if (w.TideUI.isHelpOpen()) fail('Esc 没有关掉说明');
+      else ok('Esc 生效（弹窗层已清空）');
+      if (w.TideUI.isPauseOpen()) w.TideUI.closePause();
+
+      // (b) 方向键真的会走一格 —— 找一个四周有可走格的位置
+      var dirs = [['ArrowRight', 1, 0], ['ArrowLeft', -1, 0], ['ArrowDown', 0, 1], ['ArrowUp', 0, -1]];
+      var moved = false, tried = 0;
+      for (var s2 = 0; s2 < gk.H * gk.W && !moved; s2++) {
+        var tx = s2 % gk.W, ty = (s2 / gk.W) | 0;
+        if (!gk.walkable(tx, ty) || gk.enemyAt(tx, ty)) continue;
+        for (var di2 = 0; di2 < dirs.length; di2++) {
+          var d3 = dirs[di2];
+          var nx = tx + d3[1], ny = ty + d3[2];
+          if (!gk.walkable(nx, ny) || gk.enemyAt(nx, ny)) continue;
+          gk.px = tx; gk.py = ty;
+          var turnBefore = gk.turn;
+          w.dispatchEvent(new w.KeyboardEvent('keydown', { key: d3[0], bubbles: true }));
+          w.dispatchEvent(new w.KeyboardEvent('keyup', { key: d3[0], bubbles: true }));
+          tried++;
+          if (gk.px === nx && gk.py === ny && gk.turn > turnBefore) { moved = true; break; }
+        }
+      }
+      if (!moved) fail('方向键没有让角色移动（尝试了 ' + tried + ' 个方向）');
+      else ok('方向键移动生效（' + tried + ' 次尝试内成功）');
+
+      // (c) 空格等一回合
+      var turnB = gk.turn;
+      w.dispatchEvent(new w.KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+      if (gk.turn <= turnB) fail('空格没有消耗回合');
+      else ok('空格原地等待生效');
+
+      // (d) 背包打开时方向键不应该让角色乱走
+      w.TideUI.openInventory('bag');
+      var pxB = gk.px, pyB = gk.py, turnB2 = gk.turn;
+      w.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+      w.dispatchEvent(new w.KeyboardEvent('keyup', { key: 'ArrowRight', bubbles: true }));
+      if (gk.px !== pxB || gk.py !== pyB || gk.turn !== turnB2) fail('背包打开时角色仍然在移动');
+      else ok('背包打开时屏蔽了移动输入');
+      w.TideUI.closeInventory();
+    } catch (e) { fail('键盘测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 21. 相机滚动后地形必须铺满视口 ----------
+    // 这是本轮修复的回归测试，针对的是"地图是黑的、人物错位、偶尔又正常"。
+    // 地形层被烘焙成一张离屏画布再贴上来，它的目标偏移必须是「源偏移 − 相机」。
+    // 写成「源偏移」不会报错、不会崩、像素统计也很难发现：
+    // 只是地形和玩家错开整整一个相机位移、视口左上留出等宽黑带，
+    // 而且**相机停在原点时恰好正确** —— 于是看起来像偶发故障。
+    //
+    // 判据：把玩家挪到地图正中（位移够大时相机会瞬移，不必等平滑收敛），
+    //       强制全图已探索（排除"迷雾本来就是黑的"这个干扰），
+    //       然后视口最左/最上都不许出现"整列都是填充色"的空白带。
+    //       注意必须报告相机位置：相机没滚起来时这条测试是无效的，要当失败报。
+    try {
+      var g6 = w.TideMain.game;
+      if (!g6) fail('相机偏移测试：没有对局');
+      else {
+        g6.explored.fill(1);
+        g6.px = Math.floor(g6.W / 2);
+        g6.py = Math.floor(g6.H / 2);
+        if (g6._recomputeFOV) g6._recomputeFOV();
+        w.TideRender.markDirty();
+        for (var ri = 0; ri < 20; ri++) w.TideRender.render(g6, {}, null, 500);
+        var cam6 = w.TideRender.cam;
+        if (Math.abs(cam6.x) < 200 || Math.abs(cam6.y) < 100) {
+          fail('相机没滚到地图中央，这条测试无效（cam=' + cam6.x + ',' + cam6.y + '）');
+        } else {
+          var cv6 = d.getElementById('view');
+          var ctx6 = cv6.getContext('2d');
+          var im6 = ctx6.getImageData(0, 0, cv6.width, cv6.height).data;
+          var CW6 = cv6.width, CH6 = cv6.height;
+          function nearBG6(i) {
+            return Math.abs(im6[i] - 5) <= 3 && Math.abs(im6[i + 1] - 7) <= 3 && Math.abs(im6[i + 2] - 13) <= 3;
+          }
+          function blankCol(x) {
+            for (var y = 0; y < CH6; y += 2) { if (!nearBG6((y * CW6 + x) * 4)) return false; }
+            return true;
+          }
+          function blankRow(y) {
+            for (var x = 0; x < CW6; x += 2) { if (!nearBG6((y * CW6 + x) * 4)) return false; }
+            return true;
+          }
+          var lb6 = 0; while (lb6 < CW6 && blankCol(lb6)) lb6++;
+          var tb6 = 0; while (tb6 < CH6 && blankRow(tb6)) tb6++;
+          if (lb6 > 4 || tb6 > 4) {
+            fail('相机滚起来后地形没铺满视口：左空白 ' + lb6 + 'px、上空白 ' + tb6 +
+              'px（相机 ' + cam6.x + ',' + cam6.y + '）—— 地形层的目标偏移漏了 −cam');
+          } else {
+            ok('相机滚动后地形铺满视口（左 ' + lb6 + 'px / 上 ' + tb6 + 'px 空白，相机 ' +
+              cam6.x + ',' + cam6.y + '）');
+          }
+        }
+      }
+    } catch (e) { fail('相机偏移测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 22. 层级梯子（气泡 / 提示条必须在所有界面之上） ----------
+    // 这是本轮修的 bug：气泡与 toast 的 z-index 分别是 90 / 95，而整屏背包是 96，
+    // 于是"在背包里悬停装备看不到详情""在背包里拖错槽位时那句提示根本看不见"。
+    // 根因不是某处写错，而是没有梯子 —— 每个数字都各自就事论事。
+    // 所以这里直接断言**大小关系**（梯子），而不是断言某个具体数字。
+    try {
+      function zi(sel) {
+        var el = d.querySelector(sel);
+        if (!el) return NaN;
+        return parseInt(w.getComputedStyle(el).zIndex, 10);
+      }
+      // 拖影只在拖拽过程中存在，平时查不到 —— 临时造一个来量它的层级规则
+      var ghostProbe = d.createElement('div');
+      ghostProbe.className = 'drag-ghost';
+      d.body.appendChild(ghostProbe);
+      var zGhost = zi('.drag-ghost');
+      ghostProbe.parentNode.removeChild(ghostProbe);
+      var zTip = zi('#tooltip'), zToast = zi('#toast'), zInv = zi('#inv-screen'),
+        zModal = zi('.modal');
+      if (!isFinite(zTip) || !isFinite(zToast) || !isFinite(zInv) ||
+          !isFinite(zModal) || !isFinite(zGhost)) {
+        fail('层级检查：有元素的 z-index 不是数字（气泡 ' + zTip + ' / 提示条 ' + zToast +
+          ' / 背包 ' + zInv + ' / 弹窗 ' + zModal + ' / 拖影 ' + zGhost + '）');
+      } else if (!(zTip > zInv)) {
+        fail('悬停气泡在背包之下（气泡 ' + zTip + ' ≤ 背包 ' + zInv + '）：背包里看不到装备详情');
+      } else if (!(zTip > zModal)) {
+        fail('悬停气泡在弹窗之下（气泡 ' + zTip + ' ≤ 弹窗 ' + zModal + '）');
+      } else if (!(zToast > zInv && zToast > zModal)) {
+        fail('消息提示条在背包/弹窗之下（提示条 ' + zToast + ' ≤ 背包 ' + zInv +
+          ' / 弹窗 ' + zModal + '）：在背包里操作失败时的提示会看不见');
+      } else if (!(zGhost > zInv)) {
+        fail('拖拽幽灵在背包之下（拖影 ' + zGhost + ' ≤ 背包 ' + zInv + '）：拖动时看不见手上的东西');
+      } else {
+        ok('层级梯子正确（气泡 ' + zTip + ' / 提示条 ' + zToast + ' > 背包 ' + zInv +
+          '、弹窗 ' + zModal + '；拖影 ' + zGhost + '）');
+      }
+    } catch (e) { fail('层级检查异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 23. 魂技（元气骑士式主动技能） ----------
+    // 新机制最容易漏掉的不是"能不能用"，而是三件事：
+    //   ① 失败时会不会白罚冷却（玩家按了没反应的挫败感来源）
+    //   ② 模拟器的 AI 会不会用（不会用 → 平衡数据是假的）
+    //   ③ 免费行动会不会被当成卡死（新机制污染旧的不变量判断）
+    try {
+      var SK = ['warlord', 'arcanist', 'ranger', 'warden'];
+      var skBad = [];
+      for (var si = 0; si < SK.length; si++) {
+        var sd = w.TideData.skillByClass(SK[si]);
+        if (!sd || !sd.name || !sd.icon || !sd.cd || !sd.kind) skBad.push(SK[si] + ':定义不全');
+        else if (!w.TideIcons.PATHS[sd.icon]) skBad.push(SK[si] + ':图标 ' + sd.icon + ' 不存在');
+      }
+      if (skBad.length) fail('魂技定义有问题: ' + skBad.join(', '));
+      else ok('四个职业的魂技定义与图标都齐全');
+    } catch (e) { fail('魂技定义检查异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // (a) 空放不吃冷却 —— "按了没反应"和"还在冷却"必须分得清
+    try {
+      w.TideMain.start({ mode: 'normal', seed: 20260922, classKey: 'warlord', difficulty: 'standard' });
+      var gA = w.TideMain.game;
+      gA.enemies = [];
+      var rA = gA.useSkill();
+      if (rA.ok) fail('附近没有目标竟然放成功了');
+      else if (rA.reason !== 'empty') fail('空放的失败原因不对: ' + rA.reason);
+      else if (gA.skillCd !== 0) fail('空放消耗了冷却（' + gA.skillCd + '）—— 玩家点空一次就被白罚十几回合');
+      else ok('魂技空放：不生效也不吃冷却');
+    } catch (e) { fail('魂技空放测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // (b) burst 型：单方面命中（不吃反击）+ 正常进冷却 + 冷却中拒绝
+    try {
+      var gB = w.TideMain.game;
+      gB.enemies = [];
+      var dirsB = [[1, 0], [-1, 0], [0, 1], [0, -1]], placed = 0, enemyB = null;
+      for (var di = 0; di < 4 && placed < 2; di++) {
+        var bx = gB.px + dirsB[di][0], by = gB.py + dirsB[di][1];
+        if (!gB.walkable(bx, by) || gB.enemyAt(bx, by)) continue;
+        var eb = gB._makeEnemy(bx, by, 2);
+        gB.enemies.push(eb);
+        if (!enemyB) enemyB = eb;
+        placed++;
+      }
+      if (!placed) fail('周围没有可放敌人的空格，这条测试安排不上');
+      else {
+        var hpB = enemyB.hp;
+        var rB = gB.useSkill();
+        var evsB = gB.drainEvents(), hitB = null, fightsB = 0;
+        for (var ei = 0; ei < evsB.length; ei++) {
+          if (evsB[ei].kind === 'hit' && evsB[ei].skill) hitB = evsB[ei];
+          if (evsB[ei].kind === 'fight') fightsB++;
+        }
+        if (!rB.ok) fail('贴身有敌人却放不出裂地斩: ' + rB.reason);
+        else if (!hitB) fail('魂技没有产生命中事件');
+        else if (!(enemyB.hp < hpB)) fail('魂技没有造成伤害（' + hpB + ' → ' + enemyB.hp + '）');
+        else if (hitB.rounds.length !== 1) fail('魂技命中的回合数不是 1：' + hitB.rounds.length + '（技能不该触发对拼）');
+        else if (fightsB) fail('魂技触发了整场对决，应该是单方面一击');
+        else if (gB.skillCd !== gB.skill().cd - gB.skill().cost) {
+          // 冷却按"回合"结算：施放本身消耗一个回合，所以放完之后
+          // 剩余冷却 = cd - 1（第 T 回合放，第 T+cd 回合又好）。
+          // 这个 -1 不是 bug，是语义 —— 写清楚免得下次有人"修"它。
+          fail('魂技冷却不对: ' + gB.skillCd + '，期望 ' + (gB.skill().cd - gB.skill().cost));
+        }
+        else {
+          var rB2 = gB.useSkill();
+          if (rB2.ok) fail('冷却中竟然还能放');
+          else if (rB2.reason !== 'cd') fail('冷却中被拒的原因不对: ' + rB2.reason);
+          else ok('魂技：单方面命中 + 进冷却 ' + gB.skillCd + ' 回合 + 冷却中正确拒绝');
+        }
+      }
+    } catch (e) { fail('魂技命中测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // (c) buff 型：生效 / 提高面板 / 回血 / 按期消失并还原
+    try {
+      w.TideMain.start({ mode: 'normal', seed: 20260922, classKey: 'warden', difficulty: 'standard' });
+      var gC = w.TideMain.game;
+      gC.enemies = [];
+      var defBase = gC.stats().defP;
+      gC.hp = Math.round(gC.stats().hp * 0.35);
+      var defLow = gC.stats().defP, hpLow = gC.hp;
+      var rC = gC.useSkill();
+      if (!rC.ok) fail('不退之壁放不出来: ' + rC.reason);
+      else if (!gC.buffs.length) fail('不退之壁没有留下增益');
+      else if (!(gC.stats().defP > defLow)) fail('不退之壁没有提高物防（' + defLow + ' → ' + gC.stats().defP + '）');
+      else if (!(gC.hp > hpLow)) fail('不退之壁没有回血（' + hpLow + ' → ' + gC.hp + '）');
+      else {
+        // 持续时间的口径要盯死：面板写 3 回合，就必须真的护到玩家能行动的第 3 个回合。
+        // （施放那一手本身也是这 3 回合里的第 1 回合 —— 出生那回合不倒计时）
+        var tC = 0;
+        while (gC.buffs.length && tC < 12) { gC.endTurn(); tC++; }
+        if (gC.buffs.length) fail('增益没有按期消失（' + tC + ' 回合后还在）');
+        else if (tC !== 3) fail('不退之壁的回合数与面板文案不符：文案写 3，实测 ' + tC);
+        else if (gC.stats().defP > defBase * 1.02) fail('增益消失后面板没还原: ' + gC.stats().defP + ' vs 基准 ' + defBase);
+        else ok('不退之壁：增益 + 回血生效，' + tC + ' 回合后自然消失并还原面板（与文案一致）');
+      }
+    } catch (e) { fail('魂技增益测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // (d) 免费行动：不推进回合、逐次递减、用完后恢复正常推进
+    try {
+      w.TideMain.start({ mode: 'normal', seed: 20260922, classKey: 'ranger', difficulty: 'standard' });
+      var gD = w.TideMain.game;
+      gD.enemies = [];
+      var rD = gD.useSkill();
+      if (!rD.ok) fail('疾影放不出来: ' + rD.reason);
+      else if (gD.freeMoves !== 2) fail('疾影没有给出 2 次免费行动: ' + gD.freeMoves);
+      else {
+        var dirsD = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+        function stepOnce(g) {
+          for (var i = 0; i < 4; i++) {
+            var nx = g.px + dirsD[i][0], ny = g.py + dirsD[i][1];
+            if (g.walkable(nx, ny) && !g.enemyAt(nx, ny) && !g.isExplored(nx, ny)) return g.stepTo(nx, ny);
+          }
+          for (var j = 0; j < 4; j++) {
+            var mx = g.px + dirsD[j][0], my = g.py + dirsD[j][1];
+            if (g.walkable(mx, my) && !g.enemyAt(mx, my)) return g.stepTo(mx, my);
+          }
+          return false;
+        }
+        var t1 = gD.turn, ok1 = stepOnce(gD);
+        var t2 = gD.turn, fm1 = gD.freeMoves, ok2 = stepOnce(gD);
+        var t3 = gD.turn, ok3 = stepOnce(gD);
+        if (!ok1 || !ok2 || !ok3) fail('免费行动测试：走不动，安排不上');
+        else if (t2 !== t1) fail('第一次免费行动推进了回合（' + t1 + ' → ' + t2 + '）—— 敌人会跟着动');
+        else if (fm1 !== 1) fail('免费行动次数没有递减: ' + fm1);
+        else if (t3 !== t2) fail('第二次免费行动推进了回合（' + t2 + ' → ' + t3 + '）');
+        else if (gD.freeMoves !== 0) fail('免费行动用完后计数不是 0: ' + gD.freeMoves);
+        else if (gD.turn <= t3) fail('免费行动用完后，正常移动没有推进回合');
+        else ok('疾影：2 次免费行动不推进回合，用完后恢复正常');
+      }
+    } catch (e) { fail('免费行动测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // (e) 模拟器的 AI 必须真的会用魂技 —— 否则新机制在平衡数据里等于不存在
+    try {
+      var gE = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 4242 });
+      var outE = gE.playHeadless(1200);
+      if (!(gE.skillUses > 0)) fail('一整局里 AI 一次魂技都没放（结局 ' + outE + '）—— 平衡数据会失真');
+      else ok('模拟器 AI 会主动使用魂技（本局 ' + gE.skillUses + ' 次，结局 ' + outE + '）');
+    } catch (e) { fail('AI 用技能测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // (f) 免费行动不能被误判成卡死
+    try {
+      var badF = [];
+      for (var fi = 0; fi < SK.length; fi++) {
+        var oF = w.TideCore.Game.simulate(20, {
+          difficulty: 'standard', classKey: SK[fi], seedBase: 777, maxTurns: 2400
+        });
+        if (oF.stalls) badF.push(SK[fi] + ' 卡死 ' + JSON.stringify(oF.stalls));
+        if (oF.outcome && (oF.outcome.stall || oF.outcome.timeout)) {
+          badF.push(SK[fi] + ' 结局异常 ' + JSON.stringify(oF.outcome));
+        }
+      }
+      if (badF.length) fail('魂技上线后出现卡死/超时: ' + badF.join(' | '));
+      else ok('四职业各 20 局：无卡死、无超时（免费行动没有被误判成卡死）');
+    } catch (e) { fail('魂技模拟测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 24. 装备融合（元气骑士式武器融合） ----------
+    try {
+      w.TideMain.start({ mode: 'normal', seed: 20260922, classKey: 'warden', difficulty: 'standard' });
+      var gG = w.TideMain.game;
+      var mk = function (r, d) { return gG.makeItem({ depth: d || 3, slot: 'helm', rarity: r }); };
+      var cA = mk('common'), cB = mk('common');
+      if (gG.fuseCost(cA, cB) < 0) fail('两件同品质竟然不能融合');
+      else if (gG.fuseCost(cA, mk('rare')) >= 0) fail('不同品质竟然可以融合');
+      else if (gG.fuseCost(mk('legendary'), mk('legendary')) >= 0) fail('最高品质竟然还能继续融合');
+      else if (gG.fuseCost(cA, cA) >= 0) fail('同一件装备竟然能和自己融合');
+      else ok('融合前置条件正确（同品质 / 非最高档 / 必须是两件）');
+    } catch (e) { fail('融合前置测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    try {
+      var gG2 = w.TideMain.game;
+      gG2.bag = [mk('epic'), mk('epic'), mk('common')];
+      gG2.gold = 1000;
+      var costG = gG2.fuseCost(gG2.bag[0], gG2.bag[1]);
+      var goldG = gG2.gold, bagG = gG2.bag.length;
+      var rG = gG2.fuseItems(0, 1);
+      if (!rG.ok) fail('融合失败: ' + rG.reason);
+      else if (rG.item.rarity !== 'legendary') fail('融合结果品质不是高一档: ' + rG.item.rarity);
+      else if (gG2.bag.length !== bagG - 1) fail('融合后背包数量不对: ' + gG2.bag.length);
+      else if (gG2.gold !== goldG - costG) fail('融合没有按价扣钱: ' + gG2.gold + '，期望 ' + (goldG - costG));
+      else if (gG2.bag.indexOf(rG.item) < 0) fail('融合产物没有进背包');
+      else ok('融合：两件史诗 → 一件传说，扣 ' + costG + ' 金币');
+    } catch (e) { fail('融合执行测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // 反套利：融合费必须 ≥ 产物售价，否则「融合—出售」就是净赚回路
+    try {
+      var gG3 = w.TideMain.game, arb = 0, triedF = 0;
+      for (var fi2 = 0; fi2 < 60; fi2++) {
+        var rk2 = w.TideData.RARITIES[fi2 % 4].key;
+        var xF = gG3.makeItem({ depth: 1 + (fi2 % 5), slot: 'weapon', rarity: rk2 });
+        var yF = gG3.makeItem({ depth: 1 + (fi2 % 5), slot: 'boots', rarity: rk2 });
+        var ccF = gG3.fuseCost(xF, yF);
+        if (ccF < 0) continue;
+        triedF++;
+        var resF = gG3.fuseResult(xF, yF);
+        var resItem = {
+          depth: resF.depth, rarity: resF.rarity.key, slot: resF.slot,
+          affixes: new Array(resF.rarity.affixes)
+        };
+        if (ccF < gG3.sellPrice(resItem)) arb++;
+      }
+      if (arb) fail('存在融合套利：' + arb + '/' + triedF + ' 组的融合费低于产物售价');
+      else ok('融合反套利成立（' + triedF + ' 组：融合费均 ≥ 产物售价）');
+    } catch (e) { fail('融合反套利测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    try {
+      var gG4 = w.TideMain.game;
+      gG4.bag = [mk('epic'), mk('epic')];
+      gG4.gold = 0;
+      var needG = gG4.fuseCost(gG4.bag[0], gG4.bag[1]);
+      var rG2 = gG4.fuseItems(0, 1);
+      if (rG2.ok) fail('没钱竟然也能融合');
+      else if (rG2.reason !== 'gold') fail('没钱的失败原因不对: ' + rG2.reason);
+      else if (rG2.cost !== needG) fail('失败提示里的费用不对: ' + rG2.cost + ' vs ' + needG);
+      else if (gG4.bag.length !== 2 || gG4.gold !== 0) fail('融合失败竟然改动了背包或金币');
+      else ok('金币不足时融合被拒绝，且不产生任何改动');
+    } catch (e) { fail('融合缺钱测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // AI 也要会用融合 —— 否则新机制在平衡数据里等于不存在
+    try {
+      var gH = new w.TideCore.Game({ classKey: 'warden', difficulty: 'standard', seed: 99 });
+      gH.gold = 5000;
+      gH.bag = [];
+      for (var hi = 0; hi < 8; hi++) gH.bag.push(gH.makeItem({ depth: 3, slot: 'helm', rarity: 'rare' }));
+      gH.playHeadless(400);
+      // 判据是「背包里出现了比材料更高一档的东西」，**不是**"背包里有史诗"。
+      // 原来写死了 epic：战力口径统一之后 AI 会把稀有一路合到传说，
+      // 背包里一件史诗都不剩 —— 这条断言于是报了个假失败。
+      // 实测它这一局成功融合了 42 次（取证见 tools/probe_ai.html）。
+      // 判据钉在"有没有合上去"，才不会随 AI 的合成深度而飘。
+      var baseRankH = w.TideData.rarRank('rare');
+      var upg = 0;
+      for (var hj = 0; hj < gH.bag.length; hj++) {
+        if (w.TideData.rarRank(gH.bag[hj].rarity) > baseRankH) upg++;
+      }
+      if (!upg) fail('AI 一件都没融合 —— 新机制在平衡数据里等于不存在');
+      else ok('模拟器 AI 会主动融合（背包里合出了 ' + upg + ' 件高于稀有的装备）');
+    } catch (e) { fail('AI 融合测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 25. 新界面有没有挤坏布局 ----------
+    // 加一个 HUD 键最容易撑破那一行按钮；这类"看得见但测不到"的问题
+    // 以前只能靠截图肉眼看。DOM 的几何是可以直接判定的，就把它变成断言。
+    try {
+      var hudEl = d.getElementById('hud-top');
+      var hbEl = hudEl ? hudEl.querySelector('.hud-btns') : null;
+      var stageEl = d.getElementById('stage');
+      if (!hudEl || !hbEl || !stageEl) fail('布局检查：找不到 HUD 或舞台');
+      else {
+        var sr = stageEl.getBoundingClientRect();
+        var hr = hbEl.getBoundingClientRect();
+        if (sr.width < 100) ok('布局检查：舞台未布局（标题页），跳过');
+        else if (hr.right > sr.right + 1) {
+          fail('HUD 按钮溢出舞台：按钮区右缘 ' + Math.round(hr.right) +
+            ' > 舞台右缘 ' + Math.round(sr.right));
+        } else if (d.getElementById('btn-skill') === null) {
+          fail('HUD 上没有魂技键');
+        } else {
+          ok('HUD 未溢出（按钮区右缘 ' + Math.round(hr.right) + ' ≤ 舞台右缘 ' +
+            Math.round(sr.right) + '）');
+        }
+      }
+    } catch (e) { fail('布局检查异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // 侧栏与角色卡上的新元素必须真的渲染出来了（数据对但没画 = 玩家看不见）
+    try {
+      var spEl = d.getElementById('skill-panel');
+      if (!spEl || !spEl.innerHTML) fail('侧栏没有渲染出魂技卡');
+      else if (spEl.innerHTML.indexOf('sk-cd') < 0) fail('魂技卡里没有冷却条');
+      else ok('侧栏魂技卡已渲染（含冷却条）');
+      var bbEl = d.getElementById('hero-buffs');
+      if (!bbEl) fail('角色卡上没有增益条容器');
+      else ok('角色卡增益条容器就位');
+    } catch (e) { fail('新界面渲染检查异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 26. 技能必须"有感觉"，不只是数值生效 ----------
+    // 玩家反馈过「技能没有任何感觉，虽然有效」—— 实测那一次它只产生了震屏，
+    // 零粒子零飘字。所以这里把"有感觉"翻译成可判定的条件：
+    //   ① 事件里带着命中目标与主色（表演层的输入）
+    //   ② 主循环必须把它翻译成施法姿态（渲染层的 cast 状态被点亮）
+    //   ③ 粒子 / 技能名飘字 / 形状型特效，三个都不能是 0
+    function feelOf(className, setup) {
+      w.TideMain.start({ mode: 'normal', seed: 20260922, classKey: className, difficulty: 'standard' });
+      var g = w.TideMain.game;
+      w.TideFX.clear();
+      var sk = g.skill();
+      if (setup) setup(g);
+      var r = g.useSkill();
+      if (!r.ok) return { err: '放不出来: ' + r.reason, key: sk.key };
+      w.TideMain.flush();                       // 走完整条链：模型 → 主循环 → 特效/渲染
+      var c = w.TideFX.counts();
+      var cast = w.TideRender.cast;
+      return { key: sk.key, ok: true, parts: c.parts, texts: c.texts, rings: c.rings,
+        streaks: c.streaks, shake: c.shake, castT: cast.t, castKey: cast.key, name: sk.name };
+    }
+    try {
+      // 破军 · 裂地斩：贴脸放。要求"地裂"是环形 → rings > 0
+      var fq = feelOf('warlord', function (g) {
+        g.enemies = [];
+        var dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+        for (var i = 0; i < 4; i++) {
+          var nx = g.px + dirs[i][0], ny = g.py + dirs[i][1];
+          if (g.walkable(nx, ny)) g.enemies.push(g._makeEnemy(nx, ny, 2));
+        }
+      });
+      if (fq.err) fail('裂地斩：' + fq.err);
+      else if (!fq.parts) fail('裂地斩没有任何粒子 —— 玩家看不到自己放了技能');
+      else if (!fq.texts) fail('裂地斩没有技能名飘字 —— 玩家不知道刚才放的是什么');
+      else if (!fq.rings) fail('裂地斩没有地面冲击环（它的招牌形状）');
+      else if (!(fq.castT > 0)) fail('施法姿态没有被触发（渲染层 cast.t = ' + fq.castT + '）');
+      else ok('裂地斩有感觉：' + fq.parts + ' 粒子 / ' + fq.rings + ' 冲击环 / ' +
+        fq.texts + ' 条飘字 / 施法姿态已触发');
+    } catch (e) { fail('裂地斩表演测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    try {
+      // 秘仪 · 潮语洪流：要求"打出去的水束" → streaks > 0
+      var ft = feelOf('arcanist', function (g) {
+        var e0 = g.enemies[0];
+        if (!e0) return;
+        // 站到它旁边并刷新视野，保证它在射程内且可见
+        var dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+        for (var i = 0; i < 4; i++) {
+          var nx = e0.x + dirs[i][0], ny = e0.y + dirs[i][1];
+          if (g.walkable(nx, ny) && !g.enemyAt(nx, ny)) { g.px = nx; g.py = ny; break; }
+        }
+        if (g._recomputeFOV) g._recomputeFOV();
+      });
+      if (ft.err) fail('潮语洪流：' + ft.err);
+      else if (!ft.parts || !ft.texts) fail('潮语洪流没有粒子或飘字');
+      else if (!ft.streaks) fail('潮语洪流没有能量束（它的招牌形状）');
+      else ok('潮语洪流有感觉：' + ft.parts + ' 粒子 / ' + ft.streaks + ' 道水束 / ' +
+        ft.texts + ' 条飘字');
+    } catch (e) { fail('潮语洪流表演测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    try {
+      // 疾风 · 疾影：不需要目标，但必须有残影 → streaks > 0
+      var fb = feelOf('ranger', null);
+      if (fb.err) fail('疾影：' + fb.err);
+      else if (!fb.parts || !fb.texts) fail('疾影没有粒子或飘字');
+      else if (!fb.streaks) fail('疾影没有残影拖尾（它的招牌形状）');
+      else ok('疾影有感觉：' + fb.parts + ' 粒子 / ' + fb.streaks + ' 道残影 / ' +
+        fb.texts + ' 条飘字');
+    } catch (e) { fail('疾影表演测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    try {
+      // 铁壁 · 不退之壁：环形 + 回血飘字，而且**护盾罩要一直亮着**
+      var fw = feelOf('warden', function (g) { g.enemies = []; });
+      if (fw.err) fail('不退之壁：' + fw.err);
+      else if (!fw.parts || !fw.texts || !fw.rings) {
+        fail('不退之壁特效不全（粒子 ' + fw.parts + ' / 飘字 ' + fw.texts + ' / 环 ' + fw.rings + '）');
+      } else {
+        // 增益还在时，渲染层必须画出护盾罩 —— 只闪一下的护盾等于没加
+        var gShield = w.TideMain.game;
+        if (!gShield.buffs.length) fail('不退之壁没有留下增益');
+        else ok('不退之壁有感觉：' + fw.parts + ' 粒子 / ' + fw.rings + ' 环 / 增益持续 ' +
+          gShield.buffs[0].turns + ' 回合（护盾罩随增益存在）');
+      }
+    } catch (e) { fail('不退之壁表演测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // 融合也必须有反馈：事件队列要被消费掉，否则音效/提示条全都不出现
+    try {
+      var gF2 = w.TideMain.game;
+      gF2.bag = [gF2.makeItem({ depth: 3, slot: 'helm', rarity: 'epic' }),
+        gF2.makeItem({ depth: 3, slot: 'helm', rarity: 'epic' })];
+      gF2.gold = 2000;
+      gF2.drainEvents();
+      var rF2 = gF2.fuseItems(0, 1);
+      if (!rF2.ok) fail('融合失败: ' + rF2.reason);
+      else {
+        var evsF = gF2.drainEvents();
+        var hasFuse = false;
+        for (var fi3 = 0; fi3 < evsF.length; fi3++) if (evsF[fi3].kind === 'fuse') hasFuse = true;
+        if (!hasFuse) fail('融合没有产生事件 —— 界面拿不到任何可以反馈的东西');
+        else ok('融合会产生 fuse 事件（主循环据此播音效 + 弹提示条）');
+      }
+    } catch (e) { fail('融合反馈测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 27. 出错兜底不能反过来把游戏锁死 ----------
+    // 上一版的兜底把**任何** window error 事件都当成"游戏崩了"，
+    // 而浏览器在资源加载失败（比如 favicon 404）时也会在 window 上报 error，
+    // 那种事件没有 message。于是一个无害的 404 变成一张盖住整个游戏的黑屏 ——
+    // 玩家看到的就是"一开局就弹出错误、无法开始游戏"。
+    try {
+      // (a) 资源型错误：没有 message / error → 必须完全忽略
+      w.dispatchEvent(new w.Event('error'));
+      if (d.getElementById('fatal-restart')) {
+        fail('一个没有 message 的资源错误就触发了停机浮层 —— 游戏会被 404 锁死');
+      } else if (w.__tideHardStop) {
+        fail('资源错误竟然停掉了主循环');
+      } else {
+        ok('资源型错误被正确忽略（不会拿 404 当崩溃）');
+      }
+
+      // (b) 真 JS 错误：只给一条可忽略的提示，绝不停机
+      var ev1 = new w.ErrorEvent('error', { message: '烟雾测试用的假错误' });
+      w.dispatchEvent(ev1);
+      if (d.getElementById('fatal-restart')) {
+        fail('单个真错误就触发了停机浮层 —— 玩家会被一次无害异常卡在外面');
+      } else if (w.__tideHardStop) {
+        fail('单个真错误就停掉了主循环');
+      } else {
+        ok('单个真错误只提示不停机（游戏可以继续玩）');
+      }
+
+      // (c) 短时间内反复出错 → 这才值得停机
+      for (var ei2 = 0; ei2 < 6; ei2++) {
+        w.dispatchEvent(new w.ErrorEvent('error', { message: '烟雾测试连续错误 ' + ei2 }));
+      }
+      if (!d.getElementById('fatal-restart')) {
+        fail('连续 7 次真错误仍然不停机 —— 那才是真的会黑屏刷错');
+      } else if (!w.__tideHardStop) {
+        fail('停机浮层出现了但主循环没停');
+      } else {
+        ok('连续出错才升级为停机浮层（且带"复制错误信息"按钮）');
+      }
+    } catch (e) { fail('出错兜底测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 28. 四个技能的招牌机制 ----------
+    // "把技能做好"不等于"技能有数字"。每个技能都要有一个**只属于它**、
+    // 而且能改变打法的机制。这一节逐条验它们真的生效。
+    //
+    // 伤害类断言全部先把随机源钉死（chance→false、float→0.5），
+    // 否则暴击/闪避/回响会让"多了 25%"这种结论完全不可复现。
+    function stubRng(g) {
+      g.rng.chance = function () { return false; };
+      g.rng.float = function () { return 0.5; };
+      g.rng.pick = function (arr) { return arr[0]; };
+      return g;
+    }
+    function duelDamage(g, dummy, opts) {
+      opts = opts || {};
+      const A = Object.assign({}, g.stats());
+      A.hp = 1e6; A.maxHp = 1e6;
+      const B = Object.assign({}, dummy);
+      B.hp = 1e6; B.maxHp = 1e6;
+      if (opts.wet) B.wet = 1;
+      const r = g._duel(A, B, opts.flags || {}, null, true,
+        { name: g.cls.name, isPlayer: true }, { name: '木桩' });
+      let sum = 0, types = {};
+      for (const rd of (r.log || [])) {
+        if (rd.dodge) continue;
+        if (rd.from !== g.cls.name) continue;
+        sum += rd.dmg;
+        types[rd.type] = (types[rd.type] || 0) + 1;
+      }
+      return { sum: sum, types: types };
+    }
+    // 一块"物防高、法防 0"的木桩：保证玩家一定走法术那一路，湿透才有意义
+    var DUMMY = {
+      hp: 1e6, atkP: 30, atkM: 0, penP: 0, penM: 0,
+      defP: 40, defM: 0, spd: 1, crit: 0, dodge: 0, leech: 0
+    };
+
+    // (a) 裂地斩：把敌人掀开一格
+    try {
+      w.TideMain.start({ mode: 'normal', seed: 20260922, classKey: 'warlord', difficulty: 'standard' });
+      var gK = w.TideMain.game;
+      gK.enemies = [];
+      var dirsK = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      var put = null;
+      for (var ki = 0; ki < 4; ki++) {
+        var ex = gK.px + dirsK[ki][0], ey = gK.py + dirsK[ki][1];
+        var bx2 = ex + dirsK[ki][0], by2 = ey + dirsK[ki][1];
+        // 要一条"站在旁边、身后是空地"的直线，才推得动
+        if (gK.walkable(ex, ey) && !gK.enemyAt(ex, ey) && gK.walkable(bx2, by2) && !gK.enemyAt(bx2, by2)) {
+          put = { ex: ex, ey: ey, bx: bx2, by: by2 };
+          break;
+        }
+      }
+      if (!put) fail('裂地斩击退测试：找不到"旁边有空地"的位置，安排不上');
+      else {
+        var eK = gK._makeEnemy(put.ex, put.ey, 3);
+        eK.hp = eK.maxHp = 9999;
+        gK.enemies.push(eK);
+        var rK = gK.useSkill();
+        if (!rK.ok) fail('裂地斩放不出来: ' + rK.reason);
+        else if (eK.x !== put.bx || eK.y !== put.by) {
+          fail('裂地斩没有把敌人掀开：期望 (' + put.bx + ',' + put.by + ')，实际 (' + eK.x + ',' + eK.y + ')');
+        } else if (eK.stun > 0) {
+          fail('推得动却给了眩晕，两者应该是二选一');
+        } else ok('裂地斩把敌人掀开了一格（' + put.ex + ',' + put.ey + ' → ' + eK.x + ',' + eK.y + '）');
+      }
+    } catch (e) { fail('裂地斩击退测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // (b) 裂地斩：推不动就震晕，且被震晕的敌人这一轮不会动
+    try {
+      var gS = w.TideMain.game;
+      gS.enemies = [];
+      // 不指望地图上恰好有"敌人身后是墙"的地形 —— 自己砌一个。
+      // 让测试依赖随机地形的形状，就是在给自己制造偶发失败。
+      var dirP = null;
+      for (var si2 = 0; si2 < 4; si2++) {
+        var wx = gS.px + dirsK[si2][0], wy = gS.py + dirsK[si2][1];
+        if (gS.walkable(wx, wy) && !gS.enemyAt(wx, wy)) { dirP = si2; break; }
+      }
+      if (dirP === null || !w.TideCore.T) fail('裂地斩震晕测试：安排不上（四周没有空格）');
+      else {
+        var exS = gS.px + dirsK[dirP][0], eyS = gS.py + dirsK[dirP][1];
+        var bxS = exS + dirsK[dirP][0], byS = eyS + dirsK[dirP][1];
+        gS.tiles[byS * gS.W + bxS] = w.TideCore.T.WALL;      // 在它身后砌一堵墙
+        var eS = gS._makeEnemy(exS, eyS, 3);
+        eS.hp = eS.maxHp = 9999;
+        eS.stats = Object.assign({}, eS.stats, { atkP: 40, atkM: 40, penP: 0, penM: 0 });
+        gS.enemies.push(eS);
+        gS.hp = gS.stats().hp;
+        gS.skillCd = 0;      // 上一条已经放过一次，这里测的是机制而不是冷却
+        var rS = gS.useSkill();
+        // useSkill 内部已经推进过一回合（技能消耗回合），所以事件都在这批里
+        var evsS = gS.drainEvents();
+        var stunEv = false, skipped = false, attacked = false;
+        for (var qi = 0; qi < evsS.length; qi++) {
+          if (evsS[qi].kind === 'stun') stunEv = true;
+          if (evsS[qi].kind === 'stunned' && evsS[qi].enemy === eS) skipped = true;
+          // 判据必须排除**技能自己那一下**：_skillHit 也会推 kind:'hit'（额外带 skill:true），
+          // 那是"我打它"，不是"它打我"。两者混在一起，这条断言会永远判失败。
+          if (evsS[qi].kind === 'hit' && evsS[qi].enemy === eS && !evsS[qi].skill) attacked = true;
+        }
+        if (!rS.ok) fail('裂地斩（撞墙）放不出来: ' + rS.reason);
+        else if (eS.x !== exS || eS.y !== eyS) {
+          fail('身后是墙，敌人竟然还是被推动了（' + exS + ',' + eyS + ' → ' + eS.x + ',' + eS.y + '）');
+        } else if (!stunEv) {
+          fail('推不动，但既没推动也没有震晕事件 —— 掀开和震晕应该二选一');
+        } else if (!skipped) {
+          fail('震晕挂上了，但它该动的那一刻没有被跳过（没有 stunned 事件）');
+        } else if (attacked) {
+          fail('被震晕的敌人还是出手了 —— 眩晕没有生效');
+        } else {
+          // 语义：施放本身花掉一个回合，眩晕就在**紧接的那次 endTurn** 里被消费掉，
+          // 也就是"它对你这一手的回应被跳过了"。所以放完之后 stun 已经是 0 是正常的，
+          // 判据要看"那一次行动到底有没有发生"，而不是看残留回合数。
+          ok('裂地斩撞墙 → 震晕：这一次它没有出手（眩晕在敌人该动的那一刻被消费）');
+        }
+      }
+    } catch (e) { fail('裂地斩震晕测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // (c) 潮语洪流：上"潮湿"，且法术伤害确实 +25%
+    try {
+      w.TideMain.start({ mode: 'normal', seed: 20260922, classKey: 'arcanist', difficulty: 'standard' });
+      stubRng(w.TideMain.game);
+      var gW = w.TideMain.game;
+      var dry = duelDamage(gW, DUMMY, {});
+      var wet2 = duelDamage(gW, DUMMY, { wet: true });
+      if (!(dry.types.m > 0)) fail('木桩没有让玩家走法术路线，这条测试无效');
+      else if (!(wet2.sum > dry.sum)) {
+        fail('潮湿没有提高法术伤害（干 ' + dry.sum + ' vs 湿 ' + wet2.sum + '）');
+      } else {
+        var ratio = wet2.sum / dry.sum;
+        if (Math.abs(ratio - 1.25) > 0.06) fail('潮湿的增伤不是 25%（实测 ' + ratio.toFixed(3) + '）');
+        else ok('潮湿生效：法术伤害 ×' + ratio.toFixed(2) + '（干 ' + dry.sum + ' → 湿 ' + wet2.sum + '）');
+      }
+    } catch (e) { fail('潮湿测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    try {
+      // 上状态这件事本身：真的打到人了才有 wet
+      var gW2 = w.TideMain.game;
+      var eW = gW2.enemies[0];
+      if (!eW) fail('潮湿测试：场上没有敌人');
+      else {
+        gW2.enemies = [eW];
+        // 站到它旁边（射程内且可见）
+        for (var di2 = 0; di2 < 4; di2++) {
+          var nx2 = eW.x + dirsK[di2][0], ny2 = eW.y + dirsK[di2][1];
+          if (gW2.walkable(nx2, ny2) && !gW2.enemyAt(nx2, ny2)) { gW2.px = nx2; gW2.py = ny2; break; }
+        }
+        if (gW2._recomputeFOV) gW2._recomputeFOV();
+        eW.hp = eW.maxHp = 9999;
+        var rW = gW2.useSkill();
+        if (!rW.ok) fail('潮语洪流放不出来: ' + rW.reason);
+        else if (!(eW.wet > 0)) fail('潮语洪流没有让敌人湿透');
+        else if (eW.wet !== 2) fail('潮湿的回合数与文案不符：文案写 2，实测 ' + eW.wet);
+        else ok('潮语洪流上了潮湿 ' + eW.wet + ' 回合（与文案一致；出生那回合不倒计时）');
+      }
+    } catch (e) { fail('潮湿施加测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // (d) 疾影：额外行动 + 本轮爆发窗口（+35%）
+    try {
+      w.TideMain.start({ mode: 'normal', seed: 20260922, classKey: 'ranger', difficulty: 'standard' });
+      stubRng(w.TideMain.game);
+      var gB2 = w.TideMain.game;
+      var base = duelDamage(gB2, DUMMY, {});
+      var burst = duelDamage(gB2, DUMMY, { flags: { dmgOut: 0.35 } });
+      if (!(burst.sum > base.sum)) fail('疾影的爆发窗口没有提高伤害');
+      else if (Math.abs(burst.sum / base.sum - 1.35) > 0.06) {
+        fail('疾影的增伤不是 35%（实测 ' + (burst.sum / base.sum).toFixed(3) + '）');
+      } else ok('疾影爆发窗口生效：伤害 ×' + (burst.sum / base.sum).toFixed(2));
+      // 放一次技能，确认窗口真的挂上去了
+      var rB2 = gB2.useSkill();
+      if (!rB2.ok) fail('疾影放不出来: ' + rB2.reason);
+      else if (gB2.freeMoves !== 2) fail('疾影没有给 2 次免费行动: ' + gB2.freeMoves);
+      else if (!(gB2.flags().dmgOut > 0)) fail('疾影的爆发窗口没有反映到 flags 上');
+      else ok('疾影：免费行动 ' + gB2.freeMoves + ' 次 + 输出增伤 ' +
+        Math.round(gB2.flags().dmgOut * 100) + '%（一轮后消失）');
+    } catch (e) { fail('疾影爆发测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // (e) 不退之壁：双防 ×2.5 + 反伤 50%
+    try {
+      w.TideMain.start({ mode: 'normal', seed: 20260922, classKey: 'warden', difficulty: 'standard' });
+      stubRng(w.TideMain.game);
+      var gR2 = w.TideMain.game;
+      gR2.enemies = [];
+      var defBefore2 = gR2.stats().defP;
+      var thornsBefore = gR2.flags().thorns;
+      var rR = gR2.useSkill();
+      if (!rR.ok) fail('不退之壁放不出来: ' + rR.reason);
+      else if (!(gR2.stats().defP > defBefore2 * 2)) fail('不退之壁没有把双防抬起来');
+      else if (!(gR2.flags().thorns > thornsBefore)) {
+        fail('不退之壁的反伤没有进 flags（' + thornsBefore + ' → ' + gR2.flags().thorns + '）');
+      } else {
+        // 反伤要真的能打回去：让一个敌人打玩家一下，看它自己掉不掉血
+        var eR = gR2._makeEnemy(gR2.px + 1, gR2.py, 3);
+        if (!eR || !gR2.walkable(gR2.px + 1, gR2.py)) fail('反伤测试：旁边没有位置放敌人');
+        else {
+          eR.hp = eR.maxHp = 9999;
+          gR2.enemies.push(eR);
+          var ehp0 = eR.hp;
+          gR2.enemyHit(eR);
+          if (!(eR.hp < ehp0)) fail('敌人打了我，却没有被反伤（' + ehp0 + ' → ' + eR.hp + '）');
+          else ok('不退之壁：双防 ×' + (gR2.stats().defP / defBefore2).toFixed(2) +
+            '，反伤 ' + Math.round(gR2.flags().thorns * 100) + '%（敌人被打掉 ' + (ehp0 - eR.hp) + ' 血）');
+        }
+      }
+    } catch (e) { fail('不退之壁测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 24. 元进度（潮汐结晶） ----------
+    // 这一节要盯死两件事：
+    //   ① 存档是**不可信输入** —— 手改过的存档不能把游戏搞坏，也不能变出幽灵解锁
+    //   ② 元进度**只在显式传入时**才生效 —— 一旦它偷偷泄漏进模拟器，
+    //      通关率这个唯一的验收标准就作废了，而且是无声作废
+    var metaBackup = null;
+    try {
+      var MU = w.TideMeta;
+      metaBackup = MU ? MU.load() : null;
+      if (!MU) fail('没有 TideMeta 模块');
+      else if (typeof w.TideData.META.effects !== 'function') fail('TideData.META.effects 不是函数');
+      else {
+        // ① 存档净化：非法输入必须被修成合法值，且不抛异常
+        var bad1 = MU.sanitize({
+          crystals: -50, total: -1,
+          owned: { gift: 1, god: 1, pouch1: 'yes' },
+          runs: -3, wins: 99, best: 1000000
+        });
+        if (bad1.crystals !== 0) fail('负数结晶没有被修正: ' + bad1.crystals);
+        if (bad1.owned.god) fail('不存在的解锁 id 竟然被保留（幽灵解锁能进模型层）');
+        if (bad1.owned.gift) fail('前置没满足的解锁被当成已购');
+        if (!bad1.owned.pouch1) fail('合法解锁被误伤');
+        if (bad1.best > 999) fail('最深层的越界值没有夹住: ' + bad1.best);
+        if (bad1.wins > bad1.runs) fail('通关次数大于总局数没有被修正');
+        var bad2 = MU.sanitize('这不是对象'), bad3 = MU.sanitize(null);
+        if (!bad2 || bad2.crystals !== 0 || !bad3 || !bad3.owned) fail('非对象 / null 存档没有兜底成新档');
+        ok('存档净化：负数/越界/幽灵解锁/类型错误全部就地修好，且不抛异常');
+
+        // ② 存读一致
+        MU.save({ crystals: 500, total: 900, owned: { pouch1: 1 }, runs: 3, wins: 1, best: 4 });
+        var rd = MU.load();
+        if (rd.crystals !== 500 || !rd.owned.pouch1 || rd.best !== 4 || rd.wins !== 1) {
+          fail('存读不一致: ' + JSON.stringify(rd));
+        } else ok('存档存读一致（结晶 / 已购 / 最深层 / 通关数都对得上）');
+
+        // ③ 购买的三条失败分支都要有明确理由，扣费要准
+        MU.save({ crystals: 0, total: 0, owned: {}, runs: 0, wins: 0, best: 0 });
+        var bPoor = MU.buy('pouch1');
+        if (bPoor.ok || bPoor.reason !== 'poor') fail('没钱时没有正确拒绝: ' + JSON.stringify(bPoor));
+        var bReq = MU.buy('pouch2');
+        if (bReq.ok || bReq.reason !== 'req') fail('前置没满足时没有正确拒绝: ' + JSON.stringify(bReq));
+        MU.save({ crystals: 9999, total: 9999, owned: {}, runs: 0, wins: 0, best: 0 });
+        var bOk = MU.buy('pouch1');
+        if (!bOk.ok || bOk.meta.crystals !== 9999 - 60) fail('扣费不对: ' + JSON.stringify(bOk.meta));
+        var bDup = MU.buy('pouch1');
+        if (bDup.ok || bDup.reason !== 'owned') fail('重复购买没有被拒绝');
+        ok('购买三分支正确：poor / req / owned，且扣费准确');
+
+        // ④ 结算幂等 —— 同一局结两次不能翻倍（翻倍不可逆，玩家已经花掉了）
+        MU.save({ crystals: 0, total: 0, owned: {}, runs: 0, wins: 0, best: 0 });
+        var fakeG = { status: 'dead', depth: 2, kills: 10 };
+        var s1 = MU.settle(fakeG, 'run-A');
+        var s2 = MU.settle(fakeG, 'run-A');
+        if (!(s1.gain > 0)) fail('结算没有给出结晶');
+        else if (s2.duplicate !== true || s2.gain !== 0) fail('同一局被结算了两次（结晶凭空翻倍）');
+        else if (MU.load().crystals !== s1.gain) fail('结算入账金额不对');
+        else ok('结算幂等：同一局重复结算第二次给 0（首次 +' + s1.gain + '）');
+      }
+    } catch (e) { fail('元进度测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 25. 元进度必须真的作用于开局，且绝不能泄漏到没有它的那一局 ----------
+    try {
+      var allOwned = {};
+      for (var ui2 = 0; ui2 < w.TideData.META.unlocks.length; ui2++) {
+        allOwned[w.TideData.META.unlocks[ui2].id] = 1;
+      }
+      // 走 TideMain.start 而不是直接 new Game：这样连"主循环有没有把 meta 传下去"一起验了
+      w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: 20260922, meta: null });
+      var gBase = w.TideMain.game;
+      var baseHp = gBase.stats().hp, baseBag = gBase.bagCap(), baseLives = gBase.lives;
+
+      w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: 20260922, meta: allOwned });
+      var gMeta = w.TideMain.game;
+      if (gMeta.gold !== 300) fail('金币加成不对: ' + gMeta.gold + '（期望 120+180=300）');
+      else if (gMeta.bagCap() !== baseBag + 8) fail('背包加成不对: ' + gMeta.bagCap() + ' vs 基准 ' + baseBag);
+      else if (gMeta.lives !== baseLives + 1) fail('复活次数加成不对: ' + gMeta.lives);
+      else if (!(gMeta.stats().hp > baseHp)) fail('生命上限加成没有生效: ' + gMeta.stats().hp + ' vs ' + baseHp);
+      else if (!gMeta.bag.length) fail('开局装备没有进背包');
+      else ok('元进度确实作用于开局：金币 ' + gMeta.gold + ' / 背包 ' + gMeta.bagCap() +
+        ' / 复活 ' + gMeta.lives + ' / 生命 ' + baseHp + '→' + gMeta.stats().hp +
+        ' / 开局装备 ' + gMeta.bag[0].rarityName);
+
+      // 最关键的一条：没传 meta 的那一局必须**一丁点都不受影响**
+      if (gBase.meta !== null || gBase.gold !== 0 || gBase.bagCap() !== 40 ||
+          gBase.stats().hp >= gMeta.stats().hp) {
+        fail('基准被污染了 —— 元进度泄漏到了"没传 meta"的那一局（模拟器的通关率会因此失真）');
+      } else {
+        ok('元进度不泄漏：不传 meta 的一局 金币 0 / 背包 40 / 生命 ' + baseHp +
+          '（模拟器的基准仍然干净）');
+      }
+    } catch (e) { fail('元进度生效测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 26. BGM 状态机 ----------
+    try {
+      var AU2 = w.TideAudio;
+      if (typeof AU2.musicState !== 'function') fail('音频层没有 musicState，BGM 无法断言');
+      else {
+        AU2.init();
+        AU2.music('title');
+        var st1 = AU2.musicState();
+        if (st1.scene !== 'title' || st1.level !== 0) fail('标题页没有切到静谧段: ' + JSON.stringify(st1));
+        AU2.music('game', 1);
+        var st2 = AU2.musicState();
+        if (st2.scene !== 'game' || st2.level !== 1) fail('局内没有切到探索段: ' + JSON.stringify(st2));
+        AU2.music('game', 2);
+        var st3 = AU2.musicState();
+        if (st3.level !== 2) fail('危机段没有切过去: ' + JSON.stringify(st3));
+        else if (!(st3.tempo > st2.tempo)) fail('危机段没有提速: ' + st2.tempo + ' → ' + st3.tempo);
+        // 幂等：重复调同一场景不能把步进归零（否则音乐卡在第 0 步反复重来）
+        AU2.music('game', 2); AU2.music('game', 2);
+        var st4 = AU2.musicState();
+        if (st4.scene !== 'game' || st4.level !== 2) fail('重复调用把音乐状态改坏了');
+        // 静音必须**真的停掉音序器**，不是靠把增益拧到 0
+        var wasOn = AU2.isOn();
+        AU2.toggle(false);
+        if (AU2.musicState().running) fail('静音之后音序器还在跑（白烧 CPU）');
+        AU2.toggle(wasOn);
+        ok('BGM 状态机：标题静谧(72) / 局内探索(' + st2.tempo + ') / 危机提速(' + st3.tempo +
+          ')，且静音会真正停掉音序器');
+      }
+    } catch (e) { fail('BGM 测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 27. 标题页的潮汐结晶面板真的画出来了 ----------
+    try {
+      var MU3 = w.TideMeta;
+      MU3.save({ crystals: 999, total: 999, owned: { pouch1: 1 }, runs: 5, wins: 2, best: 3 });
+      w.TideUI.showTitle();
+      var grid2 = d.getElementById('meta-grid');
+      var cry2 = d.getElementById('meta-crystals');
+      var ownedN = grid2 ? grid2.querySelectorAll('.meta-card.owned').length : -1;
+      if (!grid2 || !grid2.querySelectorAll('[data-meta]').length) fail('标题页没有渲染潮汐结晶面板');
+      else if (!cry2 || cry2.textContent !== '999') fail('结晶数量没有显示: ' + (cry2 && cry2.textContent));
+      else if (ownedN !== 1) fail('已购状态没有画出来（.owned 卡片数 = ' + ownedN + '）');
+      else if (grid2.innerHTML.indexOf('还差') < 0 &&
+               grid2.innerHTML.indexOf('需先解锁') < 0) {
+        fail('买不起 / 前置不满的卡片没有给出原因 —— 只置灰不解释，玩家会以为坏了');
+      } else {
+        ok('标题页潮汐结晶面板：' + grid2.querySelectorAll('[data-meta]').length +
+          ' 个解锁项，已购 / 买不起 / 前置不满三种状态都画出来了');
+      }
+      if (metaBackup) MU3.save(metaBackup); else MU3.reset();
+    } catch (e) { fail('结晶面板测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 28. 标题页必须装得下（按 exe 的真实窗口尺寸量） ----------
+    // 这一节的由来，删掉之前先读完：
+    //   v10.7 往标题页塞了第三块「潮汐结晶」区块，把内容撑到 1132px，
+    //   而 exe 的窗口客户区只有 880px → 「开始下潜」被挤到可视区之外，
+    //   玩家一打开就是"卡住了"。而当时冒烟 118 项**全绿**。
+    //
+    //   原因：**程序化 click() 不关心元素在不在屏幕里。** element.click() 永远成功，
+    //   真人用鼠标点才需要它真的可见。这是测试的结构性盲区。
+    //   所以这条断言只看几何，不看"能不能点"。
+    try {
+      w.TideUI.showTitle();
+      // 临时把 iframe 调成 exe 的客户区尺寸（launcher.cs: ClientSize = 1380x880）
+      fr.style.width = '1380px';
+      fr.style.height = '880px';
+      void fr.offsetHeight;                     // 强制一次同步布局，别量到旧尺寸
+
+      var innerT = d.querySelector('.title-inner');
+      var startT = d.getElementById('btn-start');
+      var irT = innerT.getBoundingClientRect();
+      var srT = startT.getBoundingClientRect();
+      var overT = innerT.scrollHeight - innerT.clientHeight;
+
+      if (srT.bottom > irT.height + 1) {
+        fail('「开始下潜」落在可视区之外（按钮 bottom ' + Math.round(srT.bottom) +
+          ' > 可视高 ' + Math.round(irT.height) + '）—— 真机上看起来就是"卡住"。' +
+          '注意：程序化 click() 测不出这个，只有几何断言能。');
+      } else {
+        // 判据是「主按钮在可视区内」，**不是**"整页不许滚动"。
+        // 底部那行署名要滚一下才看全，完全正常；重点是别让人找不到开始按钮。
+        ok('标题页在真机尺寸 1380×880 下可用：「开始下潜」bottom=' +
+          Math.round(srT.bottom) + ' 在可视区(高 ' + Math.round(irT.height) +
+          ')内；整页内容 ' + innerT.scrollHeight + 'px' +
+          (overT > 1 ? '（底部署名需滚动 ' + overT + 'px 才看全，可接受）' : ''));
+      }
+
+      // 结晶面板现在住弹窗里，两条路（按钮 / Esc）都要能进出
+      w.TideUI.showMeta();
+      var mmT = d.getElementById('meta-modal');
+      if (mmT.classList.contains('hidden')) fail('结晶弹窗没有打开');
+      else if (!d.getElementById('meta-grid').querySelectorAll('[data-meta]').length) {
+        fail('结晶弹窗里没有解锁项');
+      } else {
+        w.TideUI.closeMeta();
+        if (!d.getElementById('meta-modal').classList.contains('hidden')) fail('结晶弹窗关不掉');
+        else ok('潮汐结晶改成弹窗后：可打开、可关闭，解锁项都渲染在弹窗里');
+      }
+
+      fr.style.width = '1280px';                // 还原，后面的断言依赖这个尺寸
+      fr.style.height = '800px';
+      void fr.offsetHeight;
+    } catch (e) { fail('标题页布局测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 29. ESC 暂停菜单：能开、能关、且真的拔掉了输入 ----------
+    // 最后一类是"菜单开着，角色还在走" —— 这是弹窗类界面的经典漏法：
+    // 门禁散在各个输入分支里，新加一个界面就漏一条。这里直接断言行为。
+    try {
+      w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: 20260922, meta: null });
+      var gP = w.TideMain.game;
+      var p0 = { x: gP.px, y: gP.py };
+      var key = function (k) {
+        w.dispatchEvent(new w.KeyboardEvent('keydown', { key: k, bubbles: true }));
+        w.dispatchEvent(new w.KeyboardEvent('keyup', { key: k, bubbles: true }));
+      };
+
+      // 先验一条容易被忽略的：按住 Esc 时系统会持续发 keydown（repeat=true），
+      // 那种事件不能当成"玩家又想开菜单" —— 否则"关掉弹窗的那一次长按"
+      // 会顺手把菜单弹出来。这是写代码时才想到的，所以更要钉住。
+      w.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', repeat: true, bubbles: true }));
+      if (w.TideUI.isPauseOpen()) { fail('按住 Esc 的重复事件误触发了暂停菜单'); w.TideUI.closePause(); }
+      else ok('按住 Esc 的重复事件不会误触发菜单（只在首次按下时响应）');
+
+      key('Escape');
+      if (!w.TideUI.isPauseOpen()) fail('按 Esc 没有打开暂停菜单');
+      else if (d.getElementById('pause-modal').classList.contains('hidden')) fail('暂停菜单状态是开着，但没显示出来');
+      else {
+        ok('Esc 能打开暂停菜单（并且弹窗确实显示了）');
+
+        // ① 方向键必须完全驱动不了角色
+        ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', 'w', 'a', 's', 'd'].forEach(key);
+        if (gP.px !== p0.x || gP.py !== p0.y) {
+          fail('暂停菜单开着，方向键还能让角色动（' + p0.x + ',' + p0.y + ' → ' + gP.px + ',' + gP.py + '）');
+        } else if (gP.turn !== 0) {
+          fail('暂停期间回合被推进了: ' + gP.turn);
+        } else {
+          ok('暂停时方向键完全驱动不了角色，回合也没有被推进');
+        }
+
+        // ② 动作键（空格等待 / Q 魂技 / E 背包）也要被挡住
+        var turnB = gP.turn, invB = w.TideUI.isInventoryOpen(), cdB = gP.skillCd;
+        [' ', 'q', 'e'].forEach(key);
+        if (gP.turn !== turnB) fail('暂停期间空格/Q 还能推进回合');
+        else if (w.TideUI.isInventoryOpen() !== invB) fail('暂停期间按 E 竟然打开了背包');
+        else if (gP.skillCd !== cdB) fail('暂停期间按 Q 竟然放出了魂技');
+        else ok('暂停期间动作键（空格等待 / Q 魂技 / E 背包）也被挡住');
+
+        // ③ 菜单里的音效开关要真的生效，文案要跟着变
+        var sndB = w.TideAudio.isOn();
+        w.TideUI.pauseSound();
+        var sndA = w.TideAudio.isOn();
+        var sndLabel = d.getElementById('btn-pause-sound').textContent || '';
+        if (sndA === sndB) fail('暂停菜单里的音效开关没有生效');
+        else if (sndLabel.indexOf(sndA ? '开' : '关') < 0) {
+          fail('音效开关的文案没跟着刷新: ' + JSON.stringify(sndLabel));
+        } else {
+          w.TideUI.pauseSound();     // 还原
+          ok('暂停菜单的音效开关可用，文案同步（' + sndLabel + '）');
+        }
+
+        // ④ 再按 Esc 关掉；关掉之后输入必须恢复
+        key('Escape');
+        if (w.TideUI.isPauseOpen()) fail('再按一次 Esc 关不掉暂停菜单');
+        else {
+          // 恢复的判据：找到一个可走的方向，走一格，回合应该 +1
+          var dirsP = [[1, 0], [-1, 0], [0, 1], [0, -1]], walked = false;
+          for (var qi2 = 0; qi2 < 4 && !walked; qi2++) {
+            var nx2 = p0.x + dirsP[qi2][0], ny2 = p0.y + dirsP[qi2][1];
+            if (gP.walkable(nx2, ny2)) {
+              key(['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp'][qi2]);
+              walked = (gP.px === nx2 && gP.py === ny2);
+            }
+          }
+          if (!walked) fail('关闭暂停菜单后，方向键恢复不了输入（角色走不动）');
+          else ok('再按 Esc 关闭后输入恢复：角色能正常走动了（' + p0.x + ',' + p0.y +
+            ' → ' + gP.px + ',' + gP.py + '）');
+        }
+      }
+    } catch (e) { fail('暂停菜单测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 30. 视角缩放：只改「看」，不改「玩」 ----------
+    // 这条不变量是缩放功能的地基：绘制代码一个字符都没改，
+    // 全靠「可见世界缩小 + 画布被拉伸」这一个恒等式成立。
+    // 恒等式一破，整屏坐标（剔除、地形、光照、粒子、指针）会一起错位。
+    try {
+      var R2 = w.TideRender;
+      var TS = w.TideSettings;
+      if (!TS) fail('没有 TideSettings 模块');
+      else if (!R2.setZoom || !R2.zoomBy) fail('渲染层没有缩放接口');
+      else {
+        // ① 设置的净化（localStorage 是不可信输入）
+        var sb = TS.sanitize({ volSfx: 'x', volBgm: 99, zoom: -5, guide: 'yes' });
+        if (sb.volSfx !== 1) fail('音量非数字没有被修成默认值: ' + sb.volSfx + '（默认应为 1 = 与加音量功能之前的混音一致）');
+        else if (sb.volBgm !== 1) fail('音量越界没有被夹住: ' + sb.volBgm);
+        else if (sb.zoom !== 1) fail('非法缩放没有被修成默认值: ' + sb.zoom);
+        else if (sb.guide !== true) fail('只有显式 false 才算关闭: ' + sb.guide);
+        else if (!TS.sanitize(null) || TS.sanitize(null).volSfx !== 1) fail('null 设置没有兜底');
+        else ok('玩家设置净化：非数字 / 越界 / 非法缩放 / 非布尔全部就地修好，且不抛异常');
+
+        // ② 缩放恒等式 + 玩法状态必须一个字节都不变
+        w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: 20260922, meta: null });
+        var gZ = w.TideMain.game;
+        R2.setZoom(1);
+        var beforeZ = {
+          px: gZ.px, py: gZ.py, turn: gZ.turn, hp: gZ.hp,
+          kills: gZ.kills, enemies: gZ.enemies.length, depth: gZ.depth
+        };
+        var v1 = R2.view, p1 = R2.viewPx;
+        if (Math.abs(p1.w / v1.w - 1) > 0.02) fail('zoom=1 时 viewPx/view 不是 1: ' + (p1.w / v1.w));
+
+        R2.setZoom(1.5);
+        var v2 = R2.view, p2 = R2.viewPx;
+        if (Math.abs(p2.w / v2.w - 1.5) > 0.03) {
+          fail('缩放恒等式不成立：viewPx.w / view.w = ' + (p2.w / v2.w).toFixed(3) + '，应为 1.5');
+        } else if (Math.abs(v1.w / v2.w - 1.5) > 0.06) {
+          // 注意比的是 view（可见世界），不是 viewPx（画布元素）：
+          // 画布的显示宽度**本来就不该随缩放变**，变的是它能装下多少世界。
+          // 这一条第一版写成了比 viewPx，于是自己给自己报了个假失败。
+          fail('放大后可见世界没有缩小：' + v1.w + 'px → ' + v2.w + 'px');
+        } else {
+          ok('缩放恒等式成立：画布 ' + p2.w + 'px / 可见世界 ' + v2.w + 'px = ' +
+            (p2.w / v2.w).toFixed(3) + '×（应为 1.500×）');
+        }
+
+        var afterZ = {
+          px: gZ.px, py: gZ.py, turn: gZ.turn, hp: gZ.hp,
+          kills: gZ.kills, enemies: gZ.enemies.length, depth: gZ.depth
+        };
+        var sameZ = true;
+        for (var kk in beforeZ) if (beforeZ[kk] !== afterZ[kk]) sameZ = false;
+        if (!sameZ) {
+          fail('缩放竟然改动了游戏状态: ' + JSON.stringify(beforeZ) + ' → ' + JSON.stringify(afterZ));
+        } else {
+          ok('缩放只改「看」不改「玩」：坐标 / 回合 / 血量 / 敌人数 / 层数全部未变');
+        }
+
+        // ③ 指针映射在缩放后依然准（点哪个格子必须还是那个格子）
+        var cvZ = d.getElementById('view');
+        var rZ = cvZ.getBoundingClientRect();
+        var txZ = beforeZ.px, tyZ = beforeZ.py;
+        var kxZ = rZ.width / R2.view.w, kyZ = rZ.height / R2.view.h;
+        var cliX = rZ.left + (txZ * R2.TILE + R2.TILE / 2 - R2.cam.x) * kxZ;
+        var cliY = rZ.top + (tyZ * R2.TILE + R2.TILE / 2 - R2.cam.y) * kyZ;
+        var backZ = R2.toCell(cliX, cliY);
+        if (backZ.x !== txZ || backZ.y !== tyZ) {
+          fail('缩放后指针映射错位：(' + txZ + ',' + tyZ + ') 反算回来成了 (' +
+            backZ.x + ',' + backZ.y + ')');
+        } else {
+          ok('缩放后指针映射依然准确（客户端坐标反算回格子 (' + backZ.x + ',' + backZ.y + ')）');
+        }
+
+        // ④ 档位要夹得住，不能无限放大/缩小
+        R2.setZoom(99); var zHi = R2.zoom;
+        R2.setZoom(0.01); var zLo = R2.zoom;
+        var zMax = R2.ZOOM_STEPS[R2.ZOOM_STEPS.length - 1], zMin = R2.ZOOM_STEPS[0];
+        if (zHi > zMax + 1e-6) fail('放大没有被夹住: ' + zHi);
+        else if (zLo < zMin - 1e-6) fail('缩小没有被夹住: ' + zLo);
+        else ok('缩放档位夹得住（上限 ' + zHi + '× / 下限 ' + zLo + '×）');
+        R2.setZoom(1);
+      }
+    } catch (e) { fail('缩放测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 31. 背包三件事：Tab / 自动装备 / 「绝不静默降级」 ----------
+    // 重点是最后那条：自动装备最容易写成"悄悄把你变弱"。
+    // 所以断言的不是"能不能换"，而是**拒绝时有没有带回解释所需的数字** ——
+    // 玩家点了没反应却又不知道为什么，比不做这个功能还糟。
+    try {
+      w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: 20260922, meta: null });
+      var gE = w.TideMain.game;
+
+      // ① Tab 开关背包（Tab 是浏览器的焦点键，必须被拦掉）
+      var tabEv = new w.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+      w.dispatchEvent(tabEv);
+      if (!w.TideUI.isInventoryOpen()) fail('按 Tab 没有打开背包');
+      else if (!tabEv.defaultPrevented) fail('Tab 没有被拦掉 —— 焦点会跑走，之后键盘操作全失效');
+      else {
+        w.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+        if (w.TideUI.isInventoryOpen()) fail('再按 Tab 没有关掉背包');
+        else ok('Tab 能开关背包，并且被 preventDefault（不会把焦点抢走）');
+      }
+      w.TideUI.closeInventory();
+
+      // ② 战力必须能区分品质（一个能一眼比较的数）
+      var mkE = function (rarity, slot) {
+        return gE.makeItem({ depth: 3, rarity: rarity, slot: slot || 'helm' });
+      };
+      var weakE = mkE('common'), strongE = mkE('legendary');
+      if (!(gE.power(strongE) > gE.power(weakE))) {
+        fail('战力没有区分出品质：' + gE.power(weakE) + ' vs ' + gE.power(strongE));
+      } else {
+        ok('战力可用：普通 ' + gE.power(weakE) + ' < 传说 ' + gE.power(strongE));
+      }
+
+      // ③ 空槽 → 直接穿
+      gE.equip = { weapon: null, helm: null, chest: null, boots: null, trinket: null };
+      gE.bag = [weakE];
+      var rEmpty = gE.autoEquip(0);
+      if (!rEmpty.ok || rEmpty.reason !== 'empty') fail('空槽没有直接穿上: ' + JSON.stringify(rEmpty));
+      else if (gE.equip.helm !== weakE) fail('空槽自动装备后身上不是那一件');
+      else ok('空槽自动装备直接穿上');
+
+      // ④ **绝不静默降级**：明显更弱的一件必须被拒，并带回两边战力
+      var weakerE = mkE('common');
+      weakerE.total = { hp: 1 }; weakerE.flags = {};
+      gE.bag = [weakerE];
+      var rWeak = gE.autoEquip(0);
+      if (rWeak.ok) fail('更弱的装备竟然被穿上了（这就是静默降级）');
+      else if (typeof rWeak.oldPower !== 'number' || typeof rWeak.newPower !== 'number') {
+        fail('拒绝替换时没带回两边战力，界面就没法解释原因: ' + JSON.stringify(rWeak));
+      } else if (rWeak.newPower >= rWeak.oldPower) {
+        fail('判定自相矛盾：拒绝了，但新战力并不低（' + rWeak.newPower + ' vs ' + rWeak.oldPower + '）');
+      } else if (gE.equip.helm !== weakE) {
+        fail('被拒绝之后，身上的装备却被动了');
+      } else {
+        ok('绝不静默降级：更弱的会被拒，并带回两边战力（' + rWeak.newPower + ' < ' +
+          rWeak.oldPower + '，reason=' + rWeak.reason + '）');
+      }
+
+      // ⑤ 更强的一件要换上，且旧装备**退回背包**（不能凭空消失）
+      gE.bag = [strongE];
+      var rUp = gE.autoEquip(0);
+      if (!rUp.ok) fail('明显更强的一件没有被换上: ' + JSON.stringify(rUp));
+      else if (gE.equip.helm !== strongE) fail('换上了，但身上不是新那件');
+      else if (gE.bag.indexOf(weakE) < 0) fail('换装后旧装备没有退回背包 —— 凭空消失了');
+      else ok('更强的一件会换上（战力 ' + gE.power(weakE) + ' → ' + gE.power(strongE) +
+        '），旧装备退回背包');
+
+      // ⑥ 口径③：品质更低、但战力碾压时仍然允许替换（好词条的低品质件有机会）
+      var crushE = mkE('common');
+      crushE.total = { atkP: 9999 }; crushE.flags = {};
+      var rCrush = gE.canUpgrade(crushE, 'helm');
+      if (!rCrush.ok) fail('品质更低但战力碾压时应当允许替换（约定③），实际被拒: ' + JSON.stringify(rCrush));
+      else ok('复合判定生效：品质更低但战力 ≥ +10% 时仍会替换（不是单纯比品质）');
+
+      // ⑦ 战力必须真的画进气泡里 —— 算了但不显示 = 玩家看不见
+      gE.bag = [mkE('rare')];
+      w.TideUI.openInventory('bag');
+      w.TideUI.render(gE);
+      var cellE = d.querySelector('#inv-grid .inv-slot.filled');
+      if (!cellE) fail('背包格没有渲染出来');
+      else {
+        var rrE = cellE.getBoundingClientRect();
+        cellE.dispatchEvent(new w.MouseEvent('mousemove', {
+          bubbles: true, clientX: rrE.left + rrE.width / 2, clientY: rrE.top + rrE.height / 2
+        }));
+        var tipE = d.getElementById('tooltip');
+        if (!tipE || tipE.classList.contains('hidden')) fail('悬停装备没有弹出气泡');
+        else if ((tipE.textContent || '').indexOf('战力') < 0) {
+          fail('气泡里没有「战力」（算了但没画出来 = 玩家看不见）');
+        } else {
+          ok('气泡里显示了战力：' + (tipE.textContent.match(/战力\s*-?\d+/) || [''])[0] +
+            '（玩家能直接比较，而不是靠感觉）');
+        }
+      }
+      w.TideUI.closeInventory();
+    } catch (e) { fail('背包三件事测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 32. 选牌界面：← → 选择 + 空格确认 ----------
+    // 这一节要盯两件事：
+    //   ① 高亮**真的**跟着走（算了但没画 = 玩家不知道自己会选到谁）
+    //   ② 空格确认的是"当前高亮那一张"，而且不能顺带消耗一个回合
+    try {
+      w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: 20260922, meta: null });
+      var gR = w.TideMain.game;
+      var relAll = w.TideData.RELICS;
+      gR.pendingRelic = [relAll[0], relAll[1], relAll[2]];
+      gR.relics = [];
+      var turnR = gR.turn;
+      w.TideUI.render(gR);                 // 让秘藏弹窗渲染出来
+
+      var cardsR = d.querySelectorAll('#relic-cards .relic-card');
+      if (cardsR.length !== 3) fail('秘藏弹窗没有渲染出 3 张牌: ' + cardsR.length);
+      else if (!cardsR[0].classList.contains('on')) fail('打开时第 1 张没有被标记为选中');
+      else ok('选牌界面：3 张牌都渲染出来了，默认选中第 1 张');
+
+      var kdR = function (k) {
+        w.dispatchEvent(new w.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+      };
+
+      kdR('ArrowRight');
+      var sel1 = w.TideUI.relicSelectedIndex();
+      if (sel1 !== 1) fail('→ 没有把光标移到第 2 张: ' + sel1);
+      else if (!cardsR[1].classList.contains('on') || cardsR[0].classList.contains('on')) {
+        fail('光标移了，但卡片上的高亮没跟着走（算了但没画）');
+      } else ok('按 → 光标移到第 2 张，高亮同步跟走');
+
+      kdR('ArrowLeft'); kdR('ArrowLeft');   // 应从第 2 张回绕到第 3 张
+      var sel2 = w.TideUI.relicSelectedIndex();
+      if (sel2 !== 2) fail('← ← 没有两端回绕到第 3 张: ' + sel2);
+      else ok('光标两端回绕正确（← 从第 1 张绕到第 3 张）');
+
+      kdR('ArrowRight');                    // 从第 3 张绕回第 1 张（六步一步就够）
+      if (w.TideUI.relicSelectedIndex() !== 0) fail('→ 回绕失败');
+      else ok('→ 两端回绕也正确（从第 3 张绕回第 1 张）');
+
+      // 空格确认「当前高亮」那一张 —— 先把它挪到第 3 张，看选的到底是谁
+      kdR('ArrowLeft');
+      var wantId = gR.pendingRelic[2].id;
+      if (w.TideUI.relicSelectedIndex() !== 2) fail('准备阶段：光标没停在第 3 张');
+      kdR(' ');
+      if (gR.pendingRelic) fail('空格没有确认选牌（pendingRelic 还在）');
+      else if (gR.relics.indexOf(wantId) < 0) {
+        fail('空格确认的不是当前高亮那张（拿到 ' + JSON.stringify(gR.relics) + '，期望 ' + wantId + '）');
+      } else if (gR.turn !== turnR) {
+        fail('选牌顺带消耗了一个回合: ' + turnR + ' → ' + gR.turn);
+      } else {
+        ok('空格确认的是**当前高亮**那一张（' + wantId + '），且没有顺带消耗回合');
+      }
+
+      // 回车等价于空格
+      gR.pendingRelic = [relAll[3], relAll[4], relAll[5]];
+      gR.relics = [];
+      w.TideUI.render(gR);
+      var cardsR2 = d.querySelectorAll('#relic-cards .relic-card');
+      if (cardsR2.length !== 3 || !cardsR2[0].classList.contains('on')) {
+        fail('重开一次选牌没有重置光标到第 1 张');
+      } else {
+        kdR('Enter');
+        if (gR.pendingRelic) fail('回车没有确认选牌');
+        else ok('回车同样可以确认，且重开选牌时光标会重置到第 1 张');
+      }
+    } catch (e) { fail('选牌键盘测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 33. 选牌界面：← → 选择 + 空格确认 ----------
+    // 最关键的一条：空格必须选中**光标所在的那一张**。
+    // 写成"空格 = 选第一张"同样能让大部分检查通过，但玩家一按就发现不对。
+    try {
+      w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: 20260922, meta: null });
+      var gR2 = w.TideMain.game;
+      gR2.pendingRelic = gR2._offerRelics();
+      w.TideUI.render(gR2);
+      var rmod2 = d.getElementById('relic-modal');
+      var cards2 = d.querySelectorAll('#relic-cards .relic-card');
+      if (rmod2.classList.contains('hidden') || cards2.length < 2) {
+        fail('秘藏弹窗没打开或卡片太少，测不了键盘选牌');
+      } else {
+        var onIdx = function () {
+          var r = -1;
+          Array.prototype.forEach.call(cards2, function (el, i) { if (el.classList.contains('on')) r = i; });
+          return r;
+        };
+        var kR = function (k) {
+          w.dispatchEvent(new w.KeyboardEvent('keydown', { key: k, bubbles: true }));
+        };
+
+        // ① 打开就默认选中第一张，且 .on **真的画在那一张上**
+        if (w.TideUI.relicSelectedIndex() !== 0) fail('选牌打开时没有默认选中第一张');
+        else if (onIdx() !== 0) fail('选中态没画到第一张上（.on 不生效 = 玩家看不见）');
+        else ok('选牌界面打开时默认选中第一张，且高亮真的画在卡片上');
+
+        // ② → 移动、← 回退、两端回绕
+        kR('ArrowRight');
+        if (w.TideUI.relicSelectedIndex() !== 1) fail('按 → 没有移动选中项: ' + w.TideUI.relicSelectedIndex());
+        else if (onIdx() !== 1) fail('移动后高亮没有跟着走');
+        else ok('→ 能移动选中项，视觉高亮同步');
+
+        var nR = cards2.length;
+        for (var ri2 = 0; ri2 < nR; ri2++) kR('ArrowRight');
+        if (w.TideUI.relicSelectedIndex() !== 1) {
+          fail('两端回绕不对：绕一圈应回到 1，实际 ' + w.TideUI.relicSelectedIndex());
+        } else ok('选中项两端会回绕（绕一圈回到原位，不卡住也不越界）');
+        kR('ArrowLeft');
+        if (w.TideUI.relicSelectedIndex() !== 0) fail('按 ← 没有回退');
+
+        // ③ **空格确认的是光标那一张**，不是第一张
+        kR('ArrowRight');
+        var targetR = cards2[1].dataset.id;
+        var relicsB2 = gR2.relics.length;
+        kR(' ');
+        if (gR2.relics.length !== relicsB2 + 1) fail('空格没有确认选牌');
+        else if (gR2.relics[gR2.relics.length - 1] !== targetR) {
+          fail('空格选中的不是光标那一张（期望 ' + targetR + '，实际 ' +
+            gR2.relics[gR2.relics.length - 1] + '）');
+        } else if (gR2.pendingRelic) fail('空格确认后 pendingRelic 没有清空');
+        else if (!d.getElementById('relic-modal').classList.contains('hidden')) fail('确认后弹窗没关');
+        else ok('空格确认的是**光标那一张**，且状态正确清空、弹窗关闭');
+
+        // ④ 鼠标悬停要与键盘光标同步（否则"我指着 B，按空格却选了 A"）
+        gR2.pendingRelic = gR2._offerRelics();
+        w.TideUI.render(gR2);
+        var cards3 = d.querySelectorAll('#relic-cards .relic-card');
+        if (cards3.length >= 2) {
+          cards3[1].dispatchEvent(new w.MouseEvent('mouseenter', { bubbles: false }));
+          if (w.TideUI.relicSelectedIndex() !== 1) {
+            fail('鼠标移到第 2 张时键盘光标没同步: ' + w.TideUI.relicSelectedIndex());
+          } else ok('鼠标悬停会同步键盘光标（两套输入不各记一套状态）');
+
+          // ⑤ 新一次三选一要把光标复位到第一张
+          gR2.pendingRelic = null;
+          w.TideUI.render(gR2);
+          gR2.pendingRelic = gR2._offerRelics();
+          w.TideUI.render(gR2);
+          if (w.TideUI.relicSelectedIndex() !== 0) {
+            fail('新一次三选一没有复位光标: ' + w.TideUI.relicSelectedIndex());
+          } else ok('新一次三选一会把光标复位到第一张（不沿用上一轮的位置）');
+        }
+        // 收尾：把待选状态清干净，别影响后面的断言
+        if (gR2.pendingRelic) w.TideMain.chooseRelic(gR2.pendingRelic[0].id);
+      }
+    } catch (e) { fail('选牌键盘测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 32. 选牌界面：← → 选择 + 空格确认 ----------
+    // 关键判据：**空格确认的必须是光标所在那一张**。
+    // 写成"空格 = 选第一张"也能骗过一半检查，但玩家一按就发现不对 ——
+    // 而那一刻恰好是"这一局往哪走"的决策点，错不起。
+    try {
+      w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: 20260922, meta: null });
+      var gK = w.TideMain.game;
+      gK.pendingRelic = gK._offerRelics();
+      var nK = gK.pendingRelic.length;
+      w.TideUI.render(gK);
+      var cardsK = d.querySelectorAll('#relic-cards .relic-card');
+      if (cardsK.length !== nK) fail('选牌卡片数量不对: ' + cardsK.length + ' vs ' + nK);
+      else {
+        var keyK = function (k) { w.dispatchEvent(new w.KeyboardEvent('keydown', { key: k, bubbles: true })); };
+
+        // ① 打开时默认选中第一张，而且**画面上真的标出来了**
+        if (w.TideUI.relicSelectedIndex() !== 0) fail('打开选牌时没有默认选中第一张');
+        else if (!cardsK[0].classList.contains('on')) fail('选中项没有视觉标记（缺 .on）');
+        else ok('选牌界面默认选中第一张，且视觉上有标记');
+
+        // ② → 移动光标，高亮跟着走
+        keyK('ArrowRight');
+        if (w.TideUI.relicSelectedIndex() !== 1) fail('→ 没有移动光标: ' + w.TideUI.relicSelectedIndex());
+        else if (!cardsK[1].classList.contains('on') || cardsK[0].classList.contains('on')) {
+          fail('光标动了，但高亮标记没跟着走');
+        } else ok('→ 能移动光标，高亮标记同步（0 → 1）');
+
+        // ③ 两端回绕
+        for (var wk = 0; wk < nK - 1; wk++) keyK('ArrowRight');
+        if (w.TideUI.relicSelectedIndex() !== 0) fail('→ 走到末尾没有回绕: ' + w.TideUI.relicSelectedIndex());
+        keyK('ArrowLeft');
+        if (w.TideUI.relicSelectedIndex() !== nK - 1) fail('← 在开头没有回绕到最后一张');
+        else ok('光标两端会回绕（' + nK + ' 张来回都能走通）');
+
+        // ④ **空格确认的是光标那张** —— 此刻光标在最后一张，正好能把"永远选第一张"抓出来
+        var beforeK = gK.relics.length;
+        var wantIdx = w.TideUI.relicSelectedIndex();
+        var wantId = cardsK[wantIdx].dataset.id;
+        keyK(' ');
+        if (gK.relics.length !== beforeK + 1) fail('空格没有确认选牌');
+        else if (gK.relics[gK.relics.length - 1] !== wantId) {
+          fail('空格确认的不是光标那张：期望第 ' + wantIdx + ' 张(' + wantId + ')，实际拿到 ' +
+            gK.relics[gK.relics.length - 1]);
+        } else if (gK.pendingRelic) fail('确认后 pendingRelic 没有清空');
+        else ok('空格确认的是光标所在那一张（第 ' + wantIdx + ' 张），不是永远选第一张');
+
+        // ⑤ 下一轮选牌要把光标复位（不能沿用上一轮的落点）
+        gK.pendingRelic = gK._offerRelics();
+        w.TideUI.render(gK);
+        if (w.TideUI.relicSelectedIndex() !== 0) fail('新一次选牌没有把光标复位到第一张');
+        else ok('新一次选牌光标复位到第一张（不沿用上一轮的位置）');
+
+        // ⑥ 鼠标移到某张上，键盘光标必须跟着同步 ——
+        //    两套输入各记一套状态的话，会出现"我指着 B，按空格却选了 A"
+        var cardsK2 = d.querySelectorAll('#relic-cards .relic-card');
+        cardsK2[cardsK2.length - 1].dispatchEvent(new w.MouseEvent('mouseenter', { bubbles: true }));
+        if (w.TideUI.relicSelectedIndex() !== cardsK2.length - 1) {
+          fail('鼠标移到某张上，键盘光标没有同步: ' + w.TideUI.relicSelectedIndex());
+        } else ok('鼠标与键盘光标同步（不会出现「指着 B 却选了 A」）');
+
+        if (gK.pendingRelic) w.TideMain.chooseRelic(gK.pendingRelic[0].id);
+      }
+    } catch (e) { fail('选牌键盘测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 34. 开始菜单层：入口、设置、音量、退出 ----------
+    // 音量这一节要盯的是"分轨"：只有一条总音量的话，
+    // 调 BGM 会把音效一起改掉，而玩家根本看不出来 —— 那种 bug 只能靠断言抓。
+    try {
+      var TS4 = w.TideSettings, AU4 = w.TideAudio, MU4 = w.TideMeta;
+      if (!d.getElementById('menu-screen')) fail('没有开始菜单层（#menu-screen）');
+      else {
+        // 本节取元素的别名。**不要用 q** —— 它在第 213/306 行当过循环计数器，
+        // 而 var 是函数作用域，重名会互相覆盖（sloppy 模式下不报错，只是行为变了）。
+        var el4 = function (id) { return d.getElementById(id); };
+
+        // ① 菜单是第 0 层：显示菜单、藏起选人界面
+        w.TideUI.showMenu();
+        if (el4('menu-screen').classList.contains('hidden')) fail('showMenu 之后菜单还是隐藏的');
+        else if (!el4('title-screen').classList.contains('hidden')) fail('菜单显示时选人界面没有藏起来');
+        else ok('开始菜单是第 0 层（菜单可见、选人界面隐藏）');
+
+        // ② 作者名必须在
+        var credit = d.querySelector('.menu-credit');
+        if (!credit || (credit.textContent || '').indexOf('此冬歌咏') < 0) {
+          fail('菜单里没有作者名（此冬歌咏）');
+        } else ok('菜单里署了作者名（' + credit.textContent.trim() + '）');
+
+        // ③ 开始游戏 → 进选人界面；Esc → 回菜单
+        //    这一条要同时区分两种可能：按钮没绑上 / showTitle 本身坏了。
+        //    只报"没进去"是查不动的，所以诊断信息随失败一起带出来。
+        var bStart = el4('btn-menu-start');
+        var hasFn = typeof bStart.onclick === 'function';
+        bStart.click();
+        if (el4('title-screen').classList.contains('hidden')) {
+          w.TideUI.showTitle();       // 绕过按钮直接调一次，区分责任
+          var directOk = !el4('title-screen').classList.contains('hidden');
+          fail('点开始游戏没有进到选人界面【诊断】按钮onclick已绑=' + hasFn +
+            ' disabled=' + bStart.disabled +
+            ' 菜单当时可见=' + !el4('menu-screen').classList.contains('hidden') +
+            ' 直接调showTitle能进去=' + directOk +
+            (directOk ? '（→ 问题在按钮绑定）' : '（→ 问题在 showTitle 本身）'));
+        } else if (!el4('menu-screen').classList.contains('hidden')) {
+          fail('进选人界面后菜单没藏起来');
+        } else {
+          w.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          if (el4('menu-screen').classList.contains('hidden')) fail('在选人界面按 Esc 没有回主菜单');
+          else ok('开始游戏 → 选人界面，Esc → 回主菜单（层级是对的）');
+        }
+
+        // ④ 无尽模式：没通关时锁着
+        MU4.reset();
+        w.TideUI.renderMenu();
+        if (!el4('btn-menu-endless').disabled) fail('一次都没通关，无尽模式却是可点的');
+        else if ((el4('menu-endless-note').textContent || '').indexOf('未解锁') < 0) {
+          fail('锁着的时候没有说明原因: ' + el4('menu-endless-note').textContent);
+        } else ok('无尽模式未通关时锁着，并且写清了原因（不是只置灰）');
+
+        // ⑤ 设置：滑块要反映存档，拖动要真的改音量且**分轨**
+        w.TideUI.showSettings();
+        if (el4('settings-modal').classList.contains('hidden')) fail('设置弹窗没打开');
+        else {
+          TS4.set('volSfx', 1); TS4.set('volBgm', 1);
+          AU4.setVolume(1, 1);
+          w.TideUI.renderSettings();
+          if (Number(el4('set-vol-sfx').value) !== 100) fail('音效滑块没有反映存档值: ' + el4('set-vol-sfx').value);
+          // 拖音效滑块
+          el4('set-vol-sfx').value = 40;
+          el4('set-vol-sfx').dispatchEvent(new w.Event('input', { bubbles: true }));
+          var vv = AU4.getVolume();
+          if (Math.abs(vv.sfx - 0.4) > 0.001) fail('拖音效滑块没有改到运行时音量: ' + vv.sfx);
+          else if (Math.abs(vv.bgm - 1) > 0.001) fail('调音效竟然把 BGM 一起改了（没有分轨）: ' + vv.bgm);
+          else if (Math.abs(TS4.get('volSfx') - 0.4) > 0.001) fail('音效音量没有写进存档');
+          else ok('音量分轨正确：拖音效只改音效（0.4），BGM 保持 1.0，且写进存档');
+
+          // 拖 BGM 滑块
+          el4('set-vol-bgm').value = 20;
+          el4('set-vol-bgm').dispatchEvent(new w.Event('input', { bubbles: true }));
+          var vv2 = AU4.getVolume();
+          if (Math.abs(vv2.bgm - 0.2) > 0.001) fail('拖 BGM 滑块没有改到 BGM 音量: ' + vv2.bgm);
+          else if (Math.abs(vv2.sfx - 0.4) > 0.001) fail('调 BGM 把音效一起改了: ' + vv2.sfx);
+          else ok('拖 BGM 只改 BGM（0.2），音效保持 0.4');
+        }
+
+        // ⑥ 清档要两步，不能一击抹掉
+        var mBefore = w.TideMeta.load();
+        MU4.save({ crystals: 777, total: 777, owned: { pouch1: 1 }, runs: 9, wins: 1, best: 5 });
+        el4('btn-wipe').click();
+        if (w.TideMeta.load().crystals !== 777) fail('清档一次点击就生效了（不可逆操作不该一击致命）');
+        else if ((el4('btn-wipe').textContent || '').indexOf('再点') < 0) fail('第一次点击没有提示需要再点一次');
+        else {
+          el4('btn-wipe').click();
+          if (w.TideMeta.load().crystals !== 0) fail('第二次点击没有真的清空存档');
+          else ok('清档是两步确认：第一次只提示，第二次才真的清空');
+        }
+        w.TideUI.closeSettings();
+
+        // ⑦ 排行榜弹窗能开、空状态有话说
+        w.TideUI.showBoard();
+        if (el4('board-modal').classList.contains('hidden')) fail('排行榜弹窗没打开');
+        else if ((el4('board-list').textContent || '').indexOf('还没有记录') < 0) {
+          fail('排行榜空状态没有给出说明');
+        } else if ((el4('board-modal').textContent || '').indexOf('本机') < 0) {
+          fail('排行榜没有说明它是"本机"榜 —— 玩家会以为分数上传了');
+        } else ok('排行榜弹窗可打开，空状态有说明，并写明是「本机」榜');
+        w.TideUI.closeBoard();
+
+        // ⑧ 退出游戏：浏览器里没有宿主，必须给实话而不是静默失败
+        var threwQ = false;
+        try { w.TideUI.quitGame(); } catch (e) { threwQ = true; }
+        if (threwQ) fail('退出游戏在浏览器环境里抛异常了（没有宿主时要能优雅退化）');
+        else ok('退出游戏在没有宿主（浏览器）时会优雅退化，不抛异常');
+      }
+    } catch (e) { fail('开始菜单测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+    // ---------- 35. 区域画面层：染色 / 标签 / 小地图 / 出口导航 / 横幅 ----------
+    // 区域划分在模型层已经是对的（core._buildRegions）。这一节盯的是另一件事：
+    // **划分是玩家看不见的东西，看不见的规则等于没有规则。**
+    // 所以这里查的是"画出来了没有""画的位置对不对"——
+    // 这类 bug（算了但没画 / 标签浮在墙里）在模型层测试里永远抓不到。
+    try {
+      w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: 20260922, meta: null });
+      var gRg = w.TideMain.game;
+      var rgs = gRg.regions || [];
+
+      // ① 划分本身存在，且数量在合理区间
+      if (rgs.length < 3 || rgs.length > 6) fail('区域数不在 3~6: ' + rgs.length);
+      else ok('区域划分存在：' + rgs.length + ' 个 [' +
+        rgs.map(function (r) { return r.type; }).join(' ') + ']');
+
+      // ② 每个可走格都有归属（是划分，不是重叠/漏掉）
+      var orphan = 0, walkTotal = 0;
+      for (var ri0 = 0; ri0 < gRg.W * gRg.H; ri0++) {
+        if (!gRg.walkable(ri0 % gRg.W, (ri0 / gRg.W) | 0)) continue;
+        walkTotal++;
+        if (gRg.regionOf[ri0] < 0) orphan++;
+      }
+      if (orphan) fail('有 ' + orphan + ' 个可走格没有归属区域');
+      else ok('每个可走格都恰好属于一个区域（' + walkTotal + ' 格，0 个孤儿）');
+
+      // ③ 出口必须在守门区里 —— 否则"往哪走"就没有确定的答案
+      var gateR = rgs[gRg.gateRegion];
+      if (!gateR || gateR.type !== 'gate') fail('出口不在守门区里: ' + (gateR && gateR.type));
+      else ok('出口固定落在守门区（gateRegion=' + gRg.gateRegion + '）');
+
+      // ④ 标签锚点必须落在自己区域内。
+      //    这是最容易错又最难肉眼发现的一条：区域重心常常正好落在一堵墙里，
+      //    粗暴取重心会让名字浮在墙上，看起来像地图糊了一块。
+      var badAnchor = 0, anchorTxt = [];
+      for (var ri = 0; ri < rgs.length; ri++) {
+        var at = w.TideRender.regionLabelAnchor(gRg, rgs[ri]);
+        if (!at || gRg.regionAt(at.x, at.y) !== rgs[ri].id) { badAnchor++; continue; }
+        anchorTxt.push(rgs[ri].type + '@' + at.x + ',' + at.y);
+      }
+      if (badAnchor) fail('有 ' + badAnchor + ' 个区域标签的锚点不在自己区域内（会浮在墙上）');
+      else ok('区域标签锚点全部落在自己区域内（' + anchorTxt.join('  ') + '）');
+
+      // ⑤ 真的画出来了：渲染一帧后标签计数必须 > 0
+      w.TideRender.resize();
+      w.TideRender.render(gRg, {}, { x: 0, y: 0 }, 16);
+      var drawnLabels = w.TideRender.regionLabels;
+      if (!drawnLabels) fail('渲染一帧后一个区域标签都没画出来（算了但没画）');
+      else ok('区域标签真的画出来了：这一帧 ' + drawnLabels + ' 个');
+
+      // ⑥ 小地图按区域上色 —— 读的是烘焙出来的**真实像素**，
+      //    而不是"照着配置再算一遍颜色"（那等于把配置抄两遍）
+      var pickFloor = function (regId) {
+        for (var yy = 0; yy < gRg.H; yy++) {
+          for (var xx = 0; xx < gRg.W; xx++) {
+            var ii = yy * gRg.W + xx;
+            if (gRg.regionOf[ii] === regId && gRg.tiles[ii] === w.TideCore.T.FLOOR) return { x: xx, y: yy };
+          }
+        }
+        return null;
+      };
+      // 小地图只画"走过的地方"，不全开探索就只能采到背景色 ——
+      // 那样断言会**假通过**（背景色上下确实不一样），却什么也没验证到。
+      gRg.explored.fill(1);
+      w.TideRender.markDirty();
+      w.TideRender.render(gRg, {}, { x: 0, y: 0 }, 16);
+      var isBg = function (p) {
+        return Math.abs(p[0] - 6) < 4 && Math.abs(p[1] - 9) < 4 && Math.abs(p[2] - 17) < 4;
+      };
+      var fa = pickFloor(0), fb = null, fbId = -1;
+      for (var rk0 = 1; rk0 < rgs.length; rk0++) {
+        fb = pickFloor(rk0);
+        if (fb) { fbId = rk0; break; }
+      }
+      if (!fa || !fb) fail('找不到两个区域的地板格来对比小地图配色');
+      else {
+        var pa = w.TideRender.miniPixelAt(fa.x, fa.y);
+        var pb = w.TideRender.miniPixelAt(fb.x, fb.y);
+        if (!pa || !pb) fail('小地图没有烘焙出来（拿不到像素）');
+        else if (isBg(pa) || isBg(pb)) {
+          fail('采样点是小地图底色，说明这两格压根没画出来（这条断言会假通过）: ' +
+            pa.join(',') + ' / ' + pb.join(','));
+        } else if (pa[0] === pb[0] && pa[1] === pb[1] && pa[2] === pb[2]) {
+          fail('两个不同区域在小地图上是同一个颜色（等于没上色）: ' +
+            pa.join(',') + ' vs ' + pb.join(','));
+        } else {
+          ok('小地图按区域上色：区域0 rgb(' + pa.slice(0, 3).join(',') +
+            ') ≠ 区域' + fbId + ' rgb(' + pb.slice(0, 3).join(',') + ')');
+        }
+      }
+
+      // ⑦ 出口导航：要能说清"往哪走"
+      var navTxt = w.TideRender.exitNav || '';
+      if (!navTxt) fail('出口导航是空的（小地图上方那一行没写出来）');
+      else if (navTxt.indexOf('出口') !== 0) fail('出口导航没有以「出口」开头: ' + navTxt);
+      else if (!/北|南|东|西|本区/.test(navTxt)) fail('出口导航既没有方向也没说"就在本区": ' + navTxt);
+      else ok('出口导航：' + navTxt);
+
+      // ⑧ 跨区横幅 —— 这条链是「模型事件 → 主循环消费 → 界面画出来」，
+      //    缺任何一环都只剩一个没人看的 events 数组
+      //    （v10.5 的"融合没有弹出东西"就是这条链断在半路）
+      var farReg = null;
+      for (var rj = 0; rj < rgs.length; rj++) {
+        if (rgs[rj].id !== gRg.playerRegion) { farReg = rgs[rj]; break; }
+      }
+      if (!farReg) fail('没有第二个区域可以走进去');
+      else {
+        var spot = w.TideRender.regionLabelAnchor(gRg, farReg);
+        gRg.px = spot.x; gRg.py = spot.y;
+        gRg._checkRegion();
+        var hadEv = false;
+        for (var ke = 0; ke < gRg.events.length; ke++) {
+          if (gRg.events[ke].kind === 'region') hadEv = true;
+        }
+        if (!hadEv) fail('走进新区域后模型层没有产出 region 事件');
+        w.TideMain.flush();                 // 和真实流程走同一条消费路径
+        var bs = w.TideUI.regionBannerState();
+        if (!bs) fail('界面上根本没有区域横幅元素');
+        else if (!bs.shown) fail('跨区之后横幅没有显示出来');
+        else if ((bs.text || '').indexOf('进入') < 0) fail('横幅文案不对: ' + bs.text);
+        else if ((bs.text || '').indexOf('\u2605') < 0) fail('横幅里没有危险度星: ' + bs.text);
+        else if (bs.rtype !== farReg.type) {
+          fail('横幅报的是别的区域: ' + bs.rtype + ' vs ' + farReg.type);
+        } else {
+          ok('跨区会弹横幅：「' + bs.text.replace(/\s+/g, '') + '」（类别 ' + bs.rtype + '）');
+        }
+      }
+
+      // ⑨ 区域类型得**真的有玩法差异**，否则它只是一种颜色。
+      //    这里必须扫多个种子：区域类型是随机的，某一层恰好没有精英区很正常，
+      //    而"恰好没有"如果让断言直接跳过，那这条断言就等于不存在
+      //    （教训：可变条件上的断言，要么保证能跑到，要么就是在装样子）。
+      var eliteSeen = 0, eliteWithMob = 0, eliteBad = 0;
+      var rewardSeen = 0, rewardGood = 0, rewardBad = [];
+      // 第 1 层是教学层，按设计不设精英 / 危险区（见 core.js 的 5b）——
+      // 所以"扫精英区"必须往下一层看，否则扫 8 个种子也扫不到（这正是它的联动）。
+      var g1 = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 70001 });
+      var t1 = (g1.regions || []).map(function (r) { return r.type; });
+      if (t1.indexOf('elite') >= 0 || t1.indexOf('hazard') >= 0) {
+        fail('第 1 层出现了高难区域（它是教学层，不该开局就劝退）: ' + t1.join('/'));
+      } else ok('第 1 层是教学层：只有 ' + t1.join('/') + '，没有精英区 / 危险区');
+
+      for (var sd = 0; sd < 8; sd++) {
+        var gg = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 70001 + sd });
+        gg.depth = 2; gg._buildLevel(2);      // 往下一层看，高难区在那里
+        var grs2 = gg.regions || [];
+        for (var qi = 0; qi < grs2.length; qi++) {
+          var rg2 = grs2[qi];
+          if (rg2.type === 'elite') {
+            eliteSeen++;
+            var nE = 0, nElite = 0;
+            for (var ei = 0; ei < gg.enemies.length; ei++) {
+              if (gg.enemies[ei].region !== rg2.id) continue;
+              nE++;
+              if (gg.enemies[ei].kind === 'elite') nElite++;
+            }
+            if (nE > 0) eliteWithMob++;
+            // 只要求"至少一只精英"：敌人原型里本来就有天生 elite 的，
+            // 它们会和"区域把第一只提拔成精英"叠加 —— "恰好一只"是过强的断言。
+            if (nE > 0 && nElite < 1) eliteBad++;
+          } else if (rg2.type === 'reward') {
+            rewardSeen++;
+            var nR = 0;
+            for (var ei2 = 0; ei2 < gg.enemies.length; ei2++) {
+              if (gg.enemies[ei2].region === rg2.id) nR++;
+            }
+            var hasChest = false;
+            for (var ti = 0; ti < gg.W * gg.H; ti++) {
+              if (gg.regionOf[ti] === rg2.id && gg.tiles[ti] === w.TideCore.T.CHEST) {
+                hasChest = true; break;
+              }
+            }
+            if (nR <= 1 && hasChest) rewardGood++;
+            else rewardBad.push('seed' + (70001 + sd) + ':怪' + nR + ' 箱' + (hasChest ? '有' : '无'));
+          }
+        }
+      }
+      if (!eliteSeen) fail('扫了 8 个种子一个精英区都没有 —— 区域类型的分布有问题');
+      else if (!eliteWithMob) fail('有 ' + eliteSeen + ' 个精英区，里面却一个怪都没有（这类型等于没有玩法含义）');
+      else if (eliteBad) fail('有 ' + eliteBad + ' 个精英区里一只精英怪都没有（区域机制没生效）');
+      else ok('精英区真的不一样：' + eliteWithMob + ' 个有怪的精英区里都出现了精英怪（共扫到 ' +
+        eliteSeen + ' 个精英区）');
+
+      if (!rewardSeen) fail('扫了 8 个种子一个奖励区都没有');
+      else if (rewardBad.length) fail('奖励区不满足"≤1 只怪 + 保底宝箱": ' + rewardBad.join(' | '));
+      else ok('奖励区真的更安全：' + rewardSeen + ' 个奖励区全部满足「≤1 只怪 + 保底宝箱」');
+    } catch (e) { fail('区域画面层测试异常: ' + (e && e.stack ? e.stack : e)); }
+    // ---------- 36. 无尽模式 + 本机排行榜 ----------
+    // 这一节盯三件事：
+    //   ① 无尽模式**真的**没有终点（而不是按钮亮着、进去还是四层就结算）
+    //   ② 分数只有一个执行点，两个模式用同一把尺子
+    //   ③ 榜能吃下脏数据 —— 存档是可手改的，榜还是要画出来的
+    try {
+      /* ---- ① 无尽模式：走到门是"下一层"，不是"通关" ---- */
+      var gEnd = new w.TideCore.Game({
+        classKey: 'warlord', difficulty: 'standard', seed: 20260922, endless: true
+      });
+      if (!gEnd.endless) fail('Game 没有收下 endless 标志');
+      else ok('无尽模式标志确实传到了模型层');
+
+      gEnd.depth = gEnd.diff.depth;          // 站到"原本的最后一层"
+      gEnd.bossAlive = false;
+      gEnd.px = gEnd.exit.x; gEnd.py = gEnd.exit.y;
+      gEnd._enterTile();
+      if (gEnd.status === 'win') fail('无尽模式走到门仍然结算通关了（那就不叫无尽）');
+      else if (gEnd.depth !== gEnd.diff.depth + 1) {
+        fail('无尽模式没有继续下潜: depth=' + gEnd.depth + '，期望 ' + (gEnd.diff.depth + 1));
+      } else ok('无尽模式走到门会继续下潜到第 ' + gEnd.depth + ' 层，不结算通关');
+
+      // 对照组：普通模式在同一位置**必须**通关，否则就是把两边一起改坏了
+      var gNrm = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 20260922 });
+      gNrm.depth = gNrm.diff.depth;
+      gNrm.bossAlive = false;
+      gNrm.px = gNrm.exit.x; gNrm.py = gNrm.exit.y;
+      gNrm._enterTile();
+      if (gNrm.status !== 'win') fail('对照失败：普通模式在最后一层走到门没有通关');
+      else ok('对照：普通模式在最后一层走到门仍然正常通关');
+
+      /* ---- ② 无尽模式的强度曲线：正篇之内不动，越过之后逐层加码 ---- */
+      var RBASE = gEnd.diff.depth;
+      var bk = [0, 1, 3, 6, 12].map(function (o) { return gEnd.endlessBoost(RBASE + o); });
+      if (bk[0] !== 1) fail('正篇层数之内的无尽加成不是 1（会污染原有平衡）: ' + bk[0]);
+      else if (!(bk[1] > 1 && bk[2] > bk[1] && bk[3] > bk[2] && bk[4] >= bk[3])) {
+        fail('越出正篇之后的强度不是"单调递增且增速收敛": ' + bk.join(' → '));
+      } else if (bk[4] > 3) fail('无尽加成没有上限（后期会变成直接秒杀）: ' + bk[4]);
+      else ok('无尽强度曲线：正篇内 ×1，越出后 ' + bk.slice(1).map(function (v) {
+        return '×' + v.toFixed(2);
+      }).join(' → '));
+
+      var gPlain = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 1 });
+      if (gPlain.endlessBoost(20) !== 1) fail('非无尽模式的加成不是 1');
+      else ok('非无尽模式的越级加成恒为 ×1（无尽没有污染正篇）');
+
+      /* ---- ③ 击杀分类统计：分数要靠它们分类计价 ---- */
+      var gK = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 4242 });
+      if (gK.eliteKills !== 0 || gK.bossKills !== 0) fail('击杀分类没有从 0 开始');
+      var fakeN = gK._makeEnemy(gK.px, gK.py, 1); fakeN.kind = 'normal';   // 池子里有 elite 原型，必须钉死
+      gK._killEnemy(fakeN, true);
+      if (gK.kills !== 1 || gK.eliteKills !== 0) fail('普通击杀被错记成精英');
+      var fakeE = gK._makeEnemy(gK.px, gK.py, 1); fakeE.kind = 'elite';
+      gK._killEnemy(fakeE, true);
+      var fakeB = gK._makeEnemy(gK.px, gK.py, 1); fakeB.kind = 'boss'; fakeB.isBoss = true;
+      gK._killEnemy(fakeB, true);
+      if (gK.kills !== 3) fail('总击杀数不对: ' + gK.kills);
+      else if (gK.eliteKills !== 1) fail('精英击杀没有被单独计数: ' + gK.eliteKills);
+      else if (gK.bossKills !== 1) fail('守卫击杀没有被单独计数: ' + gK.bossKills);
+      else ok('击杀分类正确：总 3 / 精英 1 / 守卫 1（分数才能分类计价）');
+
+      /* ---- ④ 分数公式：只有一个执行点，难度越高分越高 ---- */
+      var std = w.TideData.DIFFICULTIES.standard;
+      var aby = w.TideData.DIFFICULTIES.abyss;
+      var sMid = w.TideData.scoreOf({
+        depth: 3, kills: 10, eliteKills: 2, bossKills: 1, status: 'dead', diff: std
+      });
+      if (sMid.base !== 800 || sMid.total !== 800) {
+        fail('分数公式不对：base=' + sMid.base + ' total=' + sMid.total + '（期望 800）');
+      } else ok('分数公式：第 3 层 / 10 杀 / 2 精英 / 1 守卫 = ' + sMid.total + ' 分（含逐项明细）');
+
+      var sAbyss = w.TideData.scoreOf({
+        depth: 3, kills: 10, eliteKills: 2, bossKills: 1, status: 'dead', diff: aby
+      });
+      if (sAbyss.total !== Math.round(800 * 1.25)) {
+        fail('深渊难度系数没有生效: ' + sAbyss.total + '（期望 ' + Math.round(800 * 1.25) + '）');
+      } else ok('难度是乘系数：同一份战绩在深渊 = ' + sAbyss.total + ' 分（×1.25）');
+
+      // 反挂检查：**刷低难度不该赢过高难度**。
+      // 这正是"乘系数而不是加分"要防的事，所以显式钉住。
+      var sCasualD5 = w.TideData.scoreOf({ depth: 5, kills: 0, status: 'dead', diff: w.TideData.DIFFICULTIES.casual });
+      var sStdD6 = w.TideData.scoreOf({ depth: 6, kills: 0, status: 'dead', diff: std });
+      var sAbyssD5 = w.TideData.scoreOf({ depth: 5, kills: 0, status: 'dead', diff: aby });
+      if (!(sAbyssD5.total > sStdD6.total && sStdD6.total > sCasualD5.total)) {
+        fail('难度系数被层数盖过了（刷低难度更划算）: 休闲5层=' + sCasualD5.total +
+          ' 标准6层=' + sStdD6.total + ' 深渊5层=' + sAbyssD5.total);
+      } else ok('难度不会被层数盖过：休闲 5 层 ' + sCasualD5.total + ' < 标准 6 层 ' +
+        sStdD6.total + ' < 深渊 5 层 ' + sAbyssD5.total);
+
+      // 通关奖励要显著高于"多打一层"，否则最优解会变成在门口反复刷怪
+      var sWin = w.TideData.scoreOf({ depth: 4, kills: 0, status: 'win', diff: std });
+      var sDead = w.TideData.scoreOf({ depth: 4, kills: 0, status: 'dead', diff: std });
+      if (sWin.total - sDead.total !== w.TideData.SCORE.winBonus) {
+        fail('通关奖励没有算进去: ' + (sWin.total - sDead.total));
+      } else if (sWin.total - sDead.total <= w.TideData.SCORE.perDepth) {
+        fail('通关奖励不比"多打一层"高（最优解会变成刷怪）');
+      } else ok('通关奖励 ' + w.TideData.SCORE.winBonus + ' 分，明显高于多打一层（' +
+        w.TideData.SCORE.perDepth + ' 分）');
+
+      /* ---- ⑤ 本机排行榜：入榜、排序、限长 ---- */
+      w.TideMeta.reset();
+      var rk1 = w.TideMeta.addScore({
+        score: 500, mode: '普通', clsName: '破军', diffName: '标准', depth: 3, date: '2026-09-23'
+      });
+      if (rk1 !== 1) fail('榜里的第一条记录不是第 1 名: ' + rk1);
+      var rk2 = w.TideMeta.addScore({
+        score: 900, mode: '无尽', clsName: '幽影', diffName: '标准', depth: 6, date: '2026-09-23'
+      });
+      if (rk2 !== 1) fail('更高分没有排到第 1: ' + rk2);
+      var mb = w.TideMeta.load();
+      if (mb.board.length !== 2 || mb.board[0].score !== 900 || mb.board[1].score !== 500) {
+        fail('榜没有按分数降序: ' + JSON.stringify((mb.board || []).map(function (x) { return x.score; })));
+      } else ok('入榜正确：900 分排第 1、500 分排第 2');
+
+      w.TideMeta.reset();
+      for (var bi = 0; bi < 15; bi++) w.TideMeta.addScore({ score: bi * 10, depth: 1 });
+      var fullB = w.TideMeta.load();
+      if (fullB.board.length !== 10) fail('榜没有截到 10 条: ' + fullB.board.length);
+      else if (fullB.board[0].score !== 140) fail('截断后首名不对: ' + fullB.board[0].score);
+      else ok('榜只留前 10 条，且截断后仍然按分数降序');
+
+      /* ---- ⑥ 榜要吃下脏数据 ---- */
+      var dirty = w.TideMeta.sanitize({
+        crystals: -5,
+        board: [{}, { score: 1e30 }, null, 'not-an-object',
+          { score: 100, depth: -3, mode: { a: 1 }, clsName: null }]
+      });
+      if (!Array.isArray(dirty.board)) fail('board 没有净化成数组');
+      else if (dirty.board.some(function (b) { return !isFinite(b.score) || b.score < 0; })) {
+        fail('榜里出现了非法分数: ' + JSON.stringify(dirty.board));
+      } else if (dirty.board.some(function (b) { return typeof b.mode !== 'string'; })) {
+        fail('榜里的 mode 没有转成字符串（界面上会显示 [object Object]）');
+      } else {
+        ok('排行榜净化：空对象 / 超天数字 / 非对象全部就地修好或丢弃（' +
+          dirty.board.length + ' 条存活）');
+      }
+
+      /* ---- ⑦ 界面：无尽模式 HUD 与结算上的分数 ---- */
+      w.TideMeta.reset();
+      w.TideMain.start({ mode: 'endless', seed: 20260922, meta: null });
+      var gUI = w.TideMain.game;
+      if (!gUI.endless) fail('start({mode:"endless"}) 没有把无尽标志传进模型层');
+      w.TideUI.render(gUI);
+      var hdTxt = (el4('h-depth').textContent || '');
+      if (hdTxt.indexOf('\u221e') < 0) fail('无尽模式的深度显示不是 "n / ∞": ' + hdTxt);
+      else ok('无尽模式 HUD 深度显示：' + hdTxt);
+
+      gUI.status = 'dead';
+      gUI.reason = '冒烟测试';
+      w.TideUI.showOver(gUI);
+      var ovTxt = (el4('over-body').textContent || '');
+      if (ovTxt.indexOf('分') < 0) fail('结算界面没有显示分数');
+      else if (ovTxt.indexOf('本机第') < 0) fail('结算界面没有显示本机名次');
+      else if (ovTxt.indexOf('难度') < 0) fail('结算界面没有显示难度');
+      else ok('结算界面：显示了总分 / 本机名次 / 逐项明细');
+      var ranked = w.TideMeta.load().board.length;
+      if (ranked !== 1) fail('结算没有把这一局写进榜: ' + ranked);
+      else ok('结算确实写进了本机榜（' + ranked + ' 条）');
+
+      // 幂等：结算界面会被重绘，写榜必须只发生一次
+      w.TideUI.showOver(gUI);
+      w.TideUI.showOver(gUI);
+      var again = w.TideMeta.load().board.length;
+      if (again !== 1) fail('重复打开结算界面给同一局插了 ' + again + ' 条榜');
+      else ok('结算幂等：重复打开结算界面不会给同一局重复写榜');
+
+      w.TideUI.showBoard();
+      var bTxt = (el4('board-list').textContent || '');
+      if (bTxt.length < 4 || bTxt.indexOf('还没有记录') >= 0) fail('排行榜弹窗没有画出记录');
+      else ok('排行榜弹窗画出了记录（含职业 / 难度 / 层数 / 日期）');
+      w.TideUI.closeBoard();
+      w.TideMeta.reset();
+    } catch (e) { fail('无尽模式与排行榜测试异常: ' + (e && e.stack ? e.stack : e)); }
+    // ---------- 37. 操作指南：一份数据 + 与真实按键一致 ----------
+    try {
+      var K = w.TideData.KEYS || [];
+      if (K.length < 8) fail('按键表条目太少: ' + K.length);
+      else ok('按键表存在：' + K.length + ' 条（这是全项目唯一一份按键说明）');
+
+      var brokenK = K.filter(function (k) {
+        return !k.act || !k.scope || !k.scope.length || !k.label || !k.text;
+      });
+      if (brokenK.length) fail('按键表有残缺条目: ' + JSON.stringify(brokenK));
+      else ok('按键表每条都有：动作名 / 适用界面 / 键面 / 说明');
+
+      // 三个界面都得有内容 —— 缺一个就说明"随界面变化"是假的
+      var scopeMiss = ['game', 'inv', 'relic'].filter(function (s) {
+        return !K.some(function (k) { return k.scope.indexOf(s) >= 0; });
+      });
+      if (scopeMiss.length) fail('这些界面没有对应的按键条目: ' + scopeMiss.join(','));
+      else ok('三个界面（局内 / 背包 / 选牌）都有对应的按键条目');
+
+      // ---- 面板本身 ----
+      w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: 20260922, meta: null });
+      var gGd = w.TideMain.game;
+      w.TideUI.render(gGd);
+      var gs0 = w.TideUI.guideState();
+      if (!gs0) fail('界面上没有操作指南面板');
+      else if (gs0.hidden) fail('局内没有显示操作指南');
+      else if (gs0.scope !== 'game') fail('局内指南的 scope 不对: ' + gs0.scope);
+      else if (!gs0.rows) fail('指南一行都没画出来');
+      else ok('局内指南渲染正常：' + gs0.rows + ' 行，scope=game');
+
+      // ---- 随界面变化（这条是"指南"存在的理由）----
+      w.TideUI.openInventory('bag');
+      w.TideUI.render(gGd);
+      var gs1 = w.TideUI.guideState();
+      w.TideUI.closeInventory();
+
+      gGd.pendingRelic = [w.TideData.RELICS[0], w.TideData.RELICS[1], w.TideData.RELICS[2]];
+      w.TideUI.render(gGd);
+      var gs2 = w.TideUI.guideState();
+      gGd.pendingRelic = null;
+
+      if (gs1.scope !== 'inv') fail('背包打开时指南没有换成背包那一套: ' + gs1.scope);
+      else if (gs1.text.indexOf('关闭背包') < 0) fail('背包指南里没有"关闭背包"');
+      else if (gs2.scope !== 'relic') fail('选牌时指南没有换成选牌那一套: ' + gs2.scope);
+      else if (gs2.text.indexOf('移动光标') < 0) fail('选牌指南里没有"移动光标"');
+      else if (gs0.text === gs1.text || gs1.text === gs2.text) {
+        fail('三套指南的内容没有真正区分开（换界面等于没换）');
+      } else ok('指南随界面变化：局内 ' + gs0.rows + ' 行 / 背包 ' + gs1.rows +
+        ' 行 / 选牌 ' + gs2.rows + ' 行，内容各不相同');
+
+      // ---- 折叠：要能收起来，且状态写进存档 ----
+      w.TideSettings.reset();
+      var openBefore = w.TideUI.guideState().open;
+      var openAfter = w.TideUI.toggleGuide();
+      if (openAfter === openBefore) fail('折叠没有切换状态');
+      else if (w.TideSettings.get('guide') !== openAfter) {
+        fail('折叠状态没有写进存档（下次进来会弹回去）');
+      } else {
+        ok('折叠生效且写进存档（' + openBefore + ' → ' + openAfter + '）');
+      }
+      w.TideUI.toggleGuide();                       // 恢复
+      if (!w.TideUI.guideState().open) fail('再折叠一次没能展开回来');
+
+      /* ============================================================
+         ⑦ 最要紧的一条：**表里写的键，按下去必须真的有效**
+
+         为什么用行为验证而不是"查代码里有没有这个字符串"：
+         后者只能证明代码里提到了它，证明不了按下去有用。
+         而"指南上写着、按下去没反应"恰恰是最坏的一种不一致 ——
+         玩家会先怀疑自己按错了。
+
+         豁免名单：不靠键盘的条目（鼠标双击 / 滚轮 / 点页签）必须显式登记，
+         否则新增一条"没有验证"的说明会被默默放过。
+         ============================================================ */
+      var NO_KEY = { autoEquip: 1, zoom: 1, bagTab: 1 };
+      var fire = function (key) {
+        w.dispatchEvent(new w.KeyboardEvent('keydown', { key: key, bubbles: true, cancelable: true }));
+        w.dispatchEvent(new w.KeyboardEvent('keyup', { key: key, bubbles: true, cancelable: true }));
+      };
+      var closeAllUI = function () {
+        try { if (w.TideUI.isPauseOpen()) w.TideUI.closePause(); } catch (e) { }
+        try { if (w.TideUI.isInventoryOpen()) w.TideUI.closeInventory(); } catch (e) { }
+        try { if (w.TideUI.isHelpOpen()) w.TideUI.closeHelp(); } catch (e) { }
+        try { if (w.TideUI.isMetaOpen()) w.TideUI.closeMeta(); } catch (e) { }
+        try { if (w.TideUI.isBoardOpen()) w.TideUI.closeBoard(); } catch (e) { }
+        try { if (w.TideUI.isSettingsOpen()) w.TideUI.closeSettings(); } catch (e) { }
+      };
+
+      var PROBE = {
+        move: function () {
+          var g = w.TideMain.game, t0 = g.turn;
+          ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].forEach(fire);
+          return g.turn > t0;
+        },
+        wait: function () {
+          var g = w.TideMain.game, t0 = g.turn;
+          fire(' ');
+          return g.turn > t0;
+        },
+        skill: function () {
+          var g = w.TideMain.game;
+          var foe = g._makeEnemy(g.px, g.py, g.depth);
+          foe.x = g.px + 1; foe.y = g.py;
+          g.enemies.push(foe);
+          var u0 = g.skillUses;
+          fire('q');
+          var used = g.skillUses > u0;
+          var at = g.enemies.indexOf(foe);
+          if (at >= 0) g.enemies.splice(at, 1);
+          return used;
+        },
+        bag: function () {
+          var v0 = w.TideUI.isInventoryOpen();
+          fire('e');
+          var v1 = w.TideUI.isInventoryOpen();
+          if (v1 !== v0) { if (v1) fire('e'); return true; }
+          return false;
+        },
+        help: function () {
+          var v0 = w.TideUI.isHelpOpen();
+          fire('h');
+          var v1 = w.TideUI.isHelpOpen();
+          if (v1 !== v0) { if (v1) fire('h'); return true; }
+          return false;
+        },
+        mute: function () {
+          var o0 = w.TideAudio.isOn();
+          fire('m');
+          var o1 = w.TideAudio.isOn();
+          if (o1 !== o0) { fire('m'); return true; }
+          return false;
+        },
+        pause: function () {
+          fire('Escape');
+          var p = w.TideUI.isPauseOpen();
+          if (p) fire('Escape');
+          return p;
+        },
+        guide: function () {
+          var o0 = w.TideUI.guideState().open;
+          fire('g');
+          var o1 = w.TideUI.guideState().open;
+          if (o1 !== o0) { fire('g'); return true; }
+          return false;
+        },
+        closeInv: function () {
+          w.TideUI.openInventory('bag');
+          fire('e');
+          return !w.TideUI.isInventoryOpen();
+        },
+        relicMove: function () {
+          var g = w.TideMain.game;
+          g.pendingRelic = [w.TideData.RELICS[0], w.TideData.RELICS[1], w.TideData.RELICS[2]];
+          w.TideUI.render(g);
+          var i0 = w.TideUI.relicSelectedIndex();
+          fire('ArrowRight');
+          var i1 = w.TideUI.relicSelectedIndex();
+          g.pendingRelic = null;
+          return i1 !== i0;
+        },
+        relicPick: function () {
+          var g = w.TideMain.game;
+          g.pendingRelic = [w.TideData.RELICS[0], w.TideData.RELICS[1], w.TideData.RELICS[2]];
+          w.TideUI.render(g);
+          fire(' ');
+          var gone = !g.pendingRelic;
+          g.pendingRelic = null;
+          return gone;
+        }
+      };
+
+      var acts = [];
+      K.forEach(function (k) { if (acts.indexOf(k.act) < 0) acts.push(k.act); });
+
+      var noProbe = acts.filter(function (a) { return !NO_KEY[a] && !PROBE[a]; });
+      var badAct = [];
+      var goodAct = [];
+      acts.forEach(function (a) {
+        if (NO_KEY[a]) { goodAct.push(a + '(非键盘)'); return; }
+        w.TideMain.start({ classKey: 'warlord', difficulty: 'standard', seed: 20260922, meta: null });
+        closeAllUI();
+        try {
+          if (PROBE[a]()) goodAct.push(a); else badAct.push(a);
+        } catch (e) { badAct.push(a + '(' + (e && e.message) + ')'); }
+      });
+
+      if (noProbe.length) {
+        fail('按键表里有动作既没登记豁免、也没有行为验证: ' + noProbe.join(', '));
+      } else if (badAct.length) {
+        fail('这些动作在指南里写着、按下去却没反应: ' + badAct.join(', '));
+      } else {
+        ok('指南与真实按键一致：' + acts.length + ' 个动作逐条验证通过（' +
+          goodAct.length + ' 个有实际行为，' + (acts.length - goodAct.length) + ' 个已登记为非键盘）');
+      }
+      closeAllUI();
+      w.TideMeta.reset();
+    } catch (e) { fail('操作指南测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+  } catch (e) {
+    fail('测试脚本异常: ' + (e && e.stack ? e.stack : e));
+  }
+  finish();
+}
+
+function finish() {
+  log('');
+  if (errors.length) {
+    log('结果: FAIL (' + errors.length + ' 项)');
+    errors.forEach(function (e, i) { log('  ' + (i + 1) + '. ' + e); });
+  } else {
+    log('结果: ALL PASS');
+  }
+  flush();
+}
+</script>
+</body>
+</html>
+

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>tide-menu-probe</title>
+<style>body{background:#05070d;color:#ccd6e6;font:12px Consolas,monospace;margin:0}
+#out{white-space:pre-wrap;padding:10px}iframe{position:fixed;left:-6000px;top:0;width:1280px;height:800px;border:0}</style>
+</head>
+<body>
+<pre id="out">booting...</pre>
+<iframe id="fr" src="../src/index.html"></iframe>
+<script>
+var L = [];
+function p(s) { L.push(s); document.getElementById('out').textContent = L.join('\n'); }
+var fr = document.getElementById('fr');
+
+// 关键：在 iframe 的文档里尽早挂上错误监听（boot 之前就挂），
+// 否则 boot() 期间抛的异常根本没人听得到 —— 这正是"界面没反应但测试全绿"的成因。
+var earlyErr = [];
+function attach() {
+  try {
+    var w = fr.contentWindow, d = fr.contentDocument;
+    w.addEventListener('error', function (ev) {
+      earlyErr.push((ev.message || '?') + ' @' + (ev.filename || '') + ':' + ev.lineno);
+    });
+    p('已挂上早期错误监听');
+  } catch (e) { p('挂监听失败: ' + e.message); }
+}
+fr.addEventListener('load', function () { setTimeout(function () { run(); }, 900); });
+// 尽早 attach（DOM 就绪即可，早于脚本执行完成）
+var t0 = setInterval(function () {
+  try { if (fr.contentWindow && fr.contentDocument && fr.contentDocument.readyState !== 'uninitialized') { attach(); clearInterval(t0); } } catch (e) { }
+}, 5);
+
+function run() {
+  var w = fr.contentWindow, d = fr.contentDocument;
+  try {
+    p('早期捕获到的错误 = ' + (earlyErr.length ? JSON.stringify(earlyErr, null, 1) : '（无）'));
+    p('');
+    p('TideUI 存在 = ' + (!!w.TideUI));
+    p('#menu-screen 存在 = ' + !!d.getElementById('menu-screen'));
+    p('#menu-bg 存在 = ' + !!d.getElementById('menu-bg'));
+    p('#menu-screen 当前 hidden = ' +
+      (d.getElementById('menu-screen') ? d.getElementById('menu-screen').classList.contains('hidden') : '(无元素)'));
+    p('TideUI.showMenu 是函数 = ' + (typeof (w.TideUI && w.TideUI.showMenu)));
+    var b = d.getElementById('btn-menu-start');
+    p('#btn-menu-start 存在 = ' + !!b);
+    p('#btn-menu-start.onclick 类型 = ' + (b ? typeof b.onclick : '(无)'));
+    p('');
+    p('--- 手动调 showTitle() ---');
+    try {
+      w.TideUI.showTitle();
+      p('showTitle 调用成功；title-screen hidden = ' +
+        d.getElementById('title-screen').classList.contains('hidden'));
+      p('              menu-screen hidden = ' +
+        d.getElementById('menu-screen').classList.contains('hidden'));
+    } catch (e) { p('!! showTitle 抛异常: ' + (e && e.stack ? e.stack : e)); }
+    p('');
+    p('--- 手动调 showMenu() 再点开始 ---');
+    try {
+      w.TideUI.showMenu();
+      p('showMenu 后：menu hidden = ' + d.getElementById('menu-screen').classList.contains('hidden') +
+        ' / title hidden = ' + d.getElementById('title-screen').classList.contains('hidden'));
+      b.click();
+      p('点击后：     menu hidden = ' + d.getElementById('menu-screen').classList.contains('hidden') +
+        ' / title hidden = ' + d.getElementById('title-screen').classList.contains('hidden'));
+    } catch (e) { p('!! 点击流程抛异常: ' + (e && e.stack ? e.stack : e)); }
+    p('');
+    p('=== DONE ===');
+  } catch (e) {
+    p('!! 探针异常: ' + (e && e.stack ? e.stack : e));
+    p('=== DONE ===');
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>tide-sim-tune</title>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* ============================================================
+   参数扫描：一次只动难度配置里的**一个键**，看通关率怎么变。
+
+   为什么单独做一个：
+   平衡调整如果靠"改一下源码再跑一遍"，就总会忍不住同时改两三个值，
+   然后没人分得清是哪一个起了作用 —— 更糟的是，改了源码没改回去，
+   下次复跑时基准就悄悄漂了。这里直接改内存里的配置对象，
+   源码一行不动，扫描完即忘。
+
+   用法：
+     sim_tune.html?diff=casual&key=healAfterWin&vals=0.12,0.09,0.06&n=150
+   参数：
+     diff  难度 key（casual / standard / abyss）
+     key   DIFFICULTIES[diff] 里的键名，如 healAfterWin / tideEvery / enemyMul
+     vals  逗号分隔的候选值
+     n     每个值跑多少局（默认 120）
+     seed  起始种子（默认 1000，固定住才能横向比较）
+   ============================================================ */
+(function () {
+  var q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return;
+    var p = kv.split('=');
+    q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+  var diff = q.diff || 'casual';
+  var key = q.key || 'healAfterWin';
+  var vals = (q.vals || '').split(',').filter(function (s) { return s !== ''; });
+  var n = parseInt(q.n || '120', 10);
+  var seed = parseInt(q.seed || '1000', 10);
+  var lines = [];
+
+  var cfg = TideData.DIFFICULTIES[diff];
+  if (!cfg) {
+    document.getElementById('out').textContent = 'SIMFAIL\n没有这个难度: ' + diff;
+    return;
+  }
+  if (!(key in cfg)) {
+    document.getElementById('out').textContent = 'SIMFAIL\n' + diff + ' 里没有 ' + key +
+      '\n可选的键: ' + Object.keys(cfg).join(', ');
+    return;
+  }
+  var original = cfg[key];
+  lines.push('扫描 ' + diff + '.' + key + '   （原值 ' + original + '，每档 ' + n + ' 局，种子 ' + seed + '）');
+  lines.push('');
+
+  var t0 = Date.now();
+  try {
+    for (var i = 0; i < vals.length; i++) {
+      var raw = vals[i];
+      var v = (raw === 'true') ? true : (raw === 'false' ? false : parseFloat(raw));
+      cfg[key] = v;
+      var o = TideCore.Game.simulate(n, {
+        difficulty: diff, seedBase: seed, maxTurns: 2400
+      });
+      lines.push(pad(raw, 9) + '通关 ' + pad(o.winRate + '%', 8) +
+        '回合 ' + pad(o.turns, 6) + '击杀 ' + pad(o.kills, 6) +
+        ' 结局 ' + JSON.stringify(o.outcome) +
+        (o.stalls ? '  STALL ' + JSON.stringify(o.stalls) : ''));
+    }
+    cfg[key] = original;      // 一定要改回去
+  } catch (e) {
+    document.getElementById('out').textContent = 'SIMFAIL\n' + (e && e.stack ? e.stack : String(e));
+    return;
+  }
+  function pad(s, w) {
+    s = String(s);
+    while (s.length < w) s += ' ';
+    return s;
+  }
+  lines.push('');
+  lines.push('elapsed=' + (Date.now() - t0) + 'ms');
+  document.getElementById('out').textContent = 'SIMDONE\n' + lines.join('\n');
+})();
+</script>
+</body>
+</html>

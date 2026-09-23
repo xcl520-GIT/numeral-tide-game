@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>数值潮汐 · Numeral Tide</title>
+<style>
+  :root{
+    --bg:#0a0e13; --panel:#111a22; --line:#1c2833;
+    --text:#dee9f2; --dim:#6f8497;
+    --eat:#31e0a4; --dead:#ff4d5e; --me:#4da3ff; --rock:#8a5a2b; --gold:#ffc857;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%}
+  body{
+    background:radial-gradient(900px 480px at 50% -15%,#16222e,#0a0e13 62%);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    display:flex;align-items:center;justify-content:center;padding:12px;overflow:hidden;
+  }
+  #app{width:min(540px,100%);display:flex;flex-direction:column;gap:9px}
+
+  header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:0 2px}
+  h1{margin:0;font-size:16px;font-weight:600;letter-spacing:.16em}
+  h1 span{color:var(--dim);font-size:10px;letter-spacing:.24em;margin-left:7px;font-weight:400}
+  .stats{display:flex;gap:14px;font-variant-numeric:tabular-nums}
+  .stat{display:flex;flex-direction:column;align-items:flex-end;line-height:1}
+  .stat b{font-size:18px;font-weight:700}
+  .stat i{font-size:9px;color:var(--dim);font-style:normal;letter-spacing:.12em;margin-top:3px}
+
+  .bar{height:3px;border-radius:2px;background:#16212b;overflow:hidden;margin:0 2px}
+  .bar>div{height:100%;width:0;background:linear-gradient(90deg,#31e0a4,#4da3ff);transition:width .2s ease}
+
+  #boardWrap{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:8px}
+  #board{display:grid;gap:3px;width:100%;aspect-ratio:1/1}
+  .cell{
+    position:relative;border-radius:7px;background:#0e1620;
+    display:flex;align-items:center;justify-content:center;
+    font-variant-numeric:tabular-nums;user-select:none;transition:background .12s,transform .12s;
+  }
+  .cell.reachable{background:#111d28}
+  .cell.hit{animation:hit .18s ease-out}
+  @keyframes hit{0%{transform:scale(.82)}100%{transform:scale(1)}}
+
+  .enemy{
+    position:absolute;display:flex;align-items:center;justify-content:center;
+    width:84%;height:84%;border-radius:50%;font-weight:700;line-height:1;
+    font-size:clamp(8px,2.1vw,14px);letter-spacing:-.02em;
+  }
+  .enemy.eatable{color:#062a1e;background:var(--eat)}
+  .enemy.lethal{color:var(--dead);background:rgba(255,77,94,.07);box-shadow:inset 0 0 0 1px rgba(255,77,94,.35)}
+  /* 礁石：方形 + 斜纹，一眼区分于普通敌人 */
+  .enemy.rock{border-radius:22%;background-image:repeating-linear-gradient(45deg,rgba(0,0,0,.22) 0 3px,transparent 3px 7px)}
+  .enemy.rock.eatable{background-color:#c98a3c}
+  .enemy.rock.lethal{background-color:rgba(138,90,43,.30);box-shadow:inset 0 0 0 1px rgba(201,138,60,.45)}
+  .enemy.tiny{font-size:clamp(7px,1.6vw,11px)}
+
+  .me{
+    position:absolute;display:flex;align-items:center;justify-content:center;
+    width:84%;height:84%;border-radius:50%;background:var(--me);color:#04121f;
+    font-weight:800;line-height:1;font-size:clamp(8px,2.1vw,14px);letter-spacing:-.02em;
+    box-shadow:0 0 16px rgba(77,163,255,.55);z-index:2;
+  }
+  .me.tiny{font-size:clamp(7px,1.6vw,11px)}
+
+  .overlay{
+    position:absolute;inset:8px;border-radius:10px;
+    background:rgba(8,13,18,.94);backdrop-filter:blur(3px);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;
+    text-align:center;padding:18px;z-index:5;
+  }
+  .overlay.hidden{display:none}
+  .overlay h2{margin:0;font-size:19px;letter-spacing:.1em}
+  .overlay p{margin:0;color:var(--dim);font-size:12.5px;line-height:1.75;max-width:34em}
+  .overlay .keys{margin-top:2px;font-size:11.5px;color:var(--dim);line-height:1.9;text-align:left}
+  .overlay button{
+    margin-top:2px;padding:9px 20px;border-radius:9px;border:1px solid #2b3d4d;
+    background:#17242f;color:var(--text);font-size:13px;cursor:pointer;font-family:inherit;
+    transition:background .15s,border-color .15s;
+  }
+  .overlay button:hover{background:#1e2f3d;border-color:#3a5568}
+  kbd{background:#1b2836;border:1px solid #2b3d4d;border-radius:4px;padding:0 5px;font-family:inherit;font-size:10.5px}
+
+  #log{
+    height:68px;overflow:hidden;background:var(--panel);border:1px solid var(--line);
+    border-radius:11px;padding:8px 12px;font-size:12px;line-height:1.6;
+    display:flex;flex-direction:column;justify-content:flex-end;gap:1px;
+  }
+  #log div{color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #log div.eat{color:var(--eat)}
+  #log div.dead{color:var(--dead)}
+  #log div.warn{color:var(--gold)}
+  #log div.win{color:var(--me)}
+
+  .foot{display:flex;justify-content:space-between;align-items:center;font-size:10.5px;color:var(--dim);padding:0 3px;letter-spacing:.03em;gap:8px}
+  .foot code{background:#16212b;padding:1px 5px;border-radius:4px;font-size:10px;color:#8fa6ba}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>数值潮汐<span>NUMERAL TIDE</span></h1>
+    <div class="stats">
+      <div class="stat"><b id="sValue">1</b><i>数值</i></div>
+      <div class="stat"><b id="sKills">0</b><i>吞噬</i></div>
+      <div class="stat"><b id="sTurn">0</b><i>回合</i></div>
+    </div>
+  </header>
+
+  <div class="bar"><div id="barFill"></div></div>
+
+  <div id="boardWrap">
+    <div id="board"></div>
+    <div id="overlay" class="overlay hidden">
+      <h2 id="ovTitle"></h2>
+      <p id="ovDesc"></p>
+      <div class="keys" id="ovKeys"></div>
+      <button id="ovBtn">再来一局 &nbsp;R</button>
+    </div>
+  </div>
+
+  <div id="log"></div>
+
+  <div class="foot">
+    <span>方向键 / <code>WASD</code> 移动 · 点击相邻格 · <code>R</code> 重开 · <code>H</code> 规则</span>
+    <span id="seedLabel"></span>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   1. 种子化随机
+   mulberry32 是纯 32 位整数运算，所以 Python 模拟器（tools/sim.py）
+   用 & MASK 写出逐位等价的实现，同一个 seed 能产出完全相同的对局。
+   这就是"平衡性可以在无浏览器环境下被验证"的基础。
+   ============================================================ */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+class RNG {
+  constructor(seed) { this.seed = seed >>> 0; this._n = mulberry32(this.seed); }
+  float() { return this._n(); }
+  int(lo, hi) { return lo + Math.floor(this._n() * (hi - lo + 1)); }
+}
+
+/* ============================================================
+   2. 全部可调参数 —— 与 tools/sim.py 的 DEFAULTS 保持一致
+   ============================================================ */
+const CONFIG = {
+  W: 9, H: 9,
+  playerStart: 1,
+  initialEnemies: 6,
+  initialEnemyMax: 2,
+
+  spawnEvery: 3,        // 每 N 回合涌入一个普通敌人
+  spawnLo: 0.30,        // 普通敌人数值 = 玩家数值 x [lo, hi]
+  spawnHi: 1.10,
+
+  wallEvery: 1,         // 每 N 回合沉积一块礁石
+  wallBase: 6,          // 礁石数值 = wallBase + 回合数 x wallScale
+  wallScale: 1.0,
+
+  goal: 25              // 吞噬这么多普通敌人 => 通关
+};
+
+/* ============================================================
+   3. 核心逻辑 —— 纯逻辑，不触碰 DOM，可单测 / 可无头模拟
+   ============================================================ */
+const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+class Game {
+  constructor(seed, overrides) {
+    this.cfg = Object.assign({}, CONFIG, overrides || {});
+    this.seed = (seed === undefined ? (Date.now() ^ (Math.random() * 0xffffffff)) : seed) >>> 0;
+    this.rng = new RNG(this.seed);
+    this.reset();
+  }
+
+  get capacity() { return this.cfg.W * this.cfg.H - 1; }
+
+  reset() {
+    const c = this.cfg;
+    this.turn = 0;
+    this.status = "playing";     // playing | dead | win
+    this.reason = "";            // eaten | drowned | trapped
+    this.value = c.playerStart;
+    this.kills = 0;
+    this.enemies = [];
+    this.logs = [];
+    this.px = (c.W - 1) >> 1;
+    this.py = (c.H - 1) >> 1;
+
+    const occ = new Set([this.px + "," + this.py]);
+    const vals = [1];                       // 保证开局至少有一个吃得下的
+    for (let i = 1; i < c.initialEnemies; i++) vals.push(this.rng.int(1, c.initialEnemyMax));
+    for (const v of vals) {
+      const s = this._randomEmpty(occ);
+      if (!s) break;
+      occ.add(s.x + "," + s.y);
+      this.enemies.push({ x: s.x, y: s.y, v: v, wall: false });
+    }
+    this._log("你从 1 起步。吃掉比你小的，别碰比你大的。", "info");
+  }
+
+  _randomEmpty(occ) {
+    const c = this.cfg;
+    for (let t = 0; t < 200; t++) {
+      const x = this.rng.int(0, c.W - 1), y = this.rng.int(0, c.H - 1);
+      if (!occ.has(x + "," + y)) return { x: x, y: y };
+    }
+    for (let y = 0; y < c.H; y++)
+      for (let x = 0; x < c.W; x++)
+        if (!occ.has(x + "," + y)) return { x: x, y: y };
+    return null;
+  }
+
+  enemyAt(x, y) {
+    for (const e of this.enemies) if (e.x === x && e.y === y) return e;
+    return null;
+  }
+
+  inBounds(x, y) { return x >= 0 && y >= 0 && x < this.cfg.W && y < this.cfg.H; }
+
+  canMove(dx, dy) { return this.status === "playing" && this.inBounds(this.px + dx, this.py + dy); }
+
+  move(dx, dy) {
+    if (!this.canMove(dx, dy)) return null;
+    const nx = this.px + dx, ny = this.py + dy;
+    const target = this.enemyAt(nx, ny);
+    const info = { ate: null, died: null, trapped: false };
+    this.px = nx; this.py = ny;
+
+    if (target && this.value < target.v) {
+      this.turn++;
+      this.status = "dead";
+      this.reason = "eaten";
+      info.died = { x: nx, y: ny, v: target.v };
+      this._log("被 " + fmt(target.v) + " 吞噬（你的数值只有 " + fmt(this.value) + "）", "dead");
+      return info;
+    }
+
+    if (target) {
+      this.value += target.v;
+      if (!target.wall) this.kills++;
+      this.enemies = this.enemies.filter(function (e) { return e !== target; });
+      info.ate = { x: nx, y: ny, v: target.v, wall: target.wall };
+      this._log((target.wall ? "砸开礁石 " : "吞噬 ") + fmt(target.v) +
+                " → 数值 " + fmt(this.value), "eat");
+    }
+
+    this.turn++;
+    this._worldTick();
+    this._checkEnd(info);
+    return info;
+  }
+
+  _place(v, isWall) {
+    if (this.enemies.length >= this.capacity) return false;
+    const occ = new Set(this.enemies.map(function (e) { return e.x + "," + e.y; }));
+    occ.add(this.px + "," + this.py);
+    const s = this._randomEmpty(occ);
+    if (!s) return false;
+    this.enemies.push({ x: s.x, y: s.y, v: v, wall: isWall });
+    return true;
+  }
+
+  _spawnCommon() {
+    const c = this.cfg;
+    const lo = Math.max(1, Math.floor(this.value * c.spawnLo));
+    const hi = Math.max(lo, Math.ceil(this.value * c.spawnHi));
+    return this._place(this.rng.int(lo, hi), false);
+  }
+
+  _spawnWall() {
+    const c = this.cfg;
+    const v = Math.floor(c.wallBase + this.turn * c.wallScale);
+    return this._place(Math.max(2, v), true);
+  }
+
+  _worldTick() {
+    const c = this.cfg;
+    if (c.spawnEvery && this.turn % c.spawnEvery === 0) this._spawnCommon();
+    if (c.wallEvery && this.turn % c.wallEvery === 0) this._spawnWall();
+  }
+
+  _checkEnd(info) {
+    const c = this.cfg;
+    if (this.status !== "playing") return;
+    if (this.kills >= c.goal) {
+      this.status = "win";
+      this._log("潮汐退去 —— 你以 " + fmt(this.value) + " 通关", "win");
+      return;
+    }
+    if (this.enemies.length >= this.capacity) {
+      this.status = "dead";
+      this.reason = "drowned";
+      this._log("棋盘被礁石填满，你被淹没", "dead");
+      return;
+    }
+    for (const d of DIRS) {
+      if (!this.inBounds(this.px + d[0], this.py + d[1])) continue;
+      const e = this.enemyAt(this.px + d[0], this.py + d[1]);
+      if (!e || this.value >= e.v) return;
+    }
+    this.status = "dead";
+    this.reason = "trapped";
+    info.trapped = true;
+    this._log("四面被封死，你被困住了", "dead");
+  }
+
+  _log(text, kind) {
+    this.logs.push({ text: text, kind: kind });
+    if (this.logs.length > 30) this.logs.shift();
+  }
+}
+
+/* ============================================================
+   4. 数字格式化
+   ============================================================ */
+function fmt(n) {
+  n = Math.round(n);
+  if (n < 10000) return String(n);
+  if (n < 1e6) return (n / 1000).toFixed(n < 1e5 ? 1 : 0) + "k";
+  if (n < 1e9) return (n / 1e6).toFixed(1) + "M";
+  return (n / 1e9).toFixed(1) + "B";
+}
+
+/* ============================================================
+   5. 渲染层
+   ============================================================ */
+const $ = function (id) { return document.getElementById(id); };
+const boardEl = $("board"), overlayEl = $("overlay"), ovTitleEl = $("ovTitle"),
+      ovDescEl = $("ovDesc"), ovKeysEl = $("ovKeys"), logEl = $("log"),
+      seedLabelEl = $("seedLabel"), sValueEl = $("sValue"), sKillsEl = $("sKills"),
+      sTurnEl = $("sTurn"), barFillEl = $("barFill");
+
+const cells = [];
+let game = new Game(readSeedFromUrl());
+
+function readSeedFromUrl() {
+  try {
+    const m = /[?&]seed=(\d+)/.exec(location.search);
+    if (m) return parseInt(m[1], 10);
+  } catch (e) { /* file:// 下没有 search 也没关系 */ }
+  return undefined;
+}
+
+function buildBoard() {
+  const c = game.cfg;
+  boardEl.style.gridTemplateColumns = "repeat(" + c.W + ",1fr)";
+  boardEl.innerHTML = "";
+  cells.length = 0;
+  for (let y = 0; y < c.H; y++) {
+    for (let x = 0; x < c.W; x++) {
+      const d = document.createElement("div");
+      d.className = "cell";
+      (function (cx, cy) {
+        d.addEventListener("click", function () { onCellClick(cx, cy); });
+      })(x, y);
+      boardEl.appendChild(d);
+      cells.push(d);
+    }
+  }
+}
+function cellAt(x, y) { return cells[y * game.cfg.W + x]; }
+
+function render(info) {
+  const c = game.cfg;
+  sValueEl.textContent = fmt(game.value);
+  sKillsEl.textContent = game.kills;
+  sTurnEl.textContent = game.turn;
+  barFillEl.style.width = Math.min(100, (game.kills / c.goal) * 100) + "%";
+  seedLabelEl.textContent = "seed " + game.seed;
+
+  const fill = game.enemies.length / game.capacity;
+  boardEl.style.filter = fill > 0.75 ? "saturate(.8)" : "none";
+
+  for (let i = 0; i < cells.length; i++) {
+    cells[i].className = "cell";
+    cells[i].innerHTML = "";
+  }
+
+  for (const e of game.enemies) {
+    const el = cellAt(e.x, e.y);
+    const sp = document.createElement("span");
+    const eatable = game.value >= e.v;
+    const label = fmt(e.v);
+    sp.className = "enemy" + (e.wall ? " rock" : "") + (eatable ? " eatable" : " lethal") +
+                   (label.length > 3 ? " tiny" : "");
+    sp.textContent = label;
+    el.appendChild(sp);
+  }
+
+  for (const d of DIRS) {
+    if (game.inBounds(game.px + d[0], game.py + d[1])) {
+      cellAt(game.px + d[0], game.py + d[1]).classList.add("reachable");
+    }
+  }
+
+  const me = document.createElement("div");
+  const myLabel = fmt(game.value);
+  me.className = "me" + (myLabel.length > 3 ? " tiny" : "");
+  me.textContent = myLabel;
+  cellAt(game.px, game.py).appendChild(me);
+
+  if (info && info.ate) cellAt(info.ate.x, info.ate.y).classList.add("hit");
+
+  renderLog();
+}
+
+function renderLog() {
+  logEl.innerHTML = "";
+  for (const l of game.logs.slice(-3)) {
+    const d = document.createElement("div");
+    d.className = l.kind;
+    d.textContent = l.text;
+    logEl.appendChild(d);
+  }
+}
+
+function showOverlay() {
+  const win = game.status === "win";
+  const reasonText = {
+    eaten: "你撞上了吃不下的敌人。",
+    drowned: "礁石塞满了棋盘，你无处可去。",
+    trapped: "四面都被封死，你被困住了。"
+  }[game.reason] || "";
+
+  ovTitleEl.textContent = win ? "潮汐退去" : "被吞噬了";
+  ovTitleEl.style.color = win ? "var(--me)" : "var(--dead)";
+  ovDescEl.textContent = win
+    ? "你以 " + fmt(game.value) + " 的数值吃满 " + game.cfg.goal + " 个，用了 " + game.turn + " 回合。"
+    : reasonText + " 你停在 " + fmt(game.value) + "，吞噬 " + game.kills + " / " + game.cfg.goal +
+      " 个，撑到第 " + game.turn + " 回合。";
+  ovKeysEl.innerHTML =
+    "本局种子 <b>" + game.seed + "</b> —— 同一种子必然复现同一局。<br>" +
+    "按 <kbd>R</kbd> 换一局新的。";
+  overlayEl.classList.remove("hidden");
+}
+
+function showHelp() {
+  ovTitleEl.textContent = "规则";
+  ovTitleEl.style.color = "var(--text)";
+  ovDescEl.innerHTML =
+    "蓝色圆是<b>你</b>，圆球是普通敌人，<b>方形</b>是礁石。<br>" +
+    "走进数值 <b>≤</b> 你的目标就吃掉它，数值照单全收；" +
+    "走进更大的目标 —— 立刻出局。";
+  ovKeysEl.innerHTML =
+    "① 礁石每回合沉积一块，它<b>不让路</b>，棋盘会被慢慢填死<br>" +
+    "② 礁石数值 = 6 + 回合数，所以你越强，就越能反手砸开它<br>" +
+    "③ 吃满 <b>" + game.cfg.goal + "</b> 个普通敌人通关（砸礁石不计分）<br>" +
+    "④ 开始堵了就得做取舍：清路，还是抢分";
+  overlayEl.classList.remove("hidden");
+  overlayEl.dataset.mode = "help";
+}
+
+function act(dx, dy) {
+  if (game.status !== "playing") return;
+  const info = game.move(dx, dy);
+  if (!info) return;
+  render(info);
+  if (game.status !== "playing") { delete overlayEl.dataset.mode; showOverlay(); }
+}
+
+function onCellClick(x, y) {
+  if (game.status !== "playing") return;
+  const dx = x - game.px, dy = y - game.py;
+  if (Math.abs(dx) + Math.abs(dy) === 1) act(dx, dy);
+}
+
+function newGame(seed) {
+  game = new Game(seed);
+  delete overlayEl.dataset.mode;
+  overlayEl.classList.add("hidden");
+  buildBoard();
+  render(null);
+}
+
+/* ============================================================
+   6. 输入
+   ============================================================ */
+const KEYMAP = {
+  ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+  w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0]
+};
+document.addEventListener("keydown", function (ev) {
+  const k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
+  if (overlayEl.dataset.mode === "help" && !overlayEl.classList.contains("hidden")) {
+    if (k === "h" || k === "Escape") { ev.preventDefault(); overlayEl.classList.add("hidden"); delete overlayEl.dataset.mode; }
+    return;
+  }
+  if (KEYMAP[k]) { ev.preventDefault(); act(KEYMAP[k][0], KEYMAP[k][1]); return; }
+  if (k === "r") { ev.preventDefault(); newGame(); return; }
+  if (k === "h") { ev.preventDefault(); showHelp(); }
+});
+$("ovBtn").addEventListener("click", function () {
+  if (overlayEl.dataset.mode === "help") {
+    overlayEl.classList.add("hidden"); delete overlayEl.dataset.mode;
+    return;
+  }
+  newGame();
+});
+$("ovKeys").addEventListener("click", function () {
+  if (overlayEl.dataset.mode === "help") return;
+  showHelp();
+});
+
+let touchStart = null;
+boardEl.addEventListener("touchstart", function (e) {
+  const t = e.changedTouches[0];
+  touchStart = { x: t.clientX, y: t.clientY };
+}, { passive: true });
+boardEl.addEventListener("touchend", function (e) {
+  if (!touchStart) return;
+  const t = e.changedTouches[0];
+  const dx = t.clientX - touchStart.x, dy = t.clientY - touchStart.y;
+  touchStart = null;
+  if (Math.abs(dx) < 24 && Math.abs(dy) < 24) return;
+  if (Math.abs(dx) > Math.abs(dy)) act(dx > 0 ? 1 : -1, 0);
+  else act(0, dy > 0 ? 1 : -1);
+}, { passive: true });
+
+/* ============================================================
+   7. 无头模拟器（浏览器里也能跑，用于快速验证改动）
+      控制台：TIDE.simulate(2000)  →  > 通关率 / 平均回合 / 死因分布
+   ============================================================ */
+function greedyMove(g) {
+  const moves = [];
+  for (const d of DIRS) {
+    if (!g.canMove(d[0], d[1])) continue;
+    moves.push({ dx: d[0], dy: d[1], e: g.enemyAt(g.px + d[0], g.py + d[1]) });
+  }
+  if (!moves.length) return null;
+
+  const eatable = moves.filter(function (m) { return m.e && g.value >= m.e.v; });
+  if (eatable.length) {
+    eatable.sort(function (a, b) { return b.e.v - a.e.v; });
+    return eatable[0];
+  }
+
+  function stepToward(pred) {
+    let pick = null, pickD = Infinity;
+    for (const m of moves) {
+      if (m.e && g.value < m.e.v) continue;
+      const nx = g.px + m.dx, ny = g.py + m.dy;
+      for (const t of g.enemies) {
+        if (!pred(t)) continue;
+        const d = Math.abs(nx - t.x) + Math.abs(ny - t.y);
+        if (d < pickD) { pickD = d; pick = m; }
+      }
+    }
+    return pick;
+  }
+  let pick = stepToward(function (t) { return g.value >= t.v; });
+  if (pick) return pick;
+  pick = stepToward(function () { return true; });
+  if (pick) return pick;
+  const safe = moves.filter(function (m) { return !m.e; });
+  return safe.length ? safe[0] : null;
+}
+
+function autoPlay(seed, overrides, maxTurns) {
+  const g = new Game(seed, overrides);
+  let guard = 0, limit = maxTurns || 2000;
+  while (g.status === "playing" && guard++ < limit) {
+    const m = greedyMove(g);
+    if (!m) break;
+    g.move(m.dx, m.dy);
+  }
+  if (g.status === "playing") { g.status = "dead"; g.reason = "timeout"; }
+  return g;
+}
+
+function simulate(n, overrides, seed0) {
+  n = n || 1000;
+  const base = seed0 === undefined ? 1 : seed0;
+  let wins = 0, turns = 0, kills = 0;
+  const reasons = { eaten: 0, drowned: 0, trapped: 0, timeout: 0 };
+  for (let i = 0; i < n; i++) {
+    const g = autoPlay(base + i, overrides);
+    if (g.status === "win") wins++; else reasons[g.reason] = (reasons[g.reason] || 0) + 1;
+    turns += g.turn; kills += g.kills;
+  }
+  const res = {
+    n: n,
+    winRate: +(wins / n).toFixed(4),
+    avgTurn: +(turns / n).toFixed(1),
+    avgKills: +(kills / n).toFixed(2),
+    reasons: reasons
+  };
+  console.log("[TIDE simulate]", res);
+  return res;
+}
+
+/* ============================================================
+   8. 启动
+   ============================================================ */
+buildBoard();
+render(null);
+
+/* 调试入口：?sim=300 直接在页面里跑批量模拟并输出统计，
+   用于和 tools/sim.py 对同一批 seed 的结果做逐位校验。 */
+const simMatch = /[?&]sim=(\d+)/.exec(location.search);
+if (simMatch) {
+  const r = simulate(parseInt(simMatch[1], 10));
+  logEl.innerHTML = "";
+  const d = document.createElement("div");
+  d.className = "win";
+  d.textContent = "sim " + r.n + " → 通关 " + (r.winRate * 100).toFixed(1) +
+                  "%  回合 " + r.avgTurn + "  吞噬 " + r.avgKills + "  " + JSON.stringify(r.reasons);
+  logEl.appendChild(d);
+} else if (!/[?&]seed=\d+/.test(location.search)) {
+  showHelp();
+}
+
+window.TIDE = { Game: Game, CONFIG: CONFIG, simulate: simulate, autoPlay: autoPlay,
+                greedyMove: greedyMove, fmt: fmt, get game() { return game; } };
+</script>
+</body>
+</html>

@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>tide-sim</title>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* ============================================================
+   无头平衡模拟入口。
+   用 Edge 的 --headless --dump-dom 直接跑，命令行就能验收：
+     msedge.exe --headless=new --dump-dom "file:///.../tools/sim.html?n=400"
+   好处是**和游戏共用同一份 core.js**。之前用 Python 复刻核心逻辑，
+   两份实现一旦漂移，平衡数据就全是假的（这个坑已经踩过一次）。
+   参数：?n=400&diff=standard&cls=all&seed=1
+   ============================================================ */
+(function () {
+  var q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return;
+    var p = kv.split('=');
+    q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+  var n = parseInt(q.n || '200', 10);
+  var diff = q.diff || 'all';
+  var lines = [];
+
+  function fmt(o) {
+    return 'winRate=' + o.winRate + '%  turns=' + o.turns + '  kills=' + o.kills +
+      '  relics=' + o.avgRelics + '  endDepth=' + JSON.stringify(o.byDepth);
+  }
+  var t0 = Date.now();
+  try {
+  var diffs = diff === 'all' ? ['casual', 'standard', 'abyss'] : [diff];
+  for (var i = 0; i < diffs.length; i++) {
+    var d = diffs[i];
+    var o = TideCore.Game.simulate(n, { difficulty: d, seedBase: 1000, maxTurns: 2400 });
+    lines.push('[' + d + '] ' + fmt(o));
+    lines.push('        outcome: ' + JSON.stringify(o.outcome));
+    if (o.stalls) lines.push('        STALL: ' + JSON.stringify(o.stalls));
+    lines.push('        relics: ' + JSON.stringify(o.relicPick));
+    lines.push('        lootRarity: ' + JSON.stringify(o.avgRarity));
+    lines.push('        deathBy: ' + JSON.stringify(o.deathCause));
+  }
+  // 分职业跑标准难度，检查职业之间是否失衡
+  if (q.cls !== '0' && diff !== 'all') {
+    ['warlord', 'arcanist', 'ranger', 'warden'].forEach(function (c) {
+      var o = TideCore.Game.simulate(n, { difficulty: diffs[0], classKey: c, seedBase: 1000, maxTurns: 2400 });
+      lines.push('[cls:' + c + '] ' + fmt(o));
+    });
+  }
+  lines.push('elapsed=' + (Date.now() - t0) + 'ms  n=' + n);
+  document.getElementById('out').textContent = 'SIMDONE\n' + lines.join('\n');
+  } catch (e) {
+    document.getElementById('out').textContent = 'SIMFAIL\n' + (e && e.stack ? e.stack : String(e)) +
+      '\npartial:\n' + lines.join('\n');
+  }
+})();
+</script>
+</body>
+</html>

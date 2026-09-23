@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>tide-title-probe</title>
+<style>
+body{background:#05070d;color:#ccd6e6;font:12px Consolas,monospace;margin:0}
+#out{white-space:pre-wrap;padding:10px}
+/* 关键：iframe 尺寸 = exe 的窗口客户区（launcher.cs 里 ClientSize = 1380x880）。
+   标题页在别的尺寸下不溢出、在这个尺寸下溢出，是很常见的"只在真机卡住"。 */
+#fr{position:fixed;left:-6000px;top:0;width:1380px;height:880px;border:0}
+</style>
+</head>
+<body>
+<pre id="out">booting...</pre>
+<iframe id="fr" src="../src/index.html"></iframe>
+<script>
+var L = [];
+function p(s) { L.push(s); document.getElementById('out').textContent = L.join('\n'); }
+var fr = document.getElementById('fr');
+
+// 参数：?page=... 换页面（用来量分发包）；?w= / ?h= 换窗口尺寸
+var qp = {};
+location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+  if (!kv) return; var a = kv.split('='); qp[a[0]] = decodeURIComponent(a[1] || '');
+});
+if (qp.page) fr.src = qp.page;
+if (qp.w) fr.style.width = qp.w + 'px';
+if (qp.h) fr.style.height = qp.h + 'px';
+
+fr.addEventListener('load', function () {
+  var w = fr.contentWindow, d = fr.contentDocument;
+  w.addEventListener('error', function (ev) {
+    if (ev.message) p('!! JS错误: ' + ev.message + ' @' + (ev.filename || '') + ':' + ev.lineno);
+  });
+  p('iframe 尺寸 = ' + fr.style.width + ' x ' + fr.style.height);
+  setTimeout(function () { step1(w, d); }, 1000);
+});
+
+function step1(w, d) {
+  try {
+    var ts = d.getElementById('title-screen');
+    var inner = d.querySelector('.title-inner');
+    var acts = d.querySelector('.actions');
+    var start = d.getElementById('btn-start');
+    var meta = d.getElementById('meta-grid');
+    var cr = d.getElementById('meta-crystals');
+    if (!ts || !inner || !acts || !start) { p('!! 标题页结构缺失（ts/inner/actions/btn-start 有 null）'); return done(); }
+
+    var ir = inner.getBoundingClientRect();
+    var ar = acts.getBoundingClientRect();
+    var sr = start.getBoundingClientRect();
+
+    p('');
+    p('===== 标题页布局 =====');
+    p('title-screen  display      = ' + w.getComputedStyle(ts).display);
+    p('title-inner   clientH      = ' + inner.clientHeight);
+    p('title-inner   scrollH      = ' + inner.scrollHeight);
+    p('需要滚动才能看全            = ' + (inner.scrollHeight > inner.clientHeight + 1));
+    p('.actions      bottom       = ' + Math.round(ar.bottom) +
+      '  (可见区高 ' + inner.clientHeight + ')');
+    p('「开始下潜」可见            = ' + (sr.bottom <= inner.clientHeight + 1) +
+      '   top=' + Math.round(sr.top) + ' bottom=' + Math.round(sr.bottom));
+    p('「开始下潜」可点击          = ' + (sr.width > 0 && sr.height > 0 &&
+      w.getComputedStyle(start).pointerEvents !== 'none' && !start.disabled));
+
+    p('');
+    p('===== 潮汐结晶面板 =====');
+    p('TideMeta 模块              = ' + (!!w.TideMeta));
+    p('meta-grid 存在             = ' + (!!meta));
+    p('解锁卡数量                 = ' + (meta ? meta.querySelectorAll('[data-meta]').length : -1));
+    p('结晶数量文本               = ' + (cr ? JSON.stringify(cr.textContent) : '(无元素)'));
+    p('localStorage 可用          = ' + (function () {
+      try { w.localStorage.setItem('__t', '1'); w.localStorage.removeItem('__t'); return true; }
+      catch (e) { return false; }
+    })());
+
+    p('');
+    p('===== 音频 / BGM =====');
+    if (w.TideAudio && w.TideAudio.musicState) p('musicState = ' + JSON.stringify(w.TideAudio.musicState()));
+    else p('!! 没有 musicState');
+
+    p('');
+    p('===== 真的点一下「开始下潜」 =====');
+    start.click();
+    setTimeout(function () { step2(w, d); }, 1200);
+  } catch (e) {
+    p('!! 探针异常: ' + (e && e.stack ? e.stack : e));
+    done();
+  }
+}
+
+function step2(w, d) {
+  try {
+    var ts = d.getElementById('title-screen');
+    var gs = d.getElementById('game-screen');
+    p('title-screen 已隐藏        = ' + ts.classList.contains('hidden'));
+    p('game-screen 已显示         = ' + !gs.classList.contains('hidden'));
+    var g = w.TideMain && w.TideMain.game;
+    p('TideMain.game 存在         = ' + (!!g));
+    if (g) {
+      p('depth=' + g.depth + '  hp=' + Math.round(g.hp) + '  gold=' + g.gold +
+        '  bagCap=' + g.bagCap() + '  lives=' + g.lives + '  meta=' + (g.meta ? '有' : 'null'));
+    }
+    p('画面是否还活着（帧计数）   = ' + (w.TideRender && w.TideRender.stats ? JSON.stringify(w.TideRender.stats()) : '(无 stats 接口)'));
+    p('');
+    p('=== DONE ===');
+  } catch (e) {
+    p('!! 探针异常2: ' + (e && e.stack ? e.stack : e));
+    done();
+  }
+}
+
+function done() { p('=== DONE ==='); }
+</script>
+</body>
+</html>
