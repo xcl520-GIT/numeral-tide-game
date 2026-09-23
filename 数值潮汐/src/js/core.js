@@ -266,6 +266,19 @@
     }
     hasRelic(id) { return this.relics.indexOf(id) >= 0; }
 
+    /* 「有没有待选秘藏」只能由这一个函数回答。
+
+       踩过的坑（真的把玩家卡死过）：_offerRelics() 在秘藏池抽干时返回**空数组**，
+       而空数组在 JS 里是**真值** —— 于是 `if (this.pendingRelic)` 一律误判成
+       "正在等玩家选"，把移动/技能输入永久拒掉；而界面层那边用 .length 判断，
+       得到的却是"没有待选"，面板不弹。两个口径之间的那条缝，玩家就走不出去了：
+       点不动、也没有面板可关。
+
+       口径统一之后，空数组不再可能造成卡死。 */
+    hasPendingRelic() {
+      return Array.isArray(this.pendingRelic) && this.pendingRelic.length > 0;
+    }
+
     /* ============================================================
        地图生成
        房间 + 走廊是最经得起看的形状：有大小对比、有拐角、
@@ -1522,21 +1535,59 @@
     }
 
     _offerRelics() {
-      const pool = D.RELICS.filter((r) => !this.hasRelic(r.id));
       const out = [];
+      const pool = D.RELICS.filter((r) => !this.hasRelic(r.id));
       while (out.length < D.PROGRESSION.offerCount && pool.length) {
-        const i = this.rng.int(0, pool.length - 1);
-        out.push(pool.splice(i, 1)[0]);
+        out.push(pool.splice(this.rng.int(0, pool.length - 1), 1)[0]);
+      }
+      // 池子不够就把候选补满（对齐《云顶之弈》：永远给满、永远能选一张继续）。
+      // 这一条同时消掉了"空候选"这个状态本身 —— 而不是在每个读它的地方打补丁。
+      while (out.length < D.PROGRESSION.offerCount) {
+        out.push(D.RELIC_FALLBACKS[(out.length + this.depth) % D.RELIC_FALLBACKS.length]);
       }
       return out;
     }
 
     chooseRelic(id) {
+      const fb = D.RELIC_FALLBACKS.filter((f) => f.id === id)[0];
+      if (fb) { this._grantFallback(fb); this.pendingRelic = null; return; }
       this.relics.push(id);
       this.pendingRelic = null;
       const r = this._relicById(id);
       if (r) this._log('获得秘藏：' + r.name, 'good');
       this.events.push({ kind: 'relic', id: id });
+    }
+
+    /** 兑现一张「潮汐馈赠」。
+     *  池子抽干之后这个阶段仍然存在（不弹空面板、也不把输入挡住），
+     *  只是选项换成即时收益。 */
+    _grantFallback(fb) {
+      const gr = fb.grant || {};
+      const st = this.stats();
+      if (gr.gold) {
+        const amount = D.RELIC_FALLBACK.goldBase + this.depth * D.RELIC_FALLBACK.goldPerDepth;
+        this.gold += amount;
+        this.events.push({ kind: 'gold', amount: amount });
+        this._log('潮汐馈赠：+' + amount + ' 金币。', 'good');
+      } else if (gr.healFrac) {
+        const heal = Math.round(st.hp * gr.healFrac);
+        this.hp = Math.min(st.hp, this.hp + heal);
+        this.events.push({ kind: 'heal', amount: heal });
+        this._log('潮汐馈赠：回复 ' + heal + ' 点生命。', 'good');
+      } else if (gr.item) {
+        const it = this.makeItem({ depth: this.depth + 1 });
+        if (this.bag.length < this.bagCap()) {
+          this.bag.push(it);
+          this.events.push({ kind: 'loot', item: it });
+          this._log('潮汐馈赠：' + it.name + '（' + it.rarityName + '）', 'loot');
+        } else {
+          const amount = D.RELIC_FALLBACK.goldBase;
+          this.gold += amount;
+          this.events.push({ kind: 'gold', amount: amount });
+          this._log('背包已满，馈赠折算为 ' + amount + ' 金币。', 'warn');
+        }
+      }
+      this.events.push({ kind: 'relic', id: fb.id });
     }
 
     /* ============================================================
@@ -1598,7 +1649,7 @@
      * @returns {boolean} 是否消耗了回合
      */
     stepTo(x, y) {
-      if (this.status !== 'playing' || this.pendingRelic) return false;
+      if (this.status !== 'playing' || this.hasPendingRelic()) return false;
       if (!this.walkable(x, y)) return false;
       const e = this.enemyAt(x, y);
       if (e) { this.fight(e); if (this.status === 'playing') this._afterAction(); return true; }
@@ -1669,7 +1720,7 @@
        ============================================================ */
     skill() { return D.skillByClass(this.cls.key); }
     skillReady() {
-      return this.status === 'playing' && !this.pendingRelic && this.skillCd <= 0;
+      return this.status === 'playing' && !this.hasPendingRelic() && this.skillCd <= 0;
     }
 
     /**
@@ -1682,7 +1733,7 @@
     useSkill() {
       const s = this.skill();
       if (this.status !== 'playing') return { ok: false, reason: 'over' };
-      if (this.pendingRelic) return { ok: false, reason: 'pending' };
+      if (this.hasPendingRelic()) return { ok: false, reason: 'pending' };
       if (this.skillCd > 0) return { ok: false, reason: 'cd', cd: this.skillCd };
 
       let hits = 0, healed = 0, pushed = 0, stunned = 0, wet = 0;
@@ -2079,7 +2130,7 @@
       let stall = 0;
       const trace = [];
       while (this.status === 'playing' && this.turn < limit && stall < 40) {
-        if (this.pendingRelic) { this._autoRelic(); continue; }
+        if (this.hasPendingRelic()) { this._autoRelic(); continue; }
         const before = this.turn;
         this._autoEquip();
         this._autoFuse();                      // 融合：同样的道理，AI 不会用就等于没做
@@ -2127,10 +2178,23 @@
       let best = null, bestScore = -1e9;
       for (const r of this.pendingRelic) {
         let sc = 0;
-        if (r.flags) sc += 60;
-        if (r.mods) for (const k in r.mods) {
-          const v = r.mods[k];
-          sc += (k === 'hp' ? v * 0.35 : v * (k === 'spd' ? 1.4 : 1.0));
+        if (r.grant) {
+          // 补位卡（潮汐馈赠）：只有在候选里只剩馈赠时，才需要比较彼此。
+          const st = this.stats();
+          if (r.grant.gold) sc += 20 + this.depth * 4;
+          if (r.grant.healFrac) sc += (this.hp < st.hp * 0.7) ? 55 : 10;
+          if (r.grant.item) sc += 34;
+        } else {
+          // 真秘藏是**永久**的，必须永远优先于一次性馈赠。
+          // 这条基线要高于馈赠的最高分（55），否则 AI 会在收尾时拿 40 金币
+          // 换掉一件永久秘藏 —— 实测过：漏的那一刻，恰好是最低分的
+          // batfang(0.14) 和 gambler(-8.6) 被换掉，秘藏分布直接偏掉 8%。
+          sc += 70;
+          if (r.flags) sc += 60;
+          if (r.mods) for (const k in r.mods) {
+            const v = r.mods[k];
+            sc += (k === 'hp' ? v * 0.35 : v * (k === 'spd' ? 1.4 : 1.0));
+          }
         }
         if (sc > bestScore) { bestScore = sc; best = r; }
       }

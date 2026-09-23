@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>数值潮汐 · 侧栏布局取证 probe_sidebar</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+  iframe { border: 0; display: block; }
+  #out { position: fixed; left: -20000px; top: 0; }
+</style>
+</head>
+<body>
+<!--
+  probe_sidebar.html —— 侧栏「内容看不到 / 滚不动」的取证页
+
+  这个 bug 我猜了三次，前两次都错，第三次才由数据指出真相。留在这里当教训：
+    · 猜「滚轮被画布的缩放处理器吃掉」      → 错：wheel 只绑在 #view 上，与侧栏是兄弟节点
+    · 猜「父容器没确定高度，overflow 失效」  → 错：#game-screen 是 position:fixed;inset:0
+    · 真相：侧栏是 flex 列，子元素默认 flex-shrink:1。内容超高时**不是侧栏滚动，
+      而是面板被压扁**；每个 .panel 又带 overflow:hidden —— 被压掉的内容静默消失。
+      所以「看不到」和「滚不动」是同一个因：侧栏永远不溢出，也就不需要滚。
+
+  两个度量口径（都很容易写错，写错了就会谎报"一切正常"）：
+    1) 「滚不滚得动」不看有没有滚动条 —— 直接把 scrollTop 设成 99999 再读回来。
+    2) 「看不看得见」要拿**元素自己的裁剪祖先**当参照，不是拿侧栏。
+       拿侧栏当参照时，被面板 overflow:hidden 裁掉的行照样算"在视口内"——
+       这正是第一版脚本谎报 12 行全可见的原因。
+
+  参数：w,h 窗口尺寸（默认 1380x880）；walk 先走多少回合（默认 120）；
+        relics=N 直接注入 N 个秘藏（布局压力测试，只影响面板高度）；
+        cls / diff / seed 同 probe_shot.html。
+-->
+<iframe id="f" scrolling="no"></iframe>
+<pre id="out"></pre>
+
+<script>
+(function () {
+  'use strict';
+
+  var q = {};
+  (location.search || '').replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return;
+    var p = kv.split('=');
+    q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+
+  var W = parseInt(q.w || '1380', 10);
+  var H = parseInt(q.h || '880', 10);
+  var walk = Math.max(0, parseInt(q.walk || '120', 10) || 0);
+  var clsKey = q.cls || 'warlord';
+  var diff = q.diff || 'casual';
+  var seed = parseInt(q.seed || '20260922', 10) >>> 0;
+
+  var log = [];
+  function say(s) { log.push(s); }
+  function flush() { document.getElementById('out').textContent = log.join('\n'); }
+
+  var f = document.getElementById('f');
+  f.style.width = W + 'px';
+  f.style.height = H + 'px';
+  f.src = '../src/index.html?meta=0';
+
+  f.onload = function () {
+    var w = f.contentWindow, d = w.document;
+    say('窗口 = ' + W + 'x' + H + '   viewport = ' + w.innerWidth + 'x' + w.innerHeight);
+    say('');
+
+    try {
+      w.TideRender.init();
+      w.TideMain.start({ mode: 'normal', classKey: clsKey, difficulty: diff, seed: seed });
+      var g = w.TideMain.game;
+      w.TideRender.resize();
+
+      var rng = new w.TideCore.RNG(999);
+      var guard = 0;
+      while (g.status === 'playing' && g.turn < walk && guard++ < walk * 4) {
+        if (g.pendingRelic && g.pendingRelic.length) { g.chooseRelic(g.pendingRelic[0].id); continue; }
+        if (g.hp < g.stats().hp * 0.3) break;
+        var tgt = null;
+        for (var t = 0; t < 40; t++) {
+          var rx = rng.int(1, g.W - 2), ry = rng.int(1, g.H - 2);
+          if (g.walkable(rx, ry)) { tgt = { x: rx, y: ry }; break; }
+        }
+        var path = tgt ? g.findPath(g.px, g.py, tgt.x, tgt.y, 3000, 25) : null;
+        if (!path || path.length < 2) { g.endTurn(); continue; }
+        if (!g.stepTo(path[1].x, path[1].y)) g.endTurn();
+      }
+      g.drainEvents();
+      w.TideMain.refresh();
+
+      /* 布局压力测试：直接把秘藏塞满。秘藏面板的高度只跟数量有关，而数量在真实
+         对局里会慢慢涨到 19。等到真打到 19 个才发现"面板被顶掉"就太晚了。 */
+      var relicsN = parseInt(q.relics || '0', 10) || 0;
+      if (relicsN > 0 && w.TideData && w.TideData.RELICS) {
+        w.TideData.RELICS.slice(0, relicsN).forEach(function (r) {
+          if (!g.hasRelic(r.id)) g.relics.push(r.id);
+        });
+        w.TideMain.refresh();
+      }
+      say('局面: turn=' + g.turn + ' depth=' + g.depth + ' kills=' + g.kills +
+          ' status=' + g.status + '  秘藏=' + g.relics.length +
+          (relicsN > 0 ? '（压力测试：注入 ' + relicsN + ' 个）' : ''));
+      say('');
+
+      function box(el) {
+        var r = el.getBoundingClientRect();
+        var cs = w.getComputedStyle(el);
+        return '  ' + (el.id || el.tagName) +
+          '  rect=' + Math.round(r.left) + ',' + Math.round(r.top) +
+          ' ' + Math.round(r.width) + 'x' + Math.round(r.height) +
+          '  clientH=' + el.clientHeight + ' scrollH=' + el.scrollHeight +
+          '  overflowY=' + cs.overflowY + ' height=' + cs.height +
+          ' minHeight=' + cs.minHeight + ' flex=' + cs.flex;
+      }
+
+      say('--- 容器链 ---');
+      ['game-screen', 'stage', 'sidebar'].forEach(function (id) {
+        var el = d.getElementById(id);
+        if (el) say(box(el));
+      });
+      say('  body clientH=' + d.body.clientHeight + ' scrollH=' + d.body.scrollHeight);
+      say('');
+
+      // 关键 1：滚不滚得动，靠写 scrollTop 读回来
+      var sb = d.getElementById('sidebar');
+      var maxScroll = sb.scrollHeight - sb.clientHeight;
+      var keep = sb.scrollTop;
+      sb.scrollTop = 99999;
+      var reached = sb.scrollTop;
+      sb.scrollTop = keep;
+      say('--- 侧栏能不能滚 ---');
+      say('  内容高 ' + sb.scrollHeight + ' / 可视高 ' + sb.clientHeight +
+          '  => 需要滚动 ' + maxScroll + ' px');
+      say('  把 scrollTop 设成 99999 后读回 = ' + reached +
+          (maxScroll > 0 ? (reached > 0 ? '  → 能滚' : '  → !! 有溢出却滚不动')
+                         : '  → 侧栏根本没溢出，所以不需要滚'));
+      say('');
+
+      // 关键 2：每个子块有没有被自己裁掉（scrollH > clientH 就是内容丢失）
+      say('--- 侧栏每个子块：有没有被自己裁掉内容 ---');
+      var totalLost = 0, clippedBlocks = 0;
+      [].slice.call(sb.children).forEach(function (ch) {
+        var head = ch.querySelector ? ch.querySelector('.panel-head') : null;
+        var name = ch.id || (head ? head.textContent.replace(/\s+/g, ' ').trim() : ch.className);
+        var cs = w.getComputedStyle(ch);
+        var lost = ch.scrollHeight - ch.clientHeight;
+        if (lost > 0) { totalLost += lost; clippedBlocks++; }
+        say('  ' + String(name).slice(0, 16).padEnd(18) +
+            ' clientH=' + String(ch.clientHeight).padEnd(4) +
+            ' scrollH=' + String(ch.scrollHeight).padEnd(4) +
+            ' flex=' + cs.flex.padEnd(10) +
+            ' overflowY=' + cs.overflowY.padEnd(8) +
+            (lost > 0 ? '被裁掉 ' + lost + 'px  <-- 内容丢失' : '完整'));
+      });
+      say('  合计：' + clippedBlocks + ' 个块被裁，共丢失 ' + totalLost + ' px 内容');
+      say('');
+
+      // 关键 3：属性行要拿**自己所在的面板**当参照系，不是拿侧栏
+      say('--- 属性面板的每一行（按所属面板的裁剪框判定）---');
+      var rows = d.querySelectorAll('#stat-panel .stat-row');
+      var sp = d.getElementById('stat-panel');
+      var clipOwner = sp.parentElement;                 // .panel 才是带 overflow:hidden 的那层
+      var pr = clipOwner.getBoundingClientRect();
+      say('  共 ' + rows.length + ' 行；裁剪框 bottom=' + Math.round(pr.bottom) +
+          '（该面板 clientH=' + clipOwner.clientHeight + '）');
+      var hiddenRows = 0;
+      [].slice.call(rows).forEach(function (r) {
+        var rr = r.getBoundingClientRect();
+        var inside = rr.bottom <= pr.bottom + 1;
+        if (!inside) hiddenRows++;
+        var nm = r.querySelector('.s-name');
+        say('    ' + (nm ? nm.textContent.trim() : '?').padEnd(10) +
+            ' top=' + Math.round(rr.top) + ' bottom=' + Math.round(rr.bottom) +
+            (inside ? '  可见' : '  !! 被面板裁掉，看不到'));
+      });
+      say('  看不到的属性行 = ' + hiddenRows + ' / ' + rows.length + ' 行');
+      say('');
+
+      // 关键 4：滚轮归属，排除"被画布缩放抢走"这个猜测
+      var z0 = w.TideRender.zoom;
+      var target = d.querySelector('#stat-panel .stat-row') || sb;
+      target.dispatchEvent(new w.WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true }));
+      var z1 = w.TideRender.zoom;
+      say('--- 滚轮归属 ---');
+      say('  wheel 派发到侧栏元素后 zoom: ' + z0 + ' -> ' + z1 +
+          (z0 === z1 ? '  → 没被缩放处理器抢走' : '  → !! 被抢走了'));
+      say('RESULT=OK');
+    } catch (e) {
+      say('RESULT=THREW  ' + (e && e.message ? e.message : String(e)));
+      if (e && e.stack) say('stack=' + e.stack.split('\n').slice(0, 4).join(' | '));
+    }
+    flush();
+  };
+})();
+</script>
+</body>
+</html>

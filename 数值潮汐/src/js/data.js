@@ -331,6 +331,33 @@
       text: '幸运 +8，装备掉率 +12%',    mods: { luck: 8 }, flags: { dropBonus: 0.12 } }
   ];
 
+  /* ============================================================
+     秘藏补位选项（「潮汐馈赠」）
+
+     为什么必须存在这么一组东西：
+     秘藏池是有限的（19 个），而秘藏每 6 次击杀发一次、没有次数上限 ——
+     所以池子**一定会被抽干**。抽干之后如果候选列表变成空的，就会同时触发两件坏事：
+        · 界面层看到 length === 0，不弹面板
+        · 模型层看到 pendingRelic 是真值（空数组也是真值），把输入永久拒掉
+     玩家于是卡死在"点不动、也没面板可关"的状态里。
+
+     这里的做法对齐《云顶之弈》的强化选择：**候选永远给满，永远能选一张继续**。
+     池子还有秘藏时，行为跟以前完全一样；不够的位子才由馈赠补上。
+
+     数值刻意保守：它只是补位，不该比一件真秘藏更值钱，
+     否则玩家会盼着池子早点空。
+     ============================================================ */
+  const RELIC_FALLBACKS = [
+    { id: 'fbGold', name: '潮汐馈赠 · 金', icon: 'coins',         school: 'universal',
+      text: '立刻获得一笔金币（随深度增加）', grant: { gold: true } },
+    { id: 'fbHeal', name: '潮汐馈赠 · 泉', icon: 'health-potion', school: 'universal',
+      text: '立刻回复一半生命上限',           grant: { healFrac: 0.5 } },
+    { id: 'fbItem', name: '潮汐馈赠 · 器', icon: 'chest',         school: 'universal',
+      text: '立刻获得一件装备',               grant: { item: true } }
+  ];
+
+  const RELIC_FALLBACK = { goldBase: 60, goldPerDepth: 40 };
+
   const SCHOOLS = {
     physical:  { name: '物理', color: '#ffa04d' },
     arcane:    { name: '法术', color: '#a78bfa' },
@@ -731,6 +758,7 @@
     EQUIP_SLOTS: EQUIP_SLOTS, BASES: BASES, basesForSlot: basesForSlot,
     AFFIXES: AFFIXES, affixById: affixById,
     RELICS: RELICS, SCHOOLS: SCHOOLS,
+  RELIC_FALLBACKS: RELIC_FALLBACKS, RELIC_FALLBACK: RELIC_FALLBACK,
     ENEMIES: ENEMIES, enemyById: enemyById, BOSSES: BOSSES,
     DIFFICULTIES: DIFFICULTIES, DIFF_ORDER: DIFF_ORDER,
     MAP: MAP, DEPTH_CFG: DEPTH_CFG, LOOT: LOOT, PROGRESSION: PROGRESSION,

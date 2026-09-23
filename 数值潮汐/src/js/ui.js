@@ -1470,7 +1470,7 @@
   let guideOpen = null;      // null = 还没从存档里读过
 
   function guideScope(game) {
-    if (game && game.pendingRelic) return 'relic';
+    if (game && game.hasPendingRelic() ) return 'relic';
     if (invOpen) return 'inv';
     return 'game';
   }

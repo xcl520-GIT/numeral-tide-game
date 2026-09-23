@@ -31,7 +31,9 @@ $ErrorActionPreference = 'Continue'
 $edge = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
 $prof = "$env:TEMP\edgeprof_smoke"
 
-Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -and $_.CommandLine -match '--headless' -and $_.CommandLine -match [regex]::Escape((Split-Path -Leaf $prof)) } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 3
 
 $a = @(
@@ -44,7 +46,9 @@ if (-not $p.WaitForExit($budget + 240000)) { Write-Host 'TIMEOUT'; $p.Kill() }
 
 # Let the process actually flush the file before we touch it.
 Start-Sleep -Milliseconds 2000
-Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -and $_.CommandLine -match '--headless' -and $_.CommandLine -match [regex]::Escape((Split-Path -Leaf $prof)) } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 if (-not (Test-Path -LiteralPath $out)) { Write-Host 'NO OUTPUT FILE'; exit 1 }
 $size = (Get-Item -LiteralPath $out).Length

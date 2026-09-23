@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>数值潮汐 · 秘藏选牌死锁取证 probe_relic</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+  iframe { border: 0; display: block; }
+  #out { position: fixed; left: -20000px; top: 0; }
+</style>
+</head>
+<body>
+<!--
+  probe_relic.html —— 「秘藏攒满之后选牌界面不弹、人卡死」的复现与回归
+
+  复现路径（全部走游戏自己的代码，不手工拼状态）：
+    1) 开局，把 19 个秘藏全部塞给玩家 —— 这就是"池子被抽干"的真实终局状态
+    2) 把 nextRelicAt 推到"再杀一个就触发"
+    3) 真的去打死一个敌人（走 stepTo → fight → _onKill 的完整链路）
+    4) 看 _offerRelics() 返回了什么、面板弹没弹、人还能不能动
+
+  判定"卡死"的口径不能靠肉眼：直接拿一个**合法相邻格**去调 stepTo，
+  返回 false 就说明输入被拒 —— 玩家在真实操作里感受到的就是"点了没反应"。
+
+  参数：w,h 窗口；walk 用于走位找架打的回合上限（默认 240）；
+        relics=N 注入 N 个秘藏（默认 19 即全部，用来复现抽干）；其余同 probe_shot.html。
+-->
+<iframe id="f" scrolling="no"></iframe>
+<pre id="out"></pre>
+
+<script>
+(function () {
+  'use strict';
+
+  var q = {};
+  (location.search || '').replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return;
+    var p = kv.split('=');
+    q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+
+  var W = parseInt(q.w || '1380', 10);
+  var H = parseInt(q.h || '880', 10);
+  var walk = Math.max(0, parseInt(q.walk || '240', 10) || 0);
+  var relicsN = q.relics === undefined ? 19 : (parseInt(q.relics, 10) || 0);
+  var clsKey = q.cls || 'warlord';
+  var diff = q.diff || 'casual';
+  var seed = parseInt(q.seed || '20260922', 10) >>> 0;
+
+  var log = [];
+  function say(s) { log.push(s); }
+  function flush() { document.getElementById('out').textContent = log.join('\n'); }
+
+  var f = document.getElementById('f');
+  f.style.width = W + 'px';
+  f.style.height = H + 'px';
+  f.src = '../src/index.html?meta=0';
+
+  f.onload = function () {
+    var w = f.contentWindow, d = w.document;
+    say('窗口 = ' + W + 'x' + H + '  diff=' + diff + '  seed=' + seed);
+    say('');
+
+    try {
+      w.TideRender.init();
+      w.TideMain.start({ mode: 'normal', classKey: clsKey, difficulty: diff, seed: seed });
+      var g = w.TideMain.game;
+      w.TideRender.resize();
+      var D = w.TideData;
+
+      // 1) 把池子抽干
+      var granted = 0;
+      D.RELICS.slice(0, relicsN).forEach(function (r) {
+        if (!g.hasRelic(r.id)) { g.relics.push(r.id); granted++; }
+      });
+      say('秘藏池：游戏共 ' + D.RELICS.length + ' 个，已给玩家 ' + g.relics.length + ' 个');
+      say('  未拥有的剩余 = ' + (D.RELICS.length - g.relics.length) +
+          (D.RELICS.length - g.relics.length === 0 ? '  <-- 池子已空' : ''));
+      say('');
+
+      // 2) 推成"再杀一个就触发"
+      g.nextRelicAt = g.kills + 1;
+      say('把触发线推到 kills+1（当前 kills=' + g.kills + '，nextRelicAt=' + g.nextRelicAt + '）');
+      say('');
+
+      // 3) 真的去打一个敌人 —— 只用游戏自己的寻路与战斗
+      var rng = new w.TideCore.RNG(999);
+      var guard = 0, killed = false;
+      var kills0 = g.kills;
+      while (g.status === 'playing' && guard++ < walk) {
+        if (g.kills > kills0) { killed = true; break; }
+        if (g.pendingRelic && g.pendingRelic.length) { killed = true; break; }
+        if (g.hp < g.stats().hp * 0.25) break;
+        var tgt = null;
+        // 优先找敌人打
+        var bd = 1e9;
+        for (var i = 0; i < g.enemies.length; i++) {
+          var e = g.enemies[i];
+          if (!e) continue;
+          var dd = Math.abs(e.x - g.px) + Math.abs(e.y - g.py);
+          if (dd < bd) { bd = dd; tgt = { x: e.x, y: e.y }; }
+        }
+        if (!tgt) {
+          for (var t = 0; t < 40; t++) {
+            var rx = rng.int(1, g.W - 2), ry = rng.int(1, g.H - 2);
+            if (g.walkable(rx, ry)) { tgt = { x: rx, y: ry }; break; }
+          }
+        }
+        var path = tgt ? g.findPath(g.px, g.py, tgt.x, tgt.y, 3000, 25) : null;
+        if (!path || path.length < 2) { g.endTurn(); continue; }
+        if (!g.stepTo(path[1].x, path[1].y)) break;
+      }
+      g.drainEvents();
+      w.TideMain.refresh();
+
+      say('战斗结果：kills ' + kills0 + ' -> ' + g.kills +
+          '（' + (killed ? '击杀已发生' : '!! 未能击杀') + '）  hp=' +
+          Math.round(g.hp) + '/' + g.stats().hp);
+      say('');
+
+      // 4) 关键判定
+      var pr = g.pendingRelic;
+      var prKind = (pr === null) ? 'null'
+                 : (!Array.isArray(pr) ? (typeof pr)
+                 : ('数组，长度 ' + pr.length));
+      say('--- 选牌状态 ---');
+      say('  pendingRelic = ' + prKind + (Array.isArray(pr) ? '  [' +
+          pr.map(function (r) { return r.id; }).join(', ') + ']' : ''));
+      say('  nextRelicAt = ' + g.nextRelicAt + '  kills = ' + g.kills);
+      var modal = d.getElementById('relic-modal');
+      var modalShown = modal && !modal.classList.contains('hidden');
+      var cards = d.querySelectorAll('#relic-cards .relic-card').length;
+      say('  选牌面板是否弹出 = ' + (modalShown ? '是' : '否') + '   卡片数 = ' + cards);
+      say('');
+
+      // 输入是否被拒 —— 这才是玩家感受到的"卡死"
+      say('--- 人还能不能动 ---');
+      var dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      function findSpot() {
+        for (var k = 0; k < dirs.length; k++) {
+          var nx = g.px + dirs[k][0], ny = g.py + dirs[k][1];
+          if (g.walkable(nx, ny) && !g.enemyAt(nx, ny)) return { x: nx, y: ny };
+        }
+        return null;
+      }
+      /* 判据要说清楚：**输入被拒 ≠ 卡死**。
+         面板开着的时候，输入本来就该被拒（先选牌才能动）—— 那是设计，不是 bug。
+         真正卡死的定义是：输入被拒 **而且** 没有任何面板/按钮可以关掉它，
+         也就是玩家在这个画面里找不到任何一条往前走的路。 */
+      var spot = findSpot();
+      if (!spot) {
+        say('  周围没有可走的空地可供试探，本次判定跳过');
+      } else {
+        var blockedWhileModal = g.stepTo(spot.x, spot.y);
+        say('  面板开着时朝空地走 → stepTo 返回 ' + blockedWhileModal +
+            '（此处返回 false 是设计如此：得先选牌）');
+
+        var pickId = null;
+        if (modalShown && cards > 0) {
+          var cardEl = d.querySelector('#relic-cards .relic-card');
+          pickId = cardEl ? cardEl.getAttribute('data-id') : null;
+          var goldB = g.gold, hpB = g.hp, bagB = g.bag.length, relicsB = g.relics.length;
+          var modalEl = d.getElementById('relic-modal');
+          var sigB = modalEl ? modalEl.className : '';
+          if (cardEl) cardEl.click();
+          say('  点了第一张卡：' + pickId);
+          say('  兑现：金币 ' + goldB + ' -> ' + g.gold +
+              '   生命 ' + Math.round(hpB) + ' -> ' + Math.round(g.hp) +
+              '   背包 ' + bagB + ' -> ' + g.bag.length +
+              '   秘藏 ' + relicsB + ' -> ' + g.relics.length);
+          say('  选完后 pendingRelic = ' + (g.pendingRelic === null ? 'null'
+                : ('数组，长度 ' + g.pendingRelic.length)) +
+              '   hasPendingRelic() = ' + g.hasPendingRelic());
+          say('  面板是否收起 = ' +
+              ((modalEl && modalEl.classList.contains('hidden')) ? '是' : '否') +
+              '   卡片数 = ' + d.querySelectorAll('#relic-cards .relic-card').length);
+        }
+
+        var spot2 = findSpot();
+        var ok2 = spot2 ? g.stepTo(spot2.x, spot2.y) : null;
+        say('  选完之后朝空地走 → stepTo 返回 ' + ok2 +
+            '   位置 ' + g.px + ',' + g.py + '   回合 ' + g.turn);
+
+        var hasExit = (modalShown && cards > 0);
+        var deadlock = (blockedWhileModal === false) && !hasExit;
+        say('  判定：' + (deadlock
+              ? '!! 卡死 —— 输入被拒，而且没有任何面板或卡片可以关掉它'
+              : (hasExit ? '不卡死：当时面板开着、有 ' + cards + ' 张卡可选'
+                         : '不卡死：输入没有被拒')));
+      }
+      say('');
+      say('RESULT=OK');
+    } catch (e) {
+      say('RESULT=THREW  ' + (e && e.message ? e.message : String(e)));
+      if (e && e.stack) say('stack=' + e.stack.split('\n').slice(0, 4).join(' | '));
+    }
+    flush();
+  };
+})();
+</script>
+</body>
+</html>

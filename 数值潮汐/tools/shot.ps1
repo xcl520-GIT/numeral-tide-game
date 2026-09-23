@@ -58,8 +58,26 @@ $common = @(
   '--allow-file-access-from-files', "--user-data-dir=$prof", "--window-size=$w,$h"
 )
 
+# Kill ONLY the headless instances this project started.
+#
+# The obvious version -- Get-Process msedge | Stop-Process -Force -- is wrong
+# and destructive: it takes down EVERY Edge on the machine, including the
+# window the user happens to be reading in. That is not hypothetical, it
+# happened, and from the user's side it looks like "my browser keeps closing
+# by itself for no reason".
+#
+# So match on two things a normal browsing window can never have together:
+# the --headless flag AND our own dedicated profile directory.
+$profLeaf = Split-Path -Leaf $prof
+
 function Stop-Edge {
-  Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.CommandLine -and
+      $_.CommandLine -match '--headless' -and
+      $_.CommandLine -match [regex]::Escape($profLeaf)
+    } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   Start-Sleep -Seconds 3
 }
 
