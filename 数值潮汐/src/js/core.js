@@ -120,6 +120,48 @@
   }
 
   /* ============================================================
+     敌人姿态 —— 防御的零和重分配
+     ============================================================ */
+
+  /**
+   * 这只怪配不配拥有姿态。
+   * 三条边界，每条都有理由：
+   *   ① 双侧防御都 >= minDef —— 某侧是 0 的话，"x0.5 硬化对侧"毫无意义
+   *      （0 乘任何数还是 0），姿态会变成纯装饰。
+   *   ② 排除宝箱怪 —— 它是奖励型遭遇，不是用来教抗性的。
+   *   ③ 排除已经有固定抗性标签的敌人 —— 让"读标签"和"读姿态"各管一半敌人，
+   *      否则同一只怪身上两条线索互相削弱，玩家会两条都不信。
+   */
+  function canStance(st, arc) {
+    const S = D.STANCE;
+    if (!S) return false;
+    if (arc && arc.kind === 'treasure') return false;
+    if (num(st.defP) < S.minDef || num(st.defM) < S.minDef) return false;
+    const t = tagsOf(st, arc);
+    if (t.indexOf(D.TAGS.P) >= 0 || t.indexOf(D.TAGS.M) >= 0) return false;
+    return true;
+  }
+
+  function stanceFlip(s) { return s === 'p' ? 'm' : 'p'; }
+
+  /**
+   * 按姿态调整后的**防御视图**。
+   * 关键：返回新对象，**绝不修改 st 本身**。
+   * 直接改 st.defP 再改回来是这里最容易犯的错 —— 中途任何 return/异常
+   * 都会让防御永久留在错误值上，而且这种 bug 在模拟里只表现为
+   * "通关率莫名偏低"，几乎不可能定位。
+   */
+  function stanceDef(st, stance) {
+    const S = D.STANCE;
+    if (!stance || !S) return st;
+    const isP = (stance === 'p');
+    return {
+      defP: num(st.defP) * (isP ? S.hard : S.soft),
+      defM: num(st.defM) * (isP ? S.soft : S.hard)
+    };
+  }
+
+  /* ============================================================
      Game
      ============================================================ */
   let SEQ = 0;
@@ -695,11 +737,17 @@
       const pool = this._enemyPool(depth);
       const arc = this.rng.weighted(pool).arc;
       const st = this._scaleEnemyStats(arc, depth);
-      return {
+      const e = {
         id: ++SEQ, x: x, y: y, arc: arc, name: arc.name, kind: arc.kind || 'normal',
         stats: st, hp: st.hp, maxHp: st.hp, cd: 0, hitFlash: 0,
+        // 初始姿态随机：如果恒定从同一侧开始，玩家会背成"前 3 回合用法术"，
+        //  memorize 一个常数不等于读懂一个机制。
+        stance: canStance(st, arc) ? (this.rng.chance(0.5) ? 'p' : 'm') : null,
+        stanceT: D.STANCE.every, stanceFx: 0,
         region: this.regionAt(x, y)
       };
+      this._decideEnemy(e);          // 出生即带意图，否则第 1 回合看不见预告
+      return e;
     }
 
     _makeBoss(x, y, depth) {
@@ -710,11 +758,15 @@
       const st = {};
       for (const k in arc.stats) st[k] = k === 'leech' ? arc.stats[k] : Math.round(arc.stats[k] * mult);
       for (const key of ['penP', 'penM', 'crit', 'dodge']) if (!(key in st)) st[key] = 0;
-      return {
+      const e = {
         id: ++SEQ, x: x, y: y, arc: arc, name: arc.name, kind: 'boss',
         stats: st, hp: st.hp, maxHp: st.hp, cd: 0, hitFlash: 0, isBoss: true,
+        stance: canStance(st, arc) ? (this.rng.chance(0.5) ? 'p' : 'm') : null,
+        stanceT: D.STANCE.every, stanceFx: 0,
         region: this.regionAt(x, y)
       };
+      this._decideEnemy(e);
+      return e;
     }
 
     enemyAt(x, y) {
@@ -1359,7 +1411,8 @@
       const b = {
         name: bInfo.name, hp: B.hp, maxHp: B.maxHp || B.hp, st: B, flags: bf || {},
         dodge: num(B.dodge), isPlayer: !!bInfo.isPlayer,
-        wet: num(B.wet)          // 潮湿是挂在敌人身上的状态，结算时读这里
+        wet: num(B.wet),         // 潮湿是挂在敌人身上的状态，结算时读这里
+        stance: B.stance || null // 姿态：只重分配防御，不改变总量
       };
       const log = [];
       const roundLog = [];
@@ -1368,7 +1421,9 @@
 
       function strike(src, dst, round) {
         if (src.hp <= 0) return 0;
-        const atk = bestAttack(src.st, dst.st, K);
+        // 防守方带姿态时，用**调整后的防御视图**结算。
+        // 玩家没有姿态，stanceDef 会原样返回 st，所以这里不需要分支。
+        const atk = bestAttack(src.st, stanceDef(dst.st, dst.stance), K);
         let dmg = atk.base;
         let crit = false, dodged = false, extra = [];
         // 闪避
@@ -1487,6 +1542,7 @@
       const A = Object.assign({}, st); A.hp = this.hp; A.maxHp = st.hp;
       const B = Object.assign({}, enemy.stats); B.hp = enemy.hp; B.maxHp = enemy.maxHp;
       B.wet = enemy.wet || 0;      // 潮湿状态要带进结算
+      B.stance = enemy.stance || null;   // 姿态同理，不带上就会「看得见、打不着」
       const res = this._duel(A, B, fl, null, true,
         { name: this.cls.name, isPlayer: true }, { name: enemy.name });
       this.hp = res.aHp;
@@ -1504,6 +1560,80 @@
     }
 
     /** 敌人主动打你：只打一下（不是整场对决）。否则一步一死，太难。 */
+    /** 姿态推进：每行动 every 次切到对侧，并把"刚切过"标给渲染层。 */
+    _tickStance(e) {
+      if (!e.stance) return;
+      const S = D.STANCE;
+      if (e.stanceT === undefined) e.stanceT = S.every;
+      e.stanceT--;
+      if (e.stanceT > 0) return;
+      e.stance = stanceFlip(e.stance);
+      e.stanceT = S.every;
+      e.stanceFx = 24;                       // 渲染读它做一次强调闪光（和 hitFlash 同一套）
+      this.events.push({ kind: 'stance', enemy: e, stance: e.stance });
+    }
+
+    /**
+     * 敌人这一下大概打多少 —— 意图预告要显示的那个数。
+     *
+     * 只算**确定性**部分：攻防公式 + 残血加防。不含暴击 / 闪避的随机。
+     * 为什么不显示期望值：一旦数字里混了随机，玩家就会经常遇到
+     * "写着 23 结果挨了 44"，而意图预告的**全部价值就在于可信**。
+     * 宁可少显示一个数，也不能显示一个不准的数。
+     * 暴击 / 闪避用单独的标记提示（crit / dodge 两个布尔），不揉进数字里。
+     *
+     * 这份计算和 enemyHit() 的第 1~2 步必须逐字一致，否则数字就开始骗人 ——
+     * 改动 enemyHit 时务必同时改这里。
+     */
+    _enemyPreview(e) {
+      const st = this.stats(), fl = this.flags();
+      const atk = bestAttack(e.stats, st, this.K);
+      let dmg = atk.base;
+      if (num(fl.lastStand) > 0 && this.hp / st.hp < 0.4) dmg *= 1 / (1 + num(fl.lastStand));
+      dmg = Math.max(1, Math.round(dmg));
+      return {
+        dmg: dmg, type: atk.type,
+        crit: num(e.stats.crit) > 0,
+        dodge: (num(st.dodge) + num(fl.dodge)) > 0,
+        lethal: dmg >= this.hp
+      };
+    }
+
+    /**
+     * 为一只敌人预告它「下一手打算做什么」。
+     *
+     * 诚实边界要说清楚：预告描述的是 **"若你原地不动，它会怎么做"**。
+     * 玩家自己走开或走上去，行动当然会变 —— 而那是玩家亲手造成的、
+     * 完全可预期。真正的说谎是另一种：界面自己"预测"一遍、
+     * 执行时再决策一遍，两段逻辑漂移。所以这里算出来的 intent
+     * 就是唯一的依据来源，界面只负责显示，不负责推算。
+     *
+     * 道具型 / 姿态型是**位置无关**的，所以那两条是精确预告，不是估计。
+     */
+    _decideEnemy(e) {
+      const gated = (e.region !== undefined && e.region >= 0 &&
+                     this.regionAt(this.px, this.py) !== e.region);
+      const dist = Math.abs(e.x - this.px) + Math.abs(e.y - this.py);
+      let it;
+      if (e.stun > 0) it = { kind: 'stunned' };
+      else if (gated) it = { kind: 'idle' };
+      else if (dist <= 1) {
+        const pv = this._enemyPreview(e);
+        it = { dmg: pv.dmg, type: pv.type, crit: pv.crit, dodge: pv.dodge, lethal: pv.lethal };
+        it.kind = 'strike';
+      } else it = { kind: 'approach' };
+
+      // 顺带会发生的事：用和实际执行**同一套判断**推导，不做第二份实现。
+      // 孵化在 endTurn 里判的是 this.turn % every === 0，而那一刻 turn 已经 +1，
+      // 所以在这里要提前一格判。
+      if (e.arc && e.arc.spawn &&
+          (this.turn + 1) % e.arc.spawn.every === 0) it.spawn = true;
+      // _tickStance 是 "先减、减到 0 才切"，所以剩 1 就是"下一次行动必定切"。
+      if (e.stance && e.stanceT === 1) it.shift = stanceFlip(e.stance);
+
+      e.intent = it;
+    }
+
     enemyHit(enemy) {
       const st = this.stats();
       const fl = this.flags();
@@ -1997,6 +2127,10 @@
             this.regionAt(this.px, this.py) !== e.region) {
           continue;
         }
+        // 姿态推进。放在"确认这一轮真的要行动"之后 ——
+        // 被震晕或不在同一区的怪不消费姿态，否则玩家会看到
+        // "它明明没动，姿态却变了"，节奏线索当场断掉。
+        this._tickStance(e);
         const dist = Math.abs(e.x - this.px) + Math.abs(e.y - this.py);
         if (dist <= 1) {
           this.enemyHit(e);
@@ -2027,6 +2161,12 @@
                 const mini = D.enemyById('slime');
                 c.arc = mini; c.stats = this._scaleEnemyStats(mini, Math.max(1, this.depth - 1));
                 c.hp = c.maxHp = c.stats.hp;
+                // 换掉模板之后必须**重算姿态**。
+                // _makeEnemy 是按随机模板建的，可能抽到镜影而带上了姿态；
+                // 这里把 arc/stats 覆盖成黏液怪之后，那份姿态就变成了无主之物，
+                // 会让一只 2/2 的小怪挂着"硬化"光环、并持续制造假的姿态切换事件。
+                c.stance = canStance(c.stats, mini) ? (this.rng.chance(0.5) ? 'p' : 'm') : null;
+                c.stanceT = D.STANCE.every;
                 this.enemies.push(c);
                 this.events.push({ kind: 'spawn', enemy: c });
                 break;
@@ -2036,6 +2176,9 @@
         }
       }
       this._recomputeFOV();
+      // 意图预告：敌人全部行动完之后，为**下一回合**重算一遍预告。
+      // 必须放在敌人行动之后 —— 放在之前，玩家看到的就不是预告而是回放。
+      for (const e2 of this.enemies) this._decideEnemy(e2);
     }
 
     /**
@@ -2580,6 +2723,7 @@
     Game: Game, RNG: RNG, mulberry32: mulberry32,
     T: T, DECO: DECO, DECO_NAMES: DECO_NAMES,
     rawDamage: rawDamage, bestAttack: bestAttack, tagsOf: tagsOf, num: num,
+    canStance: canStance, stanceDef: stanceDef, stanceFlip: stanceFlip,
     WALKABLE: WALKABLE, OPAQUE: OPAQUE
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -583,6 +583,31 @@
   ];
 
   /* ============================================================
+     敌人姿态（v11.2-b）
+
+     一句话：**零和重分配**，不是加数值。
+     硬化物理 = defP x1.5 且 defM x0.5，硬化法术反之。
+     总量守恒带来一个关键性质：「选对」赚到的正好等于「选错」亏掉的，
+     所以这套机制的平均强度是 1.0 —— 它只改变**方差**，不改变难度。
+     若改成"只加不减"，那就是凭空加难度：三档基线全线漂移，还不好归因。
+
+     谁配拥有姿态：双侧防御都 >= minDef、**且没有固定抗性标签**的敌人。
+     这条边界把敌人干净地分成两类，立意很明确：
+       · 有抗性标签（石甲兽 / 幽魂 / 祷者）→ 弱点固定，靠**读标签**打
+       · 无抗性标签（镜影 / 巨兽 / 孢子母 / 首领）→ 弱点轮换，靠**读意图**打
+     两种线索各管一半敌人，玩家不会在同一只怪身上同时收到两条互相打架的提示。
+
+     镜影（defP 19 / defM 19，注释写着「没有明显弱点」）因此从最无聊的敌人
+     变成这套机制的门面 —— 它每一轮都恰好露出一个不同的破绽。
+     ============================================================ */
+  const STANCE = {
+    every: 3,      // 每行动 3 次切换一次
+    hard: 1.5,     // 硬化侧倍率
+    soft: 0.5,     // 另一侧倍率
+    minDef: 6      // 双侧防御都 >= 此值才配拥有姿态
+  };
+
+  /* ============================================================
      元进度（局外）：「潮汐结晶」与永久解锁
 
      为什么元进度要写成**数据层里的纯函数**：
@@ -809,7 +834,7 @@
     AFFIXES: AFFIXES, affixById: affixById,
     RELICS: RELICS, SCHOOLS: SCHOOLS,
   RELIC_FALLBACKS: RELIC_FALLBACKS, RELIC_FALLBACK: RELIC_FALLBACK,
-    TAGS: TAGS, THEMES: THEMES,
+    TAGS: TAGS, THEMES: THEMES, STANCE: STANCE,
     ENEMIES: ENEMIES, enemyById: enemyById, BOSSES: BOSSES,
     DIFFICULTIES: DIFFICULTIES, DIFF_ORDER: DIFF_ORDER,
     MAP: MAP, DEPTH_CFG: DEPTH_CFG, LOOT: LOOT, PROGRESSION: PROGRESSION,

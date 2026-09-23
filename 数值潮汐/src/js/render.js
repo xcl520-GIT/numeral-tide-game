@@ -580,6 +580,88 @@
       ctx.textAlign = 'left';
     }
 
+    /* —— 姿态：硬化的到底是哪一侧 ——
+       画成一圈光环，颜色直接沿用 SCHOOLS 的物理橙 / 法术紫，
+       于是玩家不需要读任何文字就知道"现在该换哪一路打"。
+       这是把核心.js 的数值事实翻译成一眼可见的形状。 */
+    if (e.stance) {
+      const col = (e.stance === 'p') ? '#ffa04d' : '#a78bfa';
+      const cx = dx + TILE / 2, cy = dy + TILE * 0.62;
+      ctx.save();
+      ctx.globalAlpha = (e.stanceFx > 0) ? 0.95 : 0.55;
+      ctx.strokeStyle = col;
+      ctx.lineWidth = (e.stanceFx > 0) ? 3 : 2;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, TILE * 0.4, TILE * 0.2, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+      if (e.stanceFx > 0) e.stanceFx--;
+    }
+
+    /* —— 意图预告：它下一手打算做什么 ——
+       敌人行动发生在"玩家做完之后"，看不见就等于随机。
+       把它变成可见信息，"等待"才第一次变成"规划"。
+       全部用 canvas 路径画、不用字形：零素材的前提下不该赌系统字体里
+       有没有那个符号，赌输了就是一个豆腐块。 */
+    if (e.intent) {
+      const it = e.intent;
+      const icx = dx + TILE / 2;
+      const icy = (e.isBoss || e.kind === 'elite') ? (by - 18) : (by - 8);
+      ctx.save();
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      if (it.kind === 'strike') {
+        const col = it.lethal ? '#ff4d4d' : '#ffab4d';
+        ctx.strokeStyle = col;
+        ctx.beginPath();
+        ctx.moveTo(icx - 4, icy - 4);
+        ctx.lineTo(icx, icy + 1);
+        ctx.lineTo(icx + 4, icy - 4);
+        ctx.stroke();
+        ctx.fillStyle = col;
+        ctx.font = 'bold 9px "Segoe UI", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(String(it.dmg), icx, icy + 11);
+        ctx.textAlign = 'left';
+        // 会暴击 / 你能闪避：单独标，不揉进数字
+        if (it.crit) { ctx.fillStyle = '#ffd166'; ctx.fillRect(icx - 12, icy - 2, 3, 3); }
+        if (it.dodge) { ctx.fillStyle = '#93c5fd'; ctx.fillRect(icx + 9, icy - 2, 3, 3); }
+      } else if (it.kind === 'approach') {
+        const ang = Math.atan2(game.py - e.y, game.px - e.x);
+        ctx.save();
+        ctx.translate(icx, icy + 1);
+        ctx.rotate(ang);
+        ctx.strokeStyle = '#9fb3e8';
+        ctx.beginPath();
+        ctx.moveTo(-3, -4);
+        ctx.lineTo(2, 0);
+        ctx.lineTo(-3, 4);
+        ctx.stroke();
+        ctx.restore();
+      } else if (it.kind === 'stunned') {
+        ctx.fillStyle = '#ffe08a';
+        ctx.beginPath(); ctx.arc(icx, icy + 1, 3, 0, Math.PI * 2); ctx.fill();
+      } else if (it.kind === 'idle') {
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = '#6b7280';
+        ctx.beginPath(); ctx.arc(icx, icy + 1, 2.5, 0, Math.PI * 2); ctx.fill();
+      }
+      // 顺带会发生的事，画在主意图两侧，不抢中间的位置
+      if (it.spawn) {
+        ctx.fillStyle = '#b06cd0';
+        ctx.beginPath(); ctx.arc(icx - 13, icy + 1, 3, 0, Math.PI * 2); ctx.fill();
+      }
+      if (it.shift) {
+        ctx.strokeStyle = (it.shift === 'p') ? '#ffa04d' : '#a78bfa';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(icx + 13, icy + 1, 3, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     // —— 状态：眩晕 / 潮湿 ——
     // 状态不画出来，玩家就只能靠"这怪怎么不动"去猜。
     // 这两个都是**能改变打法**的信息（一个告诉你它这轮白给，

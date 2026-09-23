@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>probe-stance</title></head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* ============================================================
+   探针：姿态在**完整一局**里的实际行为
+   上一版数的是"每回合活着的怪"，会被"怪物被杀光"严重偏置，
+   而且只跑了很短一段。这一版改成在**生成时**打点，覆盖整局。
+   ============================================================ */
+(function () {
+  var L = [], D = window.TideData, C = window.TideCore;
+  function pad(s, n) { s = String(s); while (s.length < n) s += ' '; return s; }
+  try {
+    var RUNS = 40;
+    var spawned = 0, spawnedStance = 0, flips = 0;
+    var byName = {}, flipsByName = {}, outcomes = {};
+    var turns = [];
+
+    for (var r = 0; r < RUNS; r++) {
+      var g = new C.Game({ classKey: 'warlord', difficulty: 'standard', seed: 1000 + r });
+      (function (game) {
+        var om = game._makeEnemy;
+        game._makeEnemy = function (x, y, d) {
+          var e = om.call(this, x, y, d);
+          spawned++;
+          if (e.stance) {
+            spawnedStance++;
+            byName[e.name] = (byName[e.name] || 0) + 1;
+          }
+          return e;
+        };
+        var ot = game._tickStance;
+        game._tickStance = function (e) {
+          var before = e.stance;
+          ot.call(this, e);
+          if (before && e.stance && before !== e.stance) {
+            flips++;
+            flipsByName[e.name] = (flipsByName[e.name] || 0) + 1;
+          }
+        };
+      })(g);
+      var res = g.playHeadless(2400);
+      outcomes[res] = (outcomes[res] || 0) + 1;
+      turns.push(g.turn);
+    }
+
+    var avgTurn = 0;
+    for (var i = 0; i < turns.length; i++) avgTurn += turns[i];
+    avgTurn = Math.round(avgTurn / turns.length);
+
+    L.push('样本 40 局 / standard / warlord');
+    L.push('  平均回合数 = ' + avgTurn + '   结局 = ' + JSON.stringify(outcomes));
+    L.push('  生成敌人总数 = ' + spawned);
+    L.push('  其中带姿态的 = ' + spawnedStance + '（' + (spawnedStance / spawned * 100).toFixed(1) + '%）');
+    L.push('  姿态切换总次数 = ' + flips);
+    L.push('  带姿态的敌人按名字: ' + JSON.stringify(byName));
+    L.push('  发生切换的按名字: ' + JSON.stringify(flipsByName));
+    L.push('');
+    L.push('  判读：');
+    L.push('   · 16% 左右带姿态 === 与深度 1 的池子权重吻合，分配正常');
+    L.push('   · 切换次数 / 带姿态敌人数 = 平均每只怪切了几次');
+    L.push('     若这个数 < 1，说明绝大多数怪在切姿态之前就被打死了 ——');
+    L.push('     这正是"一次算完整场对决"的结构后果，第 4 个提交会改变它。');
+
+    document.getElementById('out').textContent = 'STANCEDONE\n' + L.join('\n');
+  } catch (err) {
+    document.getElementById('out').textContent = 'STANCEFAIL\n' +
+      (err && err.stack ? err.stack : String(err)) + '\npartial:\n' + L.join('\n');
+  }
+})();
+</script>
+</body>
+</html>

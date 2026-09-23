@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>probe-combat</title>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* ============================================================
+   探针：姿态轮换 + 意图预告（v11.2-b）
+   ============================================================ */
+(function () {
+  var L = [];
+  var D = window.TideData, C = window.TideCore;
+  var K = D.COMBAT.K;
+
+  function pad(s, n) { s = String(s); while (s.length < n) s += ' '; return s; }
+  function num(v) { return (typeof v === 'number' && isFinite(v)) ? v : 0; }
+
+  function findEnemy(id) {
+    for (var i = 0; i < D.ENEMIES.length; i++) if (D.ENEMIES[i].id === id) return D.ENEMIES[i];
+    return null;
+  }
+
+  try {
+    L.push('=== 1 姿态资格（谁靠读标签、谁靠读姿态）===');
+    var list = D.ENEMIES.concat(D.BOSSES);
+    for (var i = 0; i < list.length; i++) {
+      var e = list[i];
+      var q = C.canStance(e.stats, e);
+      var tg = C.tagsOf(e.stats, e);
+      L.push(pad(e.name, 10) + 'canStance=' + (q ? 'YES' : 'no ') +
+        '  defP=' + pad(e.stats.defP, 4) + ' defM=' + pad(e.stats.defM, 4) + '  ' +
+        (q ? '<- 弱点轮换（读意图）'
+           : (tg.length ? '<- 弱点固定（读标签）: ' + tg.join(' ')
+                        : '<- 双防过低，不值得给姿态')));
+    }
+
+    L.push('');
+    L.push('=== 2 零和验证：两侧防御之和必须守恒 ===');
+    var mir = findEnemy('mirror');
+    var base = mir.stats.defP + mir.stats.defM;
+    ['p', 'm'].forEach(function (s) {
+      var d = C.stanceDef(mir.stats, s);
+      var sum = d.defP + d.defM;
+      L.push('  镜影 stance=' + s + ' -> defP=' + d.defP + ' defM=' + d.defM +
+        '  合计=' + sum + '（原始 ' + base + '）' +
+        (Math.abs(sum - base) < 1e-9 ? '  守恒 OK' : '  !! 不守恒'));
+    });
+
+    /* ---- 3 核心：姿态对「一次出手」的影响，以及 bestAttack 如何把它抹平 ---- */
+    L.push('');
+    L.push('=== 3 姿态 vs bestAttack：决策面到底存不存在 ===');
+    ['arcanist', 'warlord'].forEach(function (cls) {
+      var g = new C.Game({ classKey: cls, difficulty: 'standard', seed: 2026 });
+      var st = g.stats();
+      L.push('  —— 职业 ' + cls + '  atkP=' + Math.round(st.atkP) + ' penP=' + Math.round(st.penP) +
+        '  atkM=' + Math.round(st.atkM) + ' penM=' + Math.round(st.penM) + ' ——');
+      [null, 'p', 'm'].forEach(function (s) {
+        var d = C.stanceDef(mir.stats, s);
+        var pdmg = C.rawDamage(st.atkP, st.penP, d.defP, K);
+        var mdmg = C.rawDamage(st.atkM, st.penM, d.defM, K);
+        var auto = C.bestAttack(st, d, K);
+        L.push('    镜影 stance=' + pad(String(s), 5) +
+          ' 物理=' + pad(pdmg.toFixed(1), 6) + ' 法术=' + pad(mdmg.toFixed(1), 6) +
+          '   bestAttack 自动选 [' + auto.type + '] = ' + auto.base.toFixed(1));
+      });
+      // 手工选的路 vs 自动选的路，差多少
+      var dP = C.stanceDef(mir.stats, 'p'), dM = C.stanceDef(mir.stats, 'm');
+      var bestP = Math.max(C.rawDamage(st.atkP, st.penP, dP.defP, K), C.rawDamage(st.atkM, st.penM, dP.defM, K));
+      var bestM = Math.max(C.rawDamage(st.atkP, st.penP, dM.defP, K), C.rawDamage(st.atkM, st.penM, dM.defM, K));
+      var worstP = Math.min(C.rawDamage(st.atkP, st.penP, dP.defP, K), C.rawDamage(st.atkM, st.penM, dP.defM, K));
+      var worstM = Math.min(C.rawDamage(st.atkP, st.penP, dM.defP, K), C.rawDamage(st.atkM, st.penM, dM.defM, K));
+      L.push('    >> 自动选最优时，两种姿态下的输出 = ' + bestP.toFixed(1) + ' / ' + bestM.toFixed(1));
+      L.push('    >> 若强制选错一路，输出会掉到 = ' + worstP.toFixed(1) + ' / ' + worstM.toFixed(1) +
+        '  （这就是第 4 个提交要释放出来的落差）');
+    });
+
+    L.push('');
+    L.push('=== 4 意图预告 vs 实际出手（屏蔽暴击/闪避的随机后必须逐位一致）===');
+    var g2 = new C.Game({ classKey: 'warlord', difficulty: 'standard', seed: 99 });
+    var checked = 0, mismatch = 0, samples = [];
+    var origHit = g2.enemyHit;
+    g2.enemyHit = function (en) {
+      var it = en.intent;
+      var was = this.rng.chance;
+      this.rng.chance = function () { return false; };   // 屏蔽暴击/闪避
+      var dmg = origHit.call(this, en);
+      this.rng.chance = was;
+      if (it && it.kind === 'strike') {
+        checked++;
+        if (it.dmg !== dmg) {
+          mismatch++;
+          if (samples.length < 6) samples.push('    ' + en.name + ': 预告=' + it.dmg + ' 实际=' + dmg);
+        }
+      }
+      return dmg;
+    };
+    for (var t = 0; t < 400 && g2.status === 'playing'; t++) {
+      if (g2.hasPendingRelic()) { g2._autoRelic(); continue; }
+      g2._autoStep();
+    }
+    L.push('  贴脸出手样本=' + checked + '  数字不一致=' + mismatch +
+      (mismatch === 0 ? '  OK —— 预告与实际同源，没有第二份实现' : '  !! 预告在说谎'));
+    for (var s2 = 0; s2 < samples.length; s2++) L.push(samples[s2]);
+
+    L.push('');
+    L.push('=== 5 姿态在实际对局里会不会轮换 ===');
+    var g3 = new C.Game({ classKey: 'warden', difficulty: 'standard', seed: 7 });
+    var flips = 0, seen = {}, withStance = 0, spawnTotal = 0;
+    for (var t3 = 0; t3 < 600 && g3.status === 'playing'; t3++) {
+      if (g3.hasPendingRelic()) { g3._autoRelic(); continue; }
+      var before = {};
+      for (var z = 0; z < g3.enemies.length; z++) {
+        before[g3.enemies[z].id] = g3.enemies[z].stance;
+        spawnTotal++;
+        if (g3.enemies[z].stance) withStance++;
+      }
+      g3._autoStep();
+      for (var z2 = 0; z2 < g3.enemies.length; z2++) {
+        var en2 = g3.enemies[z2];
+        if (en2.stance && before[en2.id] && before[en2.id] !== en2.stance) {
+          flips++;
+          seen[en2.name] = (seen[en2.name] || 0) + 1;
+        }
+      }
+    }
+    L.push('  出现过姿态的怪 / 总怪次 = ' + withStance + ' / ' + spawnTotal);
+    L.push('  姿态切换次数=' + flips + '  涉及敌人=' + JSON.stringify(seen));
+    L.push('  注意：切换次数低是**当前结构的必然** —— fight() 一次算完整场对决，');
+    L.push('        敌人只在 endTurn 里行动一次，所以一场战斗通常只用到同一个姿态。');
+    L.push('        姿态要真正变成决策，必须等第 4 个提交把它拆成逐回合交锋。');
+
+    document.getElementById('out').textContent = 'PROBEDONE\n' + L.join('\n');
+  } catch (err) {
+    document.getElementById('out').textContent = 'PROBEFAIL\n' +
+      (err && err.stack ? err.stack : String(err)) + '\npartial:\n' + L.join('\n');
+  }
+})();
+</script>
+</body>
+</html>
