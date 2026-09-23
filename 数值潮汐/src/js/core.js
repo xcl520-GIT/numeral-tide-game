@@ -88,6 +88,21 @@
     return (p >= m) ? { base: p, type: 'p' } : { base: m, type: 'm' };
   }
 
+  /**
+   * 按**指定类型**算一次攻击，不做择优。
+   *
+   * 这是"出题不给答案"里的那一半：引擎只在玩家选定之后负责把账算准。
+   * 和 bestAttack 并列存在、共用同一个 rawDamage —— 伤害公式永远只有一份，
+   * 不会出现"择优时算一套、结算时算另一套"的漂移。
+   *
+   * 注意它**不碰真实伤害**（type 't'）：真实伤害的定义就是"不走这条公式"，
+   * 它由调用方直接扣血。这里只处理需要在物理/法术之间做选择的那部分。
+   */
+  function attackVia(st, dv, type, K) {
+    if (type === 'm') return { base: rawDamage(st.atkM, st.penM, dv.defM, K), type: 'm' };
+    return { base: rawDamage(st.atkP, st.penP, dv.defP, K), type: 'p' };
+  }
+
   /* ============================================================
      敌人标签 —— 从 stats 推导，绝不手写
 
@@ -178,6 +193,13 @@
       this.diff = D.DIFFICULTIES[dk];
       this.cls = D.classByKey(opts.classKey);
       this.K = D.COMBAT.K;
+      // AI 的"算错率"。只影响模拟器 —— 真人玩家的失误率由真人决定。
+      // 做成构造参数而不是常量，是因为平衡结论应该是"通关率 vs 失误率"的曲线，
+      // 而不是一个假装所有玩家水平相同的数字。
+      this.aiFumble = num(opts.aiFumble);
+      // 克制奖励倍率。允许覆盖，是为了把它的影响从别的改动里单独拆出来量。
+      this.counterBonus = (opts.counterBonus === undefined)
+        ? D.COMBAT.counterBonus : num(opts.counterBonus);
 
       this.seed = (opts.seed === undefined || opts.seed === null)
         ? ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0)
@@ -216,6 +238,7 @@
       this.skillUses = 0;        // 一局里放过几次魂技（平衡分析用）
       this.freeMoves = 0;        // 免费行动次数（疾影）—— 不推进潮汐，敌人也不动
       this.buffs = [];           // 临时增益（魂技），随回合递减
+      this.atkType = 'p';        // 玩家当前选定的伤害类型（HUD 上可切）
 
       this.equip = { weapon: null, helm: null, chest: null, boots: null, trinket: null };
       this.bag = [];
@@ -1434,7 +1457,11 @@
       const K = this.K, C = D.COMBAT;
       const a = {
         name: aInfo.name, hp: A.hp, maxHp: A.maxHp || A.hp, st: A, flags: af || {},
-        dodge: num(A.dodge), isPlayer: !!aInfo.isPlayer
+        dodge: num(A.dodge), isPlayer: !!aInfo.isPlayer,
+        // 必须显式搬过来。漏了它，strike 里 `src.atkType` 恒为 undefined，
+        // 手动选型会被**静默丢弃**：玩家选了法术照样按物理打，
+        // 克制奖励永不触发，而界面看不出任何异常。
+        atkType: (aInfo.atkType === 'p' || aInfo.atkType === 'm') ? aInfo.atkType : null
       };
       const b = {
         name: bInfo.name, hp: B.hp, maxHp: B.maxHp || B.hp, st: B, flags: bf || {},
@@ -1452,7 +1479,19 @@
         if (src.hp <= 0) return 0;
         // 防守方带姿态时，用**调整后的防御视图**结算。
         // 玩家没有姿态，stanceDef 会原样返回 st，所以这里不需要分支。
-        const atk = bestAttack(src.st, stanceDef(dst.st, dst.stance), K);
+        const dv = stanceDef(dst.st, dst.stance);
+        let atk, countered = false;
+        if (src.isPlayer && src.atkType) {
+          // 玩家自己选的那一路。引擎不再替他算 —— 这是本提交的核心。
+          atk = attackVia(src.st, dv, src.atkType, K);
+          // 判定"选对了没有"：用 bestAttack 当裁判，而不是自己再写一遍比较。
+          // 于是 bestAttack 从「替玩家做决定」降级为「给玩家的答案打分」——
+          // 比较逻辑只剩一份，永远不会和结算漂移。
+          countered = (bestAttack(src.st, dv, K).type === atk.type);
+        } else {
+          // 敌人没有"选择"：它按自己最强的一路打。
+          atk = bestAttack(src.st, dv, K);
+        }
         let dmg = atk.base;
         let crit = false, dodged = false, extra = [];
         // 闪避
@@ -1500,6 +1539,21 @@
         }
         dmg = Math.max(1, Math.round(dmg));
         dst.hp -= dmg;
+        // 克制奖励：选对的那一路，追加一段**真实伤害**（不走 rawDamage、无视防御）。
+        //
+        // 为什么必须是真实伤害，而不是"再多打 X 点普通伤害"：
+        //   ① 它要**看得见**。白字和橙/紫数字并排跳出来，"我读对了"的收益
+        //      才是可读的；藏进一个乘法系数里，玩家永远感觉不到自己赚了。
+        //   ② 主题上它是对的 —— 你找到了防御的缝隙，那部分伤害无从被防。
+        //      潮水不跟你讲防御。
+        // 量由 this.counterBonus 控制（模拟器可覆盖，方便把它的影响单独量出来）。
+        let counter = 0;
+        const cb = num(this.counterBonus);
+        if (countered && cb > 0) {
+          counter = Math.max(1, Math.round(dmg * cb));
+          dst.hp -= counter;
+          extra.push('克制' + counter);
+        }
         // 吸血
         let heal = 0;
         let leech = num(src.st.leech) + num(src.flags.leech || 0);
@@ -1523,7 +1577,10 @@
         roundLog.push({
           r: round, from: src.name, to: dst.name, dmg: dmg, type: atk.type,
           crit: crit, heal: heal, extra: extra.join(' '),
-          reflect: back
+          reflect: back,
+          // 克制奖励单独带字段：它是**另一笔**伤害，飘字要单独跳一个白字。
+          // 和反伤同一个道理 —— 混进 dmg 里，玩家只会以为"我这一下打出了这么多数"。
+          counter: counter
         });
         return dmg;
       }
@@ -1578,7 +1635,7 @@
     }
 
     /** 玩家主动开战（走进敌人格）：整场对决，双方都会掉血 */
-    fight(enemy) {
+    fight(enemy, atkType) {
       const st = this.stats();
       const fl = this.flags();
       const A = Object.assign({}, st); A.hp = this.hp; A.maxHp = st.hp;
@@ -1587,7 +1644,12 @@
       B.stance = enemy.stance || null;   // 姿态同理，不带上就会「看得见、打不着」
       B.tags = enemy.tags || [];            // 针对词条要在结算里读到它
       const res = this._duel(A, B, fl, null, true,
-        { name: this.cls.name, isPlayer: true }, { name: enemy.name });
+        {
+          name: this.cls.name, isPlayer: true,
+          // 没显式传就取 attackTypeFor —— 那是唯一的收口，别在别处再造一个默认值
+          atkType: atkType || this.attackTypeFor(enemy)
+        },
+        { name: enemy.name });
       this.hp = res.aHp;
       enemy.hp = res.bHp;
       enemy.hitFlash = 12;
@@ -1628,6 +1690,37 @@
      * 这份计算和 enemyHit() 的第 1~2 步必须逐字一致，否则数字就开始骗人 ——
      * 改动 enemyHit 时务必同时改这里。
      */
+    /**
+     * 开战时用哪一路伤害 —— **唯一的收口**。
+     *
+     * HUD 的手动选择、AI 的选择、以及"走路撞上敌人"的意外开战，
+     * 全部经过这里。漏掉任何一条路径，那条路径就会悄悄退回默认类型，
+     * 而玩家看到的是"我明明选了法术，它却按物理打了" —— 这种 bug
+     * 不会报错，只会让玩家觉得这游戏不讲道理。
+     */
+    attackTypeFor(enemy) {
+      if (this.headless) return this._autoAtkType(enemy);
+      return this.atkType || 'p';
+    }
+
+    /**
+     * 模拟器 AI 的伤害类型选择 —— **手动化之后唯一真正影响平衡的变量**。
+     *
+     * fumble 模拟"玩家算错了"。它必须是显式参数，而不是藏在某个写死的分支里：
+     * 因为"引擎替玩家算"和"玩家自己算"这两者的差别，对**不同水平的玩家**是
+     * 完全不同的。同一个改动，认真读面板的玩家几乎不受影响，不看面板的玩家
+     * 可能损失一半输出。所以结论不该是一个数，而应该是一条曲线。
+     *
+     * fumble = 0 时这里**不消耗任何随机数** —— 于是整局的随机流与改造前
+     * 完全一致，给出了一个可以逐位比对的干净对照组。
+     */
+    _autoAtkType(e) {
+      const best = bestAttack(this.stats(), stanceDef(e.stats, e.stance), this.K);
+      const f = num(this.aiFumble);
+      if (f > 0 && this.rng.chance(f)) return best.type === 'p' ? 'm' : 'p';
+      return best.type;
+    }
+
     _enemyPreview(e) {
       const st = this.stats(), fl = this.flags();
       const atk = bestAttack(e.stats, st, this.K);
@@ -1877,7 +1970,7 @@
       if (this.status !== 'playing' || this.hasPendingRelic()) return false;
       if (!this.walkable(x, y)) return false;
       const e = this.enemyAt(x, y);
-      if (e) { this.fight(e); if (this.status === 'playing') this._afterAction(); return true; }
+      if (e) { this.fight(e, this.attackTypeFor(e)); if (this.status === 'playing') this._afterAction(); return true; }
 
       this.px = x; this.py = y;
       this.events.push({ kind: 'step', x: x, y: y });
@@ -2326,7 +2419,9 @@
         const g = new Game({
           classKey: opts.classKey || pickClass(i),
           difficulty: opts.difficulty || 'standard',
-          seed: seed
+          seed: seed,
+          aiFumble: opts.aiFumble,
+          counterBonus: opts.counterBonus
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;
@@ -2367,6 +2462,7 @@
      * 混成一个"没通关"就分不清该调数值还是该修 bug。
      */
     playHeadless(maxTurns) {
+      this.headless = true;   // 让 attackTypeFor 走 AI 的选择
       const limit = maxTurns || 1200;
       let stall = 0;
       const trace = [];
@@ -2482,7 +2578,14 @@
 
     /** 魂技对某个敌人的实际伤害（和 _skillHit 共用，避免两处公式漂移） */
     _skillDamage(e, s) {
-      const atk = bestAttack(this.stats(), e.stats, this.K);
+      const st = this.stats();
+      const dv = stanceDef(e.stats, e.stance);
+      // 魂技的类型由**文案声明**（裂地斩=物理、潮语洪流=法术），不再自动择优。
+      // 原来这里用 bestAttack，会出现"文案写着物理、实际打出法术伤害"——
+      // 那是系统骗人：玩家照着面板做的构筑会莫名其妙失效，而且无从察觉。
+      // 没有 dtype 的技能（纯增益类）沿用择优，因为它们本来就不产生伤害。
+      const atk = s.dtype ? attackVia(st, dv, s.dtype, this.K)
+                          : bestAttack(st, dv, this.K);
       let base = atk.base;
       // 针对词条必须在这里也生效。
       // 少了这一段会出现最坏的一种不一致：秘藏写着「对召唤物 +45%」，
@@ -2660,7 +2763,7 @@
         const e = g.ref;
         if (this.enemies.indexOf(e) < 0) { this.aiGoal = null; return false; }
         if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) === 1) {
-          this.fight(e);
+          this.fight(e, this._autoAtkType(e));
           if (this.status === 'playing') this._afterAction();
           this.aiGoal = null;
           return true;
@@ -2689,7 +2792,7 @@
       // 同时又走不出去，双方互相罚站到天荒地老。
       for (const e of this.enemies) {
         if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) === 1) {
-          this.fight(e);
+          this.fight(e, this._autoAtkType(e));
           if (this.status === 'playing') this._afterAction();
           this.aiGoal = null;
           return true;

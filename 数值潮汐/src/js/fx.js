@@ -269,6 +269,12 @@
             // 反伤：单独跳一个字，挂在**挨打的那一方**头上。
             // 混在主伤害里显示的话，玩家会以为"我这一下打出了这么多数"，
             // 而实际上是两笔方向相反的账。
+            // 克制奖励：单独一个白字，紧随主伤害跳出。
+            // 它是**另一笔**伤害（真实伤害、无视防御），混进主数字里就白做了。
+            if (h.counter > 0) {
+              popText(tx + (Math.random() * 10 - 5), ty - 22 - (idx % 2) * 9,
+                h.counter, dmgColor('t', false), 14, -1.7);
+            }
             if (h.reflect > 0) {
               const rx = onEnemy ? px : ex;
               const ry = onEnemy ? py : ey;
