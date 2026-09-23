@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>probe-tags</title>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* ============================================================
+   探针：敌人标签推导 + 每层机制主题的权重倾斜
+   这两个都是「内容正确性」，202 项冒烟测不出来（它只测功能不测数值语义）。
+
+   验证两件事：
+     ① 标签是否与 data.js 里的设计意图一致（对照 ENEMIES[].note）
+     ② 主题加权是否真的把本层主打标签推到了前台，且没有误伤其它层
+   命令行：
+     powershell -File tools\run_page.ps1 -url "<...>/tools/probe_tags.html" -dumpRaw
+   ============================================================ */
+(function () {
+  var L = [];
+  try {
+    var D = window.TideData, C = window.TideCore;
+
+    L.push('=== ① 标签推导（对照 note 里的设计意图）===');
+    for (var i = 0; i < D.ENEMIES.length; i++) {
+      var e = D.ENEMIES[i];
+      var tg = C.tagsOf(e.stats, e);
+      L.push(
+        pad(e.name, 8) +
+        ' defP=' + pad(String(e.stats.defP), 4) +
+        ' defM=' + pad(String(e.stats.defM), 4) +
+        ' atkP=' + pad(String(e.stats.atkP || 0), 4) +
+        ' atkM=' + pad(String(e.stats.atkM || 0), 4) +
+        ' leech=' + pad(String(e.stats.leech || 0), 5) +
+        ' kind=' + pad(e.kind, 9) +
+        ' tags=[' + tg.join(' ') + ']');
+    }
+    L.push('');
+    L.push('--- Boss ---');
+    for (var b = 0; b < D.BOSSES.length; b++) {
+      var bo = D.BOSSES[b];
+      L.push(pad(bo.name, 10) + ' tags=[' + C.tagsOf(bo.stats, bo).join(' ') + ']');
+    }
+
+    L.push('');
+    L.push('=== ② 每层主题 ===');
+    for (var dep = 1; dep <= 6; dep++) {
+      var g = new C.Game({ classKey: 'warlord', difficulty: 'standard', seed: 7 });
+      var th = g.themeAt(dep);
+      L.push('depth ' + dep + ' -> ' + (th ? (th.name + '  主打[' + th.tag + ']  x' + th.mul) : '（无主题）'));
+    }
+
+    L.push('');
+    L.push('=== ③ 各层敌人权重（主题是否生效）===');
+    for (var d2 = 1; d2 <= 5; d2++) {
+      var g2 = new C.Game({ classKey: 'warlord', difficulty: 'standard', seed: 7 });
+      var pool = g2._enemyPool(d2);
+      var tot = 0;
+      for (var k = 0; k < pool.length; k++) tot += pool[k].weight;
+      var parts = [];
+      for (var k2 = 0; k2 < pool.length; k2++) {
+        if (pool[k2].weight <= 0) continue;
+        var pct = (pool[k2].weight / tot * 100);
+        parts.push(pool[k2].arc.name + ' ' + pct.toFixed(1) + '%');
+      }
+      var th2 = g2.themeAt(d2);
+      L.push('--- depth ' + d2 + ' [' + (th2 ? th2.name : '无') + '] ' + parts.join('  '));
+    }
+
+    document.getElementById('out').textContent = 'PROBEDONE\n' + L.join('\n');
+  } catch (e) {
+    document.getElementById('out').textContent = 'PROBEFAIL\n' + (e && e.stack ? e.stack : String(e)) +
+      '\npartial:\n' + L.join('\n');
+  }
+
+  function pad(s, n) {
+    s = String(s);
+    while (s.length < n) s += ' ';
+    return s;
+  }
+})();
+</script>
+</body>
+</html>

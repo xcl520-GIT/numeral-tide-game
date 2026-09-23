@@ -89,6 +89,37 @@
   }
 
   /* ============================================================
+     敌人标签 —— 从 stats 推导，绝不手写
+
+     这不是新设定，是把本来就在数据里、却没人看得见的事实命名出来：
+     data.js 的 ENEMIES[brute].note 写着「物防极高、法防为零 —— 该换法术打」，
+     那句话一直躺在源码里，玩家永远读不到。
+
+     为什么抗性必须按**比例**判定、而不是设绝对阈值：
+     _scaleEnemyStats() 给 defP / defM 乘的是同一个系数，
+     所以两者的比例关系不随深度变化，而绝对值会整体膨胀。
+     若用绝对阈值，第 3 层之后所有敌人都被标成"高物抗"，标签当场开始撒谎。
+     ============================================================ */
+  function tagsOf(st, arc) {
+    const t = [];
+    const p = num(st.defP), m = num(st.defM);
+    if (p > 0 && m > 0) {
+      if (p >= m * 1.8) t.push(D.TAGS.P);
+      else if (m >= p * 1.8) t.push(D.TAGS.M);
+    } else if (p > 0) t.push(D.TAGS.P);
+    else if (m > 0) t.push(D.TAGS.M);
+    // 「法术」：只会用法术打人 —— 它决定反击时走哪一路
+    if (num(st.atkM) > 0 && num(st.atkP) <= 0) t.push(D.TAGS.SPELL);
+    if (num(st.leech) > 0) t.push(D.TAGS.LEECH);
+    if (arc) {
+      if (arc.spawn) t.push(D.TAGS.SUMMON);        // 行为型：只能从模板读，它不是数值
+      if (arc.kind === 'elite') t.push(D.TAGS.ELITE);
+      if (arc.kind === 'boss') t.push(D.TAGS.BOSS);
+    }
+    return t;
+  }
+
+  /* ============================================================
      Game
      ============================================================ */
   let SEQ = 0;
@@ -577,9 +608,23 @@
     /* ============================================================
        敌人
        ============================================================ */
+
+    /**
+     * 当前层的机制主题。
+     * 层数超出主题表定义范围时沿用最后一个 —— 无尽模式靠这条兜底，
+     * 而不是让第 6 层之后突然失去身份。
+     */
+    themeAt(depth) {
+      const T = D.THEMES;
+      if (!T || T.length < 2) return null;
+      const i = Math.min(depth, T.length - 1);
+      return (i >= 1) ? T[i] : null;
+    }
+
     _enemyPool(depth) {
       const pool = [];
       const tb = num(this.diff.tierBoost);
+      const theme = this.themeAt(depth);
       for (const e of D.ENEMIES) {
         let w = e.weight;
         // 精英权重随深度上升；深渊额外加成，让"石甲兽 + 幽魂"这种
@@ -587,6 +632,13 @@
         if (e.tier >= 2) w *= (1 + (depth - 1) * 0.34 + tb * 0.5 * (e.tier - 1));
         if (e.tier >= 3) w *= (1 + (depth - 1) * 0.30);
         if (e.tier === 1 && depth > 3) w *= 0.6;
+        // 机制主题：给本层主打的标签加权。
+        // 宝箱怪被排除 —— 它是**奖励型遭遇**（loot.chance 1.0），
+        // 被主题放大等于悄悄改变掉落经济，而它本来就不是用来教抗性的。
+        if (theme && e.kind !== 'treasure' &&
+            tagsOf(e.stats, e).indexOf(theme.tag) >= 0) {
+          w *= theme.mul;
+        }
         pool.push({ arc: e, weight: w });
       }
       return pool;
@@ -2527,7 +2579,7 @@
   global.TideCore = {
     Game: Game, RNG: RNG, mulberry32: mulberry32,
     T: T, DECO: DECO, DECO_NAMES: DECO_NAMES,
-    rawDamage: rawDamage, bestAttack: bestAttack, num: num,
+    rawDamage: rawDamage, bestAttack: bestAttack, tagsOf: tagsOf, num: num,
     WALKABLE: WALKABLE, OPAQUE: OPAQUE
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -533,6 +533,56 @@
   };
 
   /* ============================================================
+     敌人标签 —— 给玩家看的「决策依据」
+
+     ★ 设计取舍：属性型标签（高物抗 / 高法抗 / 法术 / 汲血）由 core.js 的
+       tagsOf() 从 stats **推导**，这里只定义**名字**。
+       为什么不手写：标签是玩家据以做决策的信息，一旦它和实际结算不一致，
+       那就是"系统骗人"，比没有标签更糟。而 stats 会被 _scaleEnemyStats()
+       按深度整体放大 —— 手写的抗性标签迟早和缩放后的真实数值脱节。
+
+       行为型标签（召唤 / 精英 / 首领）推导不出来，因为它是行为不是数值，
+       由 core.js 从 arc（敌人模板）上读，同样不在这里手写。
+     ============================================================ */
+  const TAGS = {
+    P: '高物抗',
+    M: '高法抗',
+    SPELL: '法术',
+    SUMMON: '召唤',
+    LEECH: '汲血',
+    ELITE: '精英',
+    BOSS: '首领',
+    SWARM: '群居'
+  };
+
+  /* ============================================================
+     每层机制主题 —— 让「层」有身份，而不是随机杂糅
+
+     取向是**权重倾斜**，不是池子限定。限定（"第 1 层只出石甲兽和幽魂"）
+     会让每层反而更单调、而且一眼看穿；倾斜是"这一层石甲兽明显多一些"，
+     玩家自己发现规律 —— 这是教学，不是说明书。
+
+     另一条边界：主题只**激活已有内容**，不新增任何敌人。
+     石甲兽（defP 26 / defM 0）和幽魂（defP 0 / defM 28）本来就在池子里，
+     它们存在的唯一意义就是逼玩家换伤害类型；但原版精英权重只有杂兵的一半，
+     再加上 bestAttack 替玩家自动择优，这份设计从来没有被真正用起来。
+     主题做的只是把已经写好的东西推到前台。
+     ============================================================ */
+  const THEMES = [
+    null,                                              // 索引 0 占位：层数从 1 开始
+    { key: 'bedrock', name: '岩床',   tag: TAGS.P,      mul: 2.2,
+      blurb: '甲壳越来越厚 —— 试试别用物理' },
+    { key: 'veil',    name: '帷幕',   tag: TAGS.M,      mul: 2.2,
+      blurb: '法术在回声里打转 —— 试试别用法术' },
+    { key: 'brood',   name: '孵化场', tag: TAGS.SUMMON, mul: 3.0,
+      blurb: '有什么在不停地产卵 —— 拖下去会被围死' },
+    { key: 'mirror',  name: '镜域',   tag: TAGS.ELITE,  mul: 1.7,
+      blurb: '每一只都难缠 —— 挑软的打，或者先变强' },
+    { key: 'maw',     name: '深渊口', tag: TAGS.LEECH,  mul: 1.8,
+      blurb: '它们靠你的血活着 —— 速战，别拖' }
+  ];
+
+  /* ============================================================
      元进度（局外）：「潮汐结晶」与永久解锁
 
      为什么元进度要写成**数据层里的纯函数**：
@@ -759,6 +809,7 @@
     AFFIXES: AFFIXES, affixById: affixById,
     RELICS: RELICS, SCHOOLS: SCHOOLS,
   RELIC_FALLBACKS: RELIC_FALLBACKS, RELIC_FALLBACK: RELIC_FALLBACK,
+    TAGS: TAGS, THEMES: THEMES,
     ENEMIES: ENEMIES, enemyById: enemyById, BOSSES: BOSSES,
     DIFFICULTIES: DIFFICULTIES, DIFF_ORDER: DIFF_ORDER,
     MAP: MAP, DEPTH_CFG: DEPTH_CFG, LOOT: LOOT, PROGRESSION: PROGRESSION,
