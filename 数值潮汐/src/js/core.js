@@ -1452,15 +1452,43 @@
        战斗结算
        一次算完整场。返回每轮的明细，供飘字与日志使用。
        ============================================================ */
+    /* ============================================================
+       可中断的对决（v11.2-m）
+
+       改造前：_duel 是一个 while 循环，一口气算完整场，再把 res.log 交给界面。
+       界面只能**回放** —— 玩家看得见谁先出手，但中间没有任何一个时刻
+       能改变什么。那不是"打仗"，是"看结算"。
+
+       现在把"算一轮"从"算一场"里拆出来：
+
+         newDuel(...)            建一场，返回一个可以逐轮推进的句柄
+         duel.step(玩家选的路)    推进**一轮**
+         duel.runAuto(pick)      循环 step，直到分出胜负
+
+       于是 fight()（无头模拟、冒烟里的伤害数学、所有非交互路径）与战斗界面
+       走的是**同一个 step** —— 界面只是把 pick 换成了人在点按钮。
+       这条是硬要求：复刻一份核心逻辑已经踩过一次坑，两份实现一旦漂移，
+       平衡数据全是假的，而且很久都不会有人发现。
+
+       为什么玩家每**轮**只做一次选择、而不是每次出手都选：
+       速度碾压和连击词条会给同一方追加出手。那几次追加用的是同一套属性、
+       是同一个决定的延续，不是新的决定。逐次问一遍就是假决策 ——
+       玩家会发现自己只是在重复点同一个按钮。
+
+       为什么这里**不**结算伤害类型以外的东西：
+       选定哪一路伤害，是"读敌人姿态 / 读双防"这件事的全部回报。
+       魂技、撤离属于别的机制，要各自单独定价（见提交信息里的边界说明）。
+       ============================================================ */
     /**
+     * 建一场可中断的对决。
      * @param {object} A 攻方面板（含 hp/maxHp）
      * @param {object} B 守方面板
      * @param {object} af A 的 flags
      * @param {boolean} aFirst 平手时 A 是否先手
-     * @param {object} aInfo {name, isPlayer}
+     * @param {object} aInfo {name, isPlayer, atkType}
      */
-    _duel(A, B, af, bf, aFirst, aInfo, bInfo) {
-      const K = this.K, C = D.COMBAT;
+    newDuel(A, B, af, bf, aFirst, aInfo, bInfo) {
+      const g = this, K = this.K, C = D.COMBAT;
       const a = {
         name: aInfo.name, hp: A.hp, maxHp: A.maxHp || A.hp, st: A, flags: af || {},
         dodge: num(A.dodge), isPlayer: !!aInfo.isPlayer,
@@ -1476,20 +1504,26 @@
         stance: B.stance || null, // 姿态：只重分配防御，不改变总量
         tags: B.tags || []       // 针对词条要判定的目标标签
       };
-      const log = [];
       const roundLog = [];
+      // 先手权：速度高者先手；平手看参数。整场只判一次 ——
+      // 中途重判会让"谁先手"随回合漂移，而意图预告是按当前顺序推出来的，
+      // 漂移就等于预告在说谎。
+      const order = (num(a.st.spd) === num(b.st.spd) ? !!aFirst : num(a.st.spd) > num(b.st.spd))
+        ? [a, b] : [b, a];
+      let round = 0, capped = false, finished = false;
 
       function atkOf(x) { return bestAttack(x.st, x === a ? b.st : a.st, K); }
 
-      function strike(src, dst, round) {
+      function strike(src, dst, atkType) {
         if (src.hp <= 0) return 0;
         // 防守方带姿态时，用**调整后的防御视图**结算。
         // 玩家没有姿态，stanceDef 会原样返回 st，所以这里不需要分支。
         const dv = stanceDef(dst.st, dst.stance);
         let atk, countered = false;
-        if (src.isPlayer && src.atkType) {
-          // 玩家自己选的那一路。引擎不再替他算 —— 这是本提交的核心。
-          atk = attackVia(src.st, dv, src.atkType, K);
+        if (src.isPlayer && atkType) {
+          // 玩家自己选的那一路，由调用方逐轮传进来（界面上就是那个按钮）。
+          // 引擎不再替他算 —— 这是本次改动的地基。
+          atk = attackVia(src.st, dv, atkType, K);
           // 判定"选对了没有"：用 bestAttack 当裁判，而不是自己再写一遍比较。
           // 于是 bestAttack 从「替玩家做决定」降级为「给玩家的答案打分」——
           // 比较逻辑只剩一份，永远不会和结算漂移。
@@ -1502,7 +1536,7 @@
         let crit = false, dodged = false, extra = [];
         // 闪避
         const dg = num(dst.dodge) + num(dst.flags.dodge);
-        if (dg > 0 && this.rng.chance(Math.min(0.7, dg))) {
+        if (dg > 0 && g.rng.chance(Math.min(0.7, dg))) {
           dodged = true; dmg = 0;
           roundLog.push({ r: round, from: src.name, to: dst.name, dmg: 0, type: atk.type, dodge: true });
           return 0;
@@ -1514,7 +1548,7 @@
         if (num(src.flags.execute) > 0 && dst.hp / dst.maxHp < 0.32) {
           dmg *= (1 + num(src.flags.execute)); extra.push('处决');
         }
-        if (num(src.flags.echo) > 0 && atk.type === 'm' && this.rng.chance(num(src.flags.echo))) {
+        if (num(src.flags.echo) > 0 && atk.type === 'm' && g.rng.chance(num(src.flags.echo))) {
           dmg *= 2; extra.push('回响');
         }
         // 潮湿：法术伤害加成 —— 潮语洪流留下的破绽，要在这里兑现
@@ -1536,7 +1570,7 @@
         }
         // 暴击
         const critChance = num(src.st.crit);
-        if (critChance > 0 && this.rng.chance(Math.min(0.85, critChance))) {
+        if (critChance > 0 && g.rng.chance(Math.min(0.85, critChance))) {
           dmg *= C.critMul; crit = true;
         }
         // 残血加防
@@ -1554,7 +1588,7 @@
         //      潮水不跟你讲防御。
         // 量由 this.counterBonus 控制（模拟器可覆盖，方便把它的影响单独量出来）。
         let counter = 0;
-        const cb = num(this.counterBonus);
+        const cb = num(g.counterBonus);
         if (countered && cb > 0) {
           counter = Math.max(1, Math.round(dmg * cb));
           dst.hp -= counter;
@@ -1591,30 +1625,9 @@
         return dmg;
       }
 
-      // 先手权：速度高者先手；平手看参数
-      let aFirstTurn = num(a.st.spd) === num(b.st.spd) ? !!aFirst : num(a.st.spd) > num(b.st.spd);
-      let rounds = 0;
-      while (a.hp > 0 && b.hp > 0 && rounds < C.maxRounds) {
-        rounds++;
-        const order = aFirstTurn ? [a, b] : [b, a];
-        for (const src of order) {
-          if (src.hp <= 0) continue;
-          const dst = src === a ? b : a;
-          strike.call(this, src, dst, rounds);
-          if (dst.hp <= 0) break;
-          // 速度碾压：快的一方多打一次
-          const gap = num(src.st.spd) - num(dst.st.spd);
-          if (gap >= C.speedGap && src.hp > 0 && dst.hp > 0) {
-            strike.call(this, src, dst, rounds);
-          }
-          // 连击词条：达标就每轮两次
-          if (num(src.flags.doubleAtSpd) > 0 && num(src.st.spd) >= num(src.flags.doubleAtSpd) &&
-              src.hp > 0 && dst.hp > 0) {
-            strike.call(this, src, dst, rounds);
-          }
-        }
-      }
       /**
+       * 回合上限的收场判定。
+       *
        * 回合上限必须给出一个确定结果。
        *
        * 之前这里只是"停下来，谁也没死"。后果是：吸血型敌人
@@ -1627,21 +1640,96 @@
        * 于是"能不能打赢"重新变成一个可以判断的问题 ——
        * 如果你在僵持中掉血更快，那这场本来就不该打。
        */
-      let capped = false;
-      if (a.hp > 0 && b.hp > 0) {
+      function capOut() {
         capped = true;
-        const af = a.hp / a.maxHp, bf = b.hp / b.maxHp;
-        if (af <= bf) a.hp = 0; else b.hp = 0;
+        const ra = a.hp / a.maxHp, rb = b.hp / b.maxHp;
+        if (ra <= rb) a.hp = 0; else b.hp = 0;
       }
-      return {
-        aHp: Math.max(0, Math.round(a.hp)), bHp: Math.max(0, Math.round(b.hp)),
-        rounds: rounds, aWin: b.hp <= 0 && a.hp > 0, dead: a.hp <= 0,
-        capped: capped, log: roundLog
+
+      const duel = {
+        a: a, b: b, order: order, log: roundLog,
+        /** 谁是玩家 —— 界面据此决定给哪一边开指令菜单。 */
+        player: a.isPlayer ? a : (b.isPlayer ? b : null),
+        /** 这一轮谁先出手。玩家比敌人慢时，界面要先把对方那一手演完。 */
+        firstActor: order[0],
+        get round() { return round; },
+        get finished() { return finished; },
+        get capped() { return capped; },
+
+        /**
+         * 推进**一轮**，返回这一轮新增的明细（供演出逐条播）。
+         * @param {string} playerType 玩家这一轮选的路（'p' / 'm'）；
+         *   不传或不是这两个值 = 让引擎按最优打（敌人一直如此，非交互路径也如此）。
+         */
+        step(playerType) {
+          if (finished) return [];
+          const from = roundLog.length;
+          round++;
+          for (let i = 0; i < order.length; i++) {
+            const src = order[i];
+            if (src.hp <= 0) continue;
+            const dst = src === a ? b : a;
+            // 选的那一路只作用在**本轮的玩家出手**上（含下面的追加击）。
+            const t = (src.isPlayer && (playerType === 'p' || playerType === 'm'))
+              ? playerType : null;
+            strike(src, dst, t);
+            if (dst.hp <= 0) break;
+            // 速度碾压：快的一方多打一次
+            const gap = num(src.st.spd) - num(dst.st.spd);
+            if (gap >= C.speedGap && src.hp > 0 && dst.hp > 0) strike(src, dst, t);
+            // 连击词条：达标就每轮两次
+            if (num(src.flags.doubleAtSpd) > 0 && num(src.st.spd) >= num(src.flags.doubleAtSpd) &&
+                src.hp > 0 && dst.hp > 0) strike(src, dst, t);
+          }
+          if (a.hp <= 0 || b.hp <= 0) finished = true;
+          else if (round >= C.maxRounds) { capOut(); finished = true; }
+          return roundLog.slice(from);
+        },
+
+        /**
+         * 一口气跑完（无头模拟、冒烟、以及"不需要玩家选择"的路径）。
+         * pick(duel) 在每一轮开始前被问一次；返回 null = 让引擎按最优打。
+         */
+        runAuto(pick) {
+          // 必须写成 duel.step —— step 是**对象的方法**，不是闭包函数。
+          // 写成裸 step(...) 会解析到外层作用域，运行时报 "step is not defined"。
+          while (!finished) duel.step(pick ? pick(duel) : null);
+        },
+
+        result() {
+          return {
+            aHp: Math.max(0, Math.round(a.hp)), bHp: Math.max(0, Math.round(b.hp)),
+            rounds: round, aWin: b.hp <= 0 && a.hp > 0, dead: a.hp <= 0,
+            capped: capped, log: roundLog
+          };
+        }
       };
+      return duel;
     }
 
-    /** 玩家主动开战（走进敌人格）：整场对决，双方都会掉血 */
-    fight(enemy, atkType) {
+    /**
+     * 一次性算完整场。返回每轮的明细，供飘字与日志使用。
+     *
+     * 现在它只是 newDuel + runAuto 的一层壳 —— 规则仍然只有一份。
+     * aInfo.atkType 是「开战前就定死的那一路」：冒烟里的伤害数学、
+     * 无头模拟器的旧策略都走这条。逐回合选型不经过这里。
+     */
+    _duel(A, B, af, bf, aFirst, aInfo, bInfo) {
+      const fixed = (aInfo.atkType === 'p' || aInfo.atkType === 'm') ? aInfo.atkType : null;
+      const d = this.newDuel(A, B, af, bf, aFirst, aInfo, bInfo);
+      d.runAuto(function () { return fixed; });
+      return d.result();
+    }
+
+    /**
+     * 开局：把面板快照搬进对决，但**不结算**。
+     *
+     * 拆出这一层是为了让"进入战斗"和"战斗结束"可以发生在两个不同的时刻。
+     * 逐回合模式下这两件事之间隔着玩家的每一次点击；一键模式下它们紧挨着。
+     * 无论哪种，写回模型的动作都只有 _fightSettle 一处 —— 免得某条路径漏写
+     * this.hp / enemy.hp，出现"界面显示已经打死了、模型里它还在"的鬼故事。
+     */
+    _fightBegin(enemy, atkType) {
       const st = this.stats();
       const fl = this.flags();
       const hp0 = this.hp, ehp0 = enemy.hp;   // 战斗场景回放要用它推血条
@@ -1650,13 +1738,30 @@
       B.wet = enemy.wet || 0;      // 潮湿状态要带进结算
       B.stance = enemy.stance || null;   // 姿态同理，不带上就会「看得见、打不着」
       B.tags = enemy.tags || [];            // 针对词条要在结算里读到它
-      const res = this._duel(A, B, fl, null, true,
-        {
-          name: this.cls.name, isPlayer: true,
-          // 没显式传就取 attackTypeFor —— 那是唯一的收口，别在别处再造一个默认值
-          atkType: atkType || this.attackTypeFor(enemy)
-        },
+      // 没显式传就取 attackTypeFor —— 那是唯一的收口，别在别处再造一个默认值。
+      // 必须在建对决之前算出来：无头模式下它会消耗随机数，
+      // 而随机流的位置一旦挪动，"重构零影响"的逐位比对就失去了意义。
+      const resolved = (atkType === 'p' || atkType === 'm') ? atkType : this.attackTypeFor(enemy);
+      const duel = this.newDuel(A, B, fl, null, true,
+        { name: this.cls.name, isPlayer: true, atkType: resolved },
         { name: enemy.name });
+      // 刻意**不**把句柄挂在 this 上。无头模拟每局要开 34 场战斗，
+      // 而给 Game 实例新增一个字段会让它的隐藏类发生迁移 ——
+      // playHeadless 里所有指向旧 map 的内联缓存随之全部重建。
+      // 实测的后果非常反直觉：战斗本身只占整局的 1.5%，
+      // 整局却因此慢了 3 倍（741ms → 2149ms，n=20）。
+      // 句柄由调用方持有：一键路径直接往下传，逐回合路径才显式存起来。
+      return { enemy: enemy, duel: duel, hp0: hp0, ehp0: ehp0, atkType: resolved };
+    }
+
+    /**
+     * 收尾：把对决的结果写回模型，并推出那个"战斗已发生"的事件。
+     * 只在这里改 this.hp / enemy.hp —— 状态源只有一个。
+     */
+    _fightSettle(L) {
+      if (!L) return null;
+      const enemy = L.enemy;
+      const res = L.duel.result();
       this.hp = res.aHp;
       enemy.hp = res.bHp;
       enemy.hitFlash = 12;
@@ -1665,7 +1770,7 @@
         // 起始血量。让界面自己从结束血量倒推也能work，但那样血条会在
         // 「克制奖励 / 反伤 / 吸血」这些额外项上和真实值慢慢漂开 ——
         // 边界一多就一定会错，而且错得很隐蔽（血条看起来一直在动）。
-        aHp0: hp0, bHp0: ehp0
+        aHp0: L.hp0, bHp0: L.ehp0
       };
       this.events.push(ev);
       if (res.capped) this._log('与 ' + enemy.name + '僵持不下 —— 先撑不住的一方倒下了。', 'warn');
@@ -1675,6 +1780,21 @@
       }
       if (res.dead) { this._die(enemy.name); return { win: false, died: true, rounds: res.log }; }
       return { win: false, died: false, rounds: res.log };
+    }
+
+    /**
+     * 玩家主动开战（走进敌人格）——**一键打完**的版本。
+     *
+     * 逐回合模式下这条路径不会被走到（stepTo 会改走 _fightBegin +
+     * 战斗界面驱动），但无头模拟、冒烟里的直接调用、以及将来任何
+     * "不需要人做决定"的场景都靠它。让它们共用 _fightSettle，
+     * 就不会出现"模拟里赢了、游戏里没赢"的分叉。
+     */
+    fight(enemy, atkType) {
+      const L = this._fightBegin(enemy, atkType);
+      const fixed = L.atkType;
+      L.duel.runAuto(function () { return fixed; });
+      return this._fightSettle(L);
     }
 
     /** 敌人主动打你：只打一下（不是整场对决）。否则一步一死，太难。 */

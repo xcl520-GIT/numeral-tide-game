@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>bench-sim</title>
+<style>body{background:#0a0e18;color:#ccd6e6;font:13px Consolas,monospace}pre{padding:12px}</style>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* 只量 simulate —— 不带任何前置热身，避免测出来的差异来自 JIT 状态而不是代码。
+   同时统计 newDuel / fight 的调用次数：如果"每局对战次数"远小于
+   "每局多出来的耗时 / 单次对战开销"，那回归就不可能出在战斗里。 */
+(function () {
+  var lines = ['BENCHSIM'];
+  var nNew = 0, nFight = 0, nStrike = 0;
+  var P = TideCore.Game.prototype;
+  try {
+    if (P.newDuel) {
+      var oNew = P.newDuel;
+      P.newDuel = function () { nNew++; return oNew.apply(this, arguments); };
+    }
+    var oFight = P.fight;
+    P.fight = function () { nFight++; return oFight.apply(this, arguments); };
+
+    var t0 = performance.now();
+    var r = TideCore.Game.simulate(20, { difficulty: 'standard', seedBase: 1000, maxTurns: 2400 });
+    var ms = performance.now() - t0;
+    lines.push('simulate n=20 standard = ' + Math.round(ms) + 'ms   win=' + r.winRate + '%');
+    lines.push('newDuel calls = ' + nNew + '   fight calls = ' + nFight +
+      '   (per game: ' + Math.round(nNew / 20 * 10) / 10 + ' / ' + Math.round(nFight / 20 * 10) / 10 + ')');
+    lines.push('total turns = ' + Math.round(r.turns * 20) + '   (per game ' + r.turns + ')');
+  } catch (e) {
+    lines.push('ERR ' + (e && e.stack ? e.stack : e));
+  }
+  document.getElementById('out').textContent = 'BENCHSIMDONE\n' + lines.join('\n');
+})();
+</script>
+</body>
+</html>
