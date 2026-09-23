@@ -756,15 +756,38 @@ html, body {
 }
 .ei-s { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
 .ei-s b { margin-left: auto; font-family: var(--mono); color: var(--text); }
-.ei-verdict { font-size: 11px; line-height: 1.5; padding: 4px 7px; border-radius: 4px; }
-.ei-verdict.p { color: #ffc78f; background: rgba(255,160,77,0.10); border-left: 2px solid #ffa04d; }
-.ei-verdict.m { color: #c9aaff; background: rgba(167,139,250,0.10); border-left: 2px solid #a78bfa; }
-.ei-verdict b { font-family: var(--mono); font-size: 13px; }
-.ei-cost { font-size: 11px; margin-top: 5px; }
-.ei-cost b { font-family: var(--mono); }
-.ei-cost.ok { color: #8fd8a0; }
-.ei-cost.warn { color: #e0c06a; }
-.ei-cost.bad { color: #e0727a; }
+/* 标签：由 core 的 tagsOf() 从 stats 推导，永远和结算一致 */
+.ei-tags { display: flex; flex-wrap: wrap; gap: 4px; margin: 5px 0 4px; }
+.ei-tag {
+  font-size: 10px; padding: 1px 6px; border-radius: 8px;
+  color: #cbb994; background: rgba(203,185,148,0.12);
+  border: 1px solid rgba(203,185,148,0.25);
+}
+/* 姿态行：配色沿用物理橙 / 法术紫（和飘字、HUD 开关同一套语义） */
+.ei-stance {
+  font-size: 10px; line-height: 1.5; margin: 5px 0 4px; padding: 3px 7px;
+  border-radius: 4px;
+}
+.ei-stance.p { color: #ffc78f; background: rgba(255,160,77,0.10); border-left: 2px solid #ffa04d; }
+.ei-stance.m { color: #c9aaff; background: rgba(167,139,250,0.10); border-left: 2px solid #a78bfa; }
+/* 入参对照表。五列：名称 / 攻击 / 穿透 / 对方防御 / 有效防御。
+   刻意**不给**"每轮伤害"或"几轮击杀"—— 那些是答案。
+   等宽字体是必需的：这五列要能上下对齐着看，否则比较就回到了逐个读数字。 */
+.ei-calc { margin-top: 5px; border-top: 1px solid rgba(120,140,180,0.22); padding-top: 5px; }
+.ei-calc-h, .ei-calc-r {
+  display: grid; grid-template-columns: 44px 1fr 1fr 1.5fr 1fr;
+  gap: 3px; align-items: baseline; font-size: 11px;
+}
+.ei-calc-h { color: var(--muted); font-size: 9.5px; letter-spacing: 0.05em; }
+.ei-calc-r b { font-family: var(--mono); text-align: right; color: var(--text); font-weight: 400; }
+.ei-calc-r span { color: var(--muted); }
+.ei-calc-r em {
+  font-style: normal; font-size: 9px; color: var(--muted);
+  margin-left: 3px; opacity: 0.8;
+}
+.ei-calc-r.p span { color: #ffc07a; }
+.ei-calc-r.m span { color: #c9b0ff; }
+.ei-calc-r b.eff { color: #9fe6f2; font-weight: 700; }
 .ei-warn { font-size: 10px; color: #e08ad0; margin-top: 4px; }
 
 #toast {

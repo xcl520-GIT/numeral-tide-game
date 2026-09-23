@@ -1203,20 +1203,21 @@
     if (hoveredEnemy === e) { placeEnemyInfo(el, ev); return; }
     hoveredEnemy = e;
     const st = game.stats();
-    const K = D.COMBAT.K;
-    const dp = C.rawDamage(st.atkP, st.penP, e.stats.defP, K);
-    const dm = C.rawDamage(st.atkM, st.penM, e.stats.defM, K);
-    const useMagic = dm > dp;
-    const mine = Math.max(dp, dm);
-    const theirs = Math.max(
-      C.rawDamage(e.stats.atkP, e.stats.penP, st.defP, K),
-      C.rawDamage(e.stats.atkM, e.stats.penM, st.defM, K));
-    const myRounds = mine > 0 ? Math.ceil(e.hp / mine) : 99;
-    const cost = Math.round(Math.min(myRounds, theirs > 0 ? Math.ceil(st.hp / theirs) : 99) * theirs);
+    // 姿态会改变防御，这里必须算进去。
+    // 原实现直接用 e.stats.defP，所以敌人硬化时它给出的"建议"是**错的** ——
+    // 面板说该打法术，实际物理更疼。一个会撒谎的面板比没有面板更糟。
+    const dv = C.stanceDef(e.stats, e.stance);
     const kindWord = e.kind === 'boss' ? '首领' : e.kind === 'elite' ? '精英' : e.kind === 'treasure' ? '宝箱' : '普通';
 
     let h = '<div class="ei-head"><b>' + esc(e.name) + '</b><i>' + kindWord + '</i></div>';
     h += '<div class="ei-hp"><span>生命</span><b>' + Math.round(e.hp) + ' / ' + e.maxHp + '</b></div>';
+    // 标签：玩家判断"该用什么打"的第一手依据，放在最上面。
+    // 它由 core 的 tagsOf() 从 stats 推导，所以永远和实际结算一致 —— 不会撒谎。
+    if (e.tags && e.tags.length) {
+      h += '<div class="ei-tags">' + e.tags.map(function (t) {
+        return '<span class="ei-tag">' + esc(t) + '</span>';
+      }).join('') + '</div>';
+    }
     h += '<div class="ei-grid">';
     for (const k of ['atkP', 'atkM', 'defP', 'defM', 'spd']) {
       const v = Math.round(e.stats[k] || 0);
@@ -1226,11 +1227,46 @@
         m.short + '<b>' + v + '</b></div>';
     }
     h += '</div>';
-    h += '<div class="ei-verdict ' + (useMagic ? 'm' : 'p') + '">建议' +
-      (useMagic ? '法术' : '物理') + '：每轮约 <b>' + Math.round(mine) + '</b>，' +
-      myRounds + ' 轮击杀</div>';
-    h += '<div class="ei-cost ' + (cost / st.hp > 0.35 ? 'bad' : cost / st.hp > 0.15 ? 'warn' : 'ok') +
-      '">预计这场要掉 <b>' + cost + '</b> 血（当前 ' + Math.round(game.hp) + '）</div>';
+    // —— 姿态：它直接改变上面那张表的"对方防御"，必须写出来 ——
+    // 否则玩家看到 39 却不知道它是从 26 来的，那张表就不可验算，
+    // 而"可验算"正是"让玩家自己算"能成立的前提。
+    if (e.stance) {
+      h += '<div class="ei-stance ' + e.stance + '">姿态 · 硬化' +
+        (e.stance === 'p' ? '物理' : '法术') +
+        '　对方防御 ×' + D.STANCE.hard + ' / ×' + D.STANCE.soft +
+        (e.stanceT !== undefined ? '　' + e.stanceT + ' 回合后切换' : '') + '</div>';
+    }
+
+    // —— 出题，不给答案 ——
+    // 这里原来是「建议法术：每轮约 37，4 轮击杀」和「预计这场要掉 210 血」，
+    // 那是引擎替玩家把题做了。现在只给**计算的所需对象**。
+    //
+    // "有效防御"这个中间量要给：它只是一次减法，玩家能当场验算；
+    // 而它恰好把"两次除法再比较"简化成"比一个数" —— 少了它，
+    // 这个面板就从"可以心算"退化成"要掏计算器"，设计会直接失效。
+    h += '<div class="ei-calc">';
+    h += '<div class="ei-calc-h"><span>你出手</span><span>攻击</span><span>穿透</span>' +
+      '<span>对方防御</span><span>有效</span></div>';
+    const rows = [
+      { k: '物理', cls: 'p', atk: st.atkP, pen: st.penP, raw: e.stats.defP, def: dv.defP },
+      { k: '法术', cls: 'm', atk: st.atkM, pen: st.penM, raw: e.stats.defM, def: dv.defM }
+    ];
+    for (const r of rows) {
+      const shown = Math.round(r.def);
+      const rawShown = Math.round(r.raw);
+      const mul = (r.raw > 0) ? (r.def / r.raw) : 1;
+      // 有倍率时把"原始值 ×倍率"标出来，玩家可以自己验算这一格
+      const note = (Math.abs(mul - 1) > 0.01)
+        ? '<em>' + rawShown + '×' + mul.toFixed(1) + '</em>' : '';
+      const eff = Math.max(0, shown - Math.round(r.pen));
+      h += '<div class="ei-calc-r ' + r.cls + '">' +
+        '<span>' + r.k + '</span>' +
+        '<b>' + Math.round(r.atk) + '</b>' +
+        '<b>' + Math.round(r.pen) + '</b>' +
+        '<b>' + shown + note + '</b>' +
+        '<b class="eff">' + eff + '</b></div>';
+    }
+    h += '</div>';
     if (e.stats.leech) h += '<div class="ei-warn">它吸血 ' + Math.round(e.stats.leech * 100) + "%</div>";
     // 状态行：这两个状态直接改变"该怎么打"，必须写在玩家看得到的地方
     if (e.stun > 0) {

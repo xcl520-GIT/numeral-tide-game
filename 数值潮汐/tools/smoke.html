@@ -611,9 +611,18 @@ function run(w, d) {
         w.TideUI.enemyInfo(g2, anyE, { clientX: 300, clientY: 300 });
         var ei = d.getElementById('enemy-info');
         if (ei.classList.contains('hidden')) fail('敌人信息面板没有显示');
-        else if (ei.textContent.indexOf('建议') < 0) fail('敌人信息面板缺少用哪一路的建议');
-        else if (ei.textContent.indexOf('预计这场要掉') < 0) fail('敌人信息面板缺少掉血预估');
-        else ok('敌人信息面板：含伤害路线建议与掉血预估');
+        // 这条断言被**反过来**了，而且是刻意的：
+        // 旧断言是「面板必须有'建议'和'掉血预估'」—— 它固化的设计决策是
+        // 「引擎替玩家把题做了」。而现在整个方向反了过来：面板只给**入参**
+        // （攻击 / 穿透 / 对方防御 / 有效防御），算哪一路更高是玩家自己的事。
+        // 把新原则写成断言，以后谁再顺手加个"建议"就会当场红掉。
+        else if (ei.textContent.indexOf('建议') >= 0 || ei.textContent.indexOf('预计这场要掉') >= 0)
+          fail('敌人信息面板又在替玩家做题了：出现了"建议"或掉血预估');
+        else if (ei.textContent.indexOf('有效') < 0)
+          fail('敌人信息面板缺少"有效防御"这一列入参');
+        else if (ei.textContent.indexOf('攻击') < 0 || ei.textContent.indexOf('穿透') < 0)
+          fail('敌人信息面板缺少攻击/穿透入参');
+        else ok('敌人信息面板：只给入参（攻击/穿透/对方防御/有效防御），不替玩家做题');
       }
       w.TideUI.enemyInfo(g2, null, { clientX: 0, clientY: 0 });
       if (!d.getElementById('enemy-info').classList.contains('hidden')) fail('移开敌人后面板没有隐藏');
