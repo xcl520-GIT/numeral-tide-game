@@ -2579,7 +2579,54 @@
      * 收尾：把对决的结果写回模型，并推出那个"战斗已发生"的事件。
      * 只在这里改 this.hp / enemy.hp —— 状态源只有一个。
      */
+    /**
+     * 战斗收口（v11.9）：原实现改名为 `_fightSettleCore`，这里再加一层
+     * 「深层的潮水」。
+     *
+     * 为什么分两层：扣血必须发生在**结算之后**（写回 hp 之后），
+     * 而 `_fightSettleCore` 内部有 4 个 return 分支（打死 / 被打死 /
+     * 撤离 / 僵持）——在每条分支前各补一次调用，是最容易漏掉一条的做法。
+     * 包一层之后，所有调用点（`fight` 的批量路径、逐回合路径、`duel()`）
+     * 自动都走到。
+     */
     _fightSettle(L, played) {
+      const r = this._fightSettleCore(L, played);
+      this._deepCorrupt();
+      return r;
+    }
+
+    /**
+     * 深层的潮水（v11.9）：第 3 层起，每场战斗结束后按**最大生命的比例**
+     * 扣血 —— 无视防御的**真实伤害**。
+     *
+     * 为什么必须是"真实伤害 + 按比例"（这是整个 v11.9 的结论）：
+     *   · 伤害走 `rawDamage`：`攻击 × K / (有效防御 + K)` 是**饱和**的；
+     *   · 而玩家的血池是**纯收益**（第 1 层 168 → 第 5 层 808，最大到 1304），
+     *     没有任何分母与之对应。
+     *   实测把第 5 层的怪攻击乘到 **4.15 倍**，它占玩家血也只从 0.1% 涨到 0.6%
+     *   —— 要到第 1 层那种压迫感得 ×10 以上，而那会让第 3 层先爆掉。
+     *   换句话说：**每场掉血的绝对值根本没变**（第 1 层 9.2 血/场、
+     *   第 5 层 7.8 血/场），变的只是血池。所以要"与血池同比例"的压力。
+     *
+     * 为什么只从第 3 层起：v11.8 已经用两次证伪证明第 1-2 层不该再动
+     *   （怪数与精英都是"威胁 + 资源"的复合体，削它们只会更糟）。
+     *   所以这条曲线**只在后半程生效**，第 1、2 层逐位不变。
+     *
+     * 语义上它不是新机制 —— 潮水腐蚀（踩水掉血）本来就是真实伤害
+     *   （见 `_tideTick` 那段注释）。这里只是让深层的潮水渗进伤口。
+     *
+     * 不写 `deepCorrupt` 的难度 = 旧行为，所以它天然是一个开关。
+     */
+    _deepCorrupt() {
+      const c = num(this.diff && this.diff.deepCorrupt);
+      if (c <= 0 || this.depth < 3 || this.hp <= 0) return;
+      const loss = Math.round(this.stats().hp * c);
+      if (loss <= 0) return;
+      this.hp -= loss;
+      if (this.hp <= 0) { this.hp = 0; this._die('潮水'); }
+    }
+
+    _fightSettleCore(L, played) {
       if (!L) return null;
       const list = L.enemies || [L.enemy];
       const enemy = list[0];
