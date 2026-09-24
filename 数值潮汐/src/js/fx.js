@@ -7,6 +7,43 @@
 (function (global) {
   'use strict';
 
+  /* 命中顿帧（v11.4-l）
+     ------------------------------------------------------------
+     打击感里最有效的一招，而且和画得多花没有关系：
+     命中那一瞬间把**画面冻住几十毫秒**，玩家的脑子会自动把它读成"这一下很重"。
+     本作此前一点停顿都没有 —— 伤害数字、火花、震屏全都在动，
+     但"同时都在动"就等于没有重点。
+
+     冻的是**表现层**（粒子、飘字、震屏衰减），不动模型与回放计时：
+     模型由 setTimeout 驱动，把它一起冻住会让"顿帧"变成"卡顿"，
+     而且时序一乱，冒烟里那些依赖时机的断言会开始时好时坏。
+     封顶 140ms：一次群战可能连着报好几笔伤害，不能让它们叠成半秒的僵直。 */
+  let stopUntil = 0;
+  const STOP_CAP = 140;
+  function nowMs() {
+    return (global.performance && global.performance.now) ? global.performance.now() : Date.now();
+  }
+  function hitStop(ms) {
+    if (!ms || ms <= 0) return;
+    const now = nowMs();
+    stopUntil = Math.max(stopUntil, Math.min(now + ms, now + STOP_CAP));
+  }
+  /* 顿帧的两个观测点，冒烟直接读它们，不去"等时间"：
+     stopLeft  还剩多少毫秒 —— 封顶有没有生效，读得出来；
+     frozen    就是 stopLeft > 0，唯一判定口径。 */
+  function stopLeft() { const d = stopUntil - nowMs(); return d > 0 ? d : 0; }
+  function frozen() { return stopLeft() > 0; }
+
+  /* 顿帧的"重量分档"只有这一处。
+     画布层（探索里的粒子）和战斗界面（DOM 动画）用的是两套完全不同的冻结机制，
+     但"多重的一下该停多久"必须是同一个答案 —— 否则同一个暴击在两处停得不一样，
+     手感自相矛盾，而且以后调一处忘一处。 */
+  function stopMs(kind) {
+    if (kind === 'kill') return 96;
+    if (kind === 'crit') return 74;
+    return 30;
+  }
+
   const parts = [];
   const texts = [];
   let shakeX = 0, shakeY = 0, shakeMag = 0;
@@ -91,6 +128,7 @@
   }
 
   function update() {
+    if (frozen()) return;      // 顿帧：表现层停住（模型与回放计时照常）
     for (let i = parts.length - 1; i >= 0; i--) {
       const p = parts[i];
       p.x += p.vx; p.y += p.vy;
@@ -168,7 +206,12 @@
     ctx.textAlign = 'left';
   }
 
-  function clear() { parts.length = 0; texts.length = 0; rings.length = 0; streaks.length = 0; }
+  /* clear 的语义是"把表现层抹干净"。顿帧属于表现层，所以也要一起复位 ——
+     否则"清空之后还冻着"这件事没法自圆其说，测试也没法从这个已知状态出发。 */
+  function clear() {
+    parts.length = 0; texts.length = 0; rings.length = 0; streaks.length = 0;
+    stopUntil = 0;
+  }
 
   /**
    * 把核心逻辑产生的事件翻译成画面。
@@ -266,6 +309,10 @@
             if (h.heal) popText(px, py - 26, '+' + h.heal, '#7ee08a', 13, -1.2);
             spawn(onEnemy ? ex : px, (onEnemy ? ey : py) + 4,
               crit ? 12 : 6, dmgSparks(h.type), { speed: crit ? 3.4 : 2.2 });
+            // 顿帧按重量分档：普攻 30ms、暴击 74ms。
+            // 暴击的停顿明显更长，是为了让"暴击"在**手感**上也和普攻区分开 ——
+            // 只靠数字更大、颜色更黄，玩家读到的信息量很有限。
+            hitStop(stopMs(crit ? 'crit' : 'hit'));
             // 反伤：单独跳一个字，挂在**挨打的那一方**头上。
             // 混在主伤害里显示的话，玩家会以为"我这一下打出了这么多数"，
             // 而实际上是两笔方向相反的账。
@@ -290,6 +337,7 @@
           spawn(view.cx(ev.enemy.x), view.cy(ev.enemy.y) + 6, 18,
             ['#e0525a', '#ffb060', '#f0d060', '#ffffff'], { speed: 3.2, size: 2.4 });
           shake(2.2);
+          hitStop(stopMs('kill'));   // 击杀要比命中更重：整场里最值得停一下的一刻
           break;
         case 'loot':
           spawn(view.cx(view.game.px), view.cy(view.game.py) + 4, 14,
@@ -354,6 +402,7 @@
     update: update, draw: draw, clear: clear, consume: consume, offset: offset,
     /* 给测试用的观测量：特效有没有真的产生，"有感觉"这件事不能靠肉眼说了算。
        粒子数 / 飘字数 / 当前震屏强度，三个都能量。 */
+    hitStop: hitStop, frozen: frozen, stopLeft: stopLeft, stopMs: stopMs,
     counts: function () {
       return {
         parts: parts.length, texts: texts.length, shake: shakeMag,

@@ -2187,9 +2187,14 @@
     if (stage) {
       stage.classList.remove('quake');
       void stage.offsetWidth;
+      // 重击震得更狠：同一套关键帧，幅度由 --qk 缩放。
+      // 之前不论轻重都震一样多，"这一下很重"读不出来。
+      stage.style.setProperty('--qk', kind === 'crit' ? '1.8' : '1');
       stage.classList.add('quake');
       setTimeout(function () { stage.classList.remove('quake'); }, 260);
     }
+    // 命中顿帧 —— 和画布层共用 stopMs，只是机制换成了冻结 CSS 动画。
+    bsHitStop(kind === 'crit' ? 'crit' : 'hit');
     const fx = $('bs-fx');
     if (!fx) return;
     const n = Math.min(14, 5 + Math.round((dmg || 0) / 8));
@@ -2207,6 +2212,23 @@
         if (s.parentNode) s.parentNode.removeChild(s);
       });
     }
+  }
+
+  /* 战斗界面的顿帧。
+     机制和画布层完全不同：那边冻的是粒子积分，这边冻的是 CSS 动画。
+     但时长必须来自同一个 stopMs —— 玩家不该在两个界面里感到两套物理。
+     只冻 animation、不动 transition 与定时器：血条照走、回合照推进，
+     否则"顿帧"就变成了"卡顿"。 */
+  let bsStopTimer = 0;
+  function bsHitStop(kind) {
+    const stage = $('bs-stage');
+    if (!stage) return;
+    const ms = (global.TideFX && global.TideFX.stopMs)
+      ? global.TideFX.stopMs(kind)
+      : (kind === 'crit' ? 74 : 30);
+    stage.classList.add('bs-freeze');
+    if (bsStopTimer) clearTimeout(bsStopTimer);
+    bsStopTimer = setTimeout(function () { stage.classList.remove('bs-freeze'); }, ms);
   }
 
   /** 出手越快越短、暴击留久一点 —— 节奏本身就是信息 */

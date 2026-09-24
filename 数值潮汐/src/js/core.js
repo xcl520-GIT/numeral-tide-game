@@ -857,6 +857,9 @@
         stance: canStance(st, arc) ? (this.rng.chance(0.5) ? 'p' : 'm') : null,
         stanceT: D.STANCE.every, stanceFx: 0,
         region: this.regionAt(x, y),
+        // 受击后坐的幅度（0~1，= 这一场掉了多少血）。表现层字段，
+        // 与 hitFlash / stanceFx 同一类；在这里声明是为了隐藏类稳定。
+        hitKb: 0,
         // 守位/惊动状态（v11.4-i）。home 是巢位 —— 回位纪律要求它**真的走回原格**，
         // 不然玩家反复拉打几轮之后，堆形会永久散掉，数据比不做还难看。
         homeX: x, homeY: y,
@@ -2147,8 +2150,15 @@
       // 逐只写回。res.bsHp 与 list 一一对应（newDuel 是按同一个顺序建的）。
       // i === 0 时它逐位等于旧的 res.bHp，所以单敌路径没有任何变化。
       for (let i = 0; i < list.length; i++) {
+        const lost = Math.max(0, (L.ehp0s[i] === undefined ? L.ehp0 : L.ehp0s[i]) - res.bsHp[i]);
         list[i].hp = res.bsHp[i];
         list[i].hitFlash = 12;
+        /* 受击后坐的幅度 = 这一场掉了多少血 / 最大生命。
+           为什么必须在这里算：掉血量只在结算那一刻是准的，
+           之后 hp 就被写回，渲染层再读只剩结果。
+           存一个 0~1 的标量，渲染层拿它当"这一下有多重"的权重，
+           不必知道任何伤害公式。 */
+        list[i].hitKb = Math.min(1, lost / Math.max(1, list[i].maxHp));
       }
       const ev = {
         kind: 'fight', enemy: enemy, enemies: list, rounds: res.log,

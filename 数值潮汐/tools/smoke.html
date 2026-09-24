@@ -3679,6 +3679,142 @@ try {
   w.TideMeta.reset();
 } catch (e) { fail('规则层测试异常: ' + (e && e.stack ? e.stack : e)); }
 
+/* ---------- 46. 打击感：顿帧与受击后坐 ----------
+   表现层最容易"看起来加了、其实没生效"——它没有数字可以对照。
+   所以这两条必须用**可判定的状态**守着，而不是靠眼睛：
+     ① 顿帧是一个会过期的状态，能直接问它开没开、过期没有、封没封顶；
+     ② 后坐幅度是一个由掉血比例算出来的数，能直接验它的**分级**。 */
+try {
+  var FX46 = w.TideFX;
+  /* 第 46 节不是页面上第一个打起来的地方 —— 前面几节早就合法地触发过顿帧。
+     所以这里不能假设进门时状态是干净的：先用 clear() 把表现层复位到已知状态，
+     再断言。这样这一节测的是顿帧本身，而不是"它排在第几个"。
+     断言三件事：生效（会停）、封顶（连打不叠成僵直）、会过期（是顿帧不是卡顿）。
+
+     为什么这三条不能"等一等再问"：冒烟跑在 headless + --virtual-time-budget 下，
+     虚拟时间只在 JS 让出线程时才推进，忙等会连虚拟时钟一起锁死（整轮挂死）。
+     所以改成两个纯同步的观测点，一次调用就有答案：
+       · stopLeft() 还剩多少毫秒 —— 封顶有没有生效，读得出来；
+       · 把 performance.now() 临时拨到未来 —— 不用等，直接问它松没松开。 */
+  if (!FX46 || typeof FX46.hitStop !== 'function' || typeof FX46.frozen !== 'function'
+      || typeof FX46.stopLeft !== 'function') {
+    fail('打击感：TideFX.hitStop / frozen / stopLeft 不全（顿帧没接上）');
+  } else {
+    FX46.clear();
+    if (FX46.frozen()) fail('打击感：clear() 之后仍冻着（表现层没复位干净）');
+    else ok('打击感：clear() 会一并复位顿帧状态');
+
+    // ① 生效：命中那一下必须真的停住
+    FX46.hitStop(30);
+    if (!FX46.frozen()) fail('打击感：hitStop 之后 frozen() 仍是 false（没生效）');
+    else ok('打击感：顿帧生效（命中瞬间画面会停一下）');
+
+    /* ② 封顶：群战一回合会连着报好几笔伤害。如果每笔都往后叠，
+       玩家看到的是一段僵直，而不是"几下重击"——所以单次请求必须被截断。 */
+    FX46.clear();
+    FX46.hitStop(10000);
+    var leftCap = FX46.stopLeft();
+    if (!(leftCap > 0)) fail('打击感：hitStop(10000) 之后根本没有冻住');
+    else if (leftCap > 160) fail('打击感：单次顿帧没有封顶，要 10 秒就冻 ' + Math.round(leftCap) + 'ms');
+    else ok('打击感：顿帧封顶（要 10 秒也只给 ' + Math.round(leftCap) + 'ms）');
+
+    /* ③ 会过期：这是"顿帧"和"卡顿"的分界线。
+       把"现在"拨到未来，它必须自己松开；否则一次命中就把画面永久冻住。 */
+    var perfOld = w.performance && w.performance.now;
+    if (!perfOld) fail('打击感：页面没有 performance.now，无法验过期');
+    else {
+      var baseNow = perfOld.call(w.performance);
+      FX46.clear();
+      FX46.hitStop(30);
+      var wasFrozen = FX46.frozen();
+      w.performance.now = function () { return baseNow + 100000; };
+      var stillFrozen = FX46.frozen();
+      w.performance.now = perfOld;                 // 立刻复原，后面还要用真实时钟
+      if (!wasFrozen) fail('打击感：顿帧没生效，过期无从谈起');
+      else if (stillFrozen) fail('打击感：顿帧不会过期（是卡顿不是顿帧）');
+      else ok('打击感：顿帧会自己松开（是顿帧不是卡顿）');
+    }
+  }
+
+  /* 受击后坐必须**分级**，而不是"只要挨打就抖一下"。
+     这里刻意造两个极端、用同一套机制跑出来对比：
+       轻 —— 对方厚到打不动，一场下来只蹭掉一丝 → 幅度应当很小
+       重 —— 对方脆到一下打空               → 幅度应当到顶
+     为什么不只测一种：上一版只测了"十万血一口气打空"，读数 100%，
+     但它其实来自回合上限的收场规则（按剩余血量比判赢 → 敌方血量归零），
+     跟"这一下有多重"没有关系。断言过了，等于没测。 */
+  function kbCase46(hp46) {
+    var gK = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 4242 });
+    gK.enemies = [];
+    var eK = gK._makeEnemy(gK.px + 1, gK.py, 1);
+    eK.stats.spd = 1;                 // 不让它先出手，少一个无关变量
+    eK.hp = eK.maxHp = hp46;          // _fightBegin 直接读 e.hp / e.maxHp，改这里就够
+    gK.enemies.push(eK);
+    gK.fight([eK]);
+    return { kb: eK.hitKb, hpLeft: eK.hp };
+  }
+  var kLight = kbCase46(1000000);     // 蹭不动
+  var kHeavy = kbCase46(1);           // 一下打空
+  if (kLight.kb === undefined || kHeavy.kb === undefined) {
+    fail('打击感：结算没写 hitKb（后坐幅度永远为 0）');
+  } else if (kHeavy.kb !== 1) {
+    fail('打击感：打空一场后坐幅度没到顶，kb = ' + kHeavy.kb);
+  } else if (!(kLight.kb > 0 && kLight.kb < kHeavy.kb)) {
+    fail('打击感：后坐幅度不随伤害分级（轻 ' + kLight.kb + ' vs 重 ' + kHeavy.kb + '）');
+  } else {
+    ok('打击感：受击后坐按掉血比例分级（轻 ' + (kLight.kb * 100).toFixed(2) + '% → 重 100%）');
+  }
+} catch (e) { fail('打击感测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+/* ---------- 47. 打击感（二）：玩家真正打的那一侧 ----------
+   为什么单开一节：第 46 节验的是画布层，但**玩家亲手打的地方是战斗界面**。
+   main.js 把 duel/fight 事件从 FX 队列里 splice 走了、交给 UI.playBattle，
+   所以画布层的顿帧在真实对局里几乎走不到。
+   这正是表现层最容易骗人的地方：机制都在、单测都过，玩家什么都没感觉到。
+   所以这一节走**真实链路**：开战斗界面 → 按键出手 → 问舞台有没有真的停住。 */
+try {
+  var st47 = d.getElementById('bs-stage');
+  var stopMs47 = w.TideFX && w.TideFX.stopMs;
+  if (typeof stopMs47 !== 'function') {
+    fail('打击感：TideFX.stopMs 不存在（两层表现没有共用同一份重量分档）');
+  } else if (!(stopMs47('crit') > stopMs47('hit'))) {
+    fail('打击感：暴击与普攻的顿帧没有分档（' + stopMs47('crit') + ' vs ' + stopMs47('hit') + '）');
+  } else if (!(stopMs47('kill') >= stopMs47('crit'))) {
+    fail('打击感：击杀的顿帧不比暴击重（' + stopMs47('kill') + ' vs ' + stopMs47('crit') + '）');
+  } else {
+    ok('打击感：顿帧重量分档统一（普攻 ' + stopMs47('hit') + 'ms / 暴击 '
+      + stopMs47('crit') + 'ms / 击杀 ' + stopMs47('kill') + 'ms）');
+  }
+
+  var kq47 = function (key) {
+    w.dispatchEvent(new w.KeyboardEvent('keydown', { key: key, bubbles: true }));
+    w.dispatchEvent(new w.KeyboardEvent('keyup', { key: key, bubbles: true }));
+  };
+  /* 出手一轮是同步的：doRound → playRounds 只同步跑第一轮，第一轮的
+     stepRound 里就会 bsImpact。所以按键之后当场问，不必等 —— 而且也不能等，
+     冒烟跑在虚拟时间下，等时间等于挂死（见第 46 节的记录）。
+     多试几个种子是为了跳过"第一轮恰好被闪避"：闪避不出 bsImpact，没有顿帧。 */
+  var froze47 = -1;
+  for (var s47 = 0; s47 < 5 && froze47 < 0; s47++) {
+    var g47 = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 81000 + s47 });
+    var e47 = g47._makeEnemy(g47.px + 1, g47.py, 1);
+    g47.enemies = [e47];
+    var L47 = g47._fightBegin([e47]);
+    g47.liveFight = L47;
+    if (st47) st47.classList.remove('bs-freeze');
+    w.TideUI.playBattle(g47, {
+      kind: 'duel', enemy: L47.enemy, enemies: L47.enemies, duel: L47.duel,
+      aHp0: L47.hp0, bHp0: L47.ehp0
+    }, function () {});
+    kq47('1');                        // 出手（物理）
+    if (st47 && st47.classList.contains('bs-freeze')) froze47 = s47;
+    w.TideUI.closeBattle();
+  }
+  if (!st47) fail('打击感：找不到 #bs-stage（战斗界面结构变了？）');
+  else if (froze47 < 0) fail('打击感：战斗界面出手后舞台没有停住（顿帧没接进战斗界面）');
+  else ok('打击感：战斗界面出手即顿帧（第 ' + (froze47 + 1) + ' 个种子命中）');
+} catch (e) { fail('打击感（战斗界面）测试异常: ' + (e && e.stack ? e.stack : e)); }
+
   } catch (e) {
     fail('测试脚本异常: ' + (e && e.stack ? e.stack : e));
   }

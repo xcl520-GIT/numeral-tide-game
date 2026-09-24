@@ -552,7 +552,10 @@
     const sx = 1 - Math.sin(ph) * 0.035;
     let ox = 0, oy = 0;
     if (e.hitFlash > 0) {
-      const amp = (e.hitFlash / 12) * Math.sin((1 - e.hitFlash / 12) * Math.PI) * 6;
+      // 幅度跟着"这一下掉了多少血"走：轻击 6px、重击可到 16px。
+      // 之前所有受击都抖同样多，玩家读不出"这一下很重"。
+      const kbAmp = 6 + 10 * (e.hitKb || 0);
+      const amp = (e.hitFlash / 12) * Math.sin((1 - e.hitFlash / 12) * Math.PI) * kbAmp;
       const ddx = game.px - e.x, ddy = game.py - e.y;
       const len = Math.max(1, Math.hypot(ddx, ddy));
       ox = ddx / len * amp; oy = ddy / len * amp * 0.6;
