@@ -406,7 +406,25 @@ function run(w, d) {
 
     // ---------- 16. 秘藏三选一 ----------
     w.TideUI.showTitle();
-    d.getElementById('btn-start').click();
+    // 钉死种子。标题页的「开始下潜」走 mode:'normal'、不传 seed，
+    // 于是 Game 用 Date.now() ^ Math.random() 做种（core.js:210）——
+    // 每次跑出来的地图 / 敌人 / 装备都不一样，凡是打印数值的断言都不可复现，
+    // 逐位对照直接失效。（本次 1vN 重构里那个把 `src === a` 误写成
+    // `src.isPlayer` 的 bug，正是靠"数值从 42 变成 62"才暴露的；
+    // 在抖动的基线上它会被当成噪声放过去。）
+    //
+    // ⚠ 必须钉 **iframe 的** w.Math / w.Date。游戏在 iframe 自己的 window 里
+    //   执行，钉外层页面的 Math/Date 对它毫无作用 —— 这个坑本轮实测踩到过。
+    // 只在这一次点击期间生效，点完立刻还原，路径覆盖不变。
+    var _randSave = w.Math.random, _nowSave = w.Date.now;
+    w.Math.random = function () { return 0.5; };
+    w.Date.now = function () { return 1758000000000; };
+    try {
+      d.getElementById('btn-start').click();
+    } finally {
+      w.Math.random = _randSave;
+      w.Date.now = _nowSave;
+    }
     var g2 = w.TideMain.game;
     g2.bag = [];
     for (var bi = 0; bi < 4; bi++) g2.bag.push(g2.makeItem({ depth: 3 }));
