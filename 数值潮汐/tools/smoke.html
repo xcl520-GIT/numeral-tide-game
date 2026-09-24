@@ -4563,6 +4563,196 @@ try {
   }
 } catch (e) { fail('P3 魂技进对决测试异常: ' + (e && e.stack ? e.stack : e)); }
 
+/* ---------- 54. P3 第三步：撤离 ----------
+   这一节的重心不是"能不能撤"，而是**定价真的兑现了没有**。
+   撤离的定价是"掉落减半 + 潮水推一节拍 + 敌人保留残血"三件，
+   三件都写在 data.js 的 FLEE 一处；三件里有任何一件没接上，
+   在分布上只会表现为"撤离稍微强了一点" —— 而"强了一点"永远有别的解释。
+
+   所以每条都用**可直接读出来的量**钉住：
+     掉落减半 → 金币必须等于满额的 0.5（并且掷骰倍率被真的喂成了 0.5）
+     潮水     → 把 _tideAdvance 换成桩，数它被调了几次（水位本身涨也会落，
+                拿水位当判据会随潮汐相位漂）
+     残血     → 模型里那只怪的 hp 必须等于**撤的那一刻**对决里的 hp
+     挨打     → 玩家在撤之前挨过的打必须留着（撤不是回档）
+
+   布置用的是 2 只怪：一只 hp=1（第一轮必被收掉），另一只满血。
+   只有"已经倒下"的敌人有掉落可减 —— 没死的那只本来什么都不掉。
+   ⚠ 读血量要读**对决**那一侧：模型只在收场那一刻才写回，
+     撤之前模型的 hp 还是进战前的值（第一版就读错了这里）。 */
+try {
+  var kq54 = function (key) {
+    w.dispatchEvent(new w.KeyboardEvent('keydown', { key: key, bubbles: true }));
+    w.dispatchEvent(new w.KeyboardEvent('keyup', { key: key, bubbles: true }));
+  };
+  var mk54 = function (seed, opts) {
+    var o = { classKey: 'warlord', difficulty: 'standard', seed: seed };
+    for (var k in (opts || {})) o[k] = opts[k];
+    return new w.TideCore.Game(o);
+  };
+  var open54 = function (g) {
+    var weak = g._makeEnemy(g.px + 1, g.py, 1);
+    weak.hp = 1; weak.maxHp = Math.max(1, weak.maxHp);
+    var tough = g._makeEnemy(g.px, g.py + 1, 1);
+    g.enemies = [weak, tough];
+    var L = g._fightBegin([weak, tough]);
+    g.liveFight = L;
+    w.TideUI.playBattle(g, {
+      kind: 'duel', enemy: L.enemy, enemies: L.enemies, duel: L.duel,
+      aHp0: L.hp0, bHp0: L.ehp0, bHp0s: L.ehp0s
+    }, function () {});
+    return { g: g, L: L, weak: weak, tough: tough };
+  };
+
+  /* ---- ① 菜单里多了一个「撤离」，键位 4，按钮在 ---- */
+  var acts54 = w.TideUI.battleActs ? w.TideUI.battleActs() : [];
+  var fleeAct54 = null;
+  for (var a54 = 0; a54 < acts54.length; a54++) {
+    if (acts54[a54].id === 'flee') fleeAct54 = acts54[a54];
+  }
+  var A54 = open54(mk54(88001));
+  var hasBtn54 = !!d.getElementById('bs-cmd-flee');
+  if (!fleeAct54) {
+    fail('撤离：动作注册表里没有 flee 这一项');
+  } else if (!(fleeAct54.keys && fleeAct54.keys.indexOf('4') >= 0)) {
+    fail('撤离：键位不是 4（' + JSON.stringify(fleeAct54.keys) + '）');
+  } else if (!hasBtn54) {
+    fail('撤离：菜单里没有 bs-cmd-flee 这个按钮');
+  } else {
+    ok('撤离：菜单第 5 个动作「撤离」（键位 4），按钮已渲染');
+  }
+  w.TideUI.closeBattle();
+
+  /* ---- ② 真链路：打一轮（收掉 hp=1 那只）→ 撤 ---- */
+  var FL = w.TideData.FLEE;
+  /* 满额金币 = `_killEnemy` 那条公式的**镜像**。
+     为什么必须镜像、不能只读一个数：这一条验的就是"减半兑现了没有"，
+     所以先得知道全价；而全价按怪的种类分档（精英 / 宝箱 / Boss 各有加成）——
+     实测那两只里就有一只带加成（满额 14 而不是 5，第一版就是这么算错的，
+     断言红得很有价值）。公式哪天改了，这条会响亮地红，那正是它该有的行为。 */
+  var goldOf54 = function (g, e) {
+    var L = w.TideData.LOOT;
+    var v = L.goldPerKill + g.depth * L.goldPerDepth;
+    if (e.kind === 'elite' || e.kind === 'treasure') v += L.goldElite;
+    if (e.kind === 'boss') v += L.goldBoss;
+    return v;
+  };
+  var T54 = null, skipped54 = '';
+  for (var s54 = 0; s54 < 5 && !T54; s54++) {
+    var cand = open54(mk54(88005 + s54));
+    var tide54 = 0, realTide54 = cand.g._tideAdvance;
+    cand.g._tideAdvance = function () { tide54++; return realTide54.apply(this, arguments); };
+    var drops54 = [], realDrop54 = cand.g._rollDrop;
+    cand.g._rollDrop = function (e, mul) { drops54.push(mul); return null; };
+    var gold0_54 = cand.g.gold, px0_54 = cand.g.px, py0_54 = cand.g.py;
+    /* 走**引擎**那三个调用，而不是按键：
+       界面上"打一轮"与"收场"之间隔着 setTimeout（playRounds 逐条播明细），
+       按完 1 之后这一轮还没播完、bsCmdCb 仍是 null，紧跟的按 4 什么都不会发生 ——
+       那是演出节奏，不是缺陷。"按 4 真的能撤"由 ③ 单独覆盖。
+       这里的三个调用与界面一一对应：
+         duelRound  = 按 1     duelFlee = 按 4     finishDuel = 界面关场那一刻 */
+    cand.g.duelRound('p', 0);
+    if (cand.L.duel.bs[0].hp > 0) {              // 这一下被闪掉了 → 换种子
+      w.TideUI.closeBattle();
+      cand.g._rollDrop = realDrop54;
+      cand.g._tideAdvance = realTide54;
+      skipped54 += (s54 + 1) + ' ';
+      continue;
+    }
+    var dTough54 = cand.L.duel.bs[1].hp, dMe54 = cand.L.duel.a.hp, hp0_54 = cand.L.hp0;
+    var fleeRes54 = cand.g.duelFlee(cand.L.duel);
+    var fled54 = cand.L.duel.fled, fin54 = cand.L.duel.finished;
+    cand.g.finishDuel();
+    cand.g._rollDrop = realDrop54;
+    cand.g._tideAdvance = realTide54;
+    T54 = {
+      g: cand.g, L: cand.L, fled: fled54, fin: fin54, tide: tide54, drops: drops54,
+      res: fleeRes54,
+      gold: cand.g.gold - gold0_54,
+      full: goldOf54(cand.g, cand.weak),
+      tough: cand.tough.hp, dTough: dTough54,
+      me: cand.g.hp, dMe: dMe54, hp0: hp0_54,
+      px: cand.g.px, py: cand.g.py, px0: px0_54, py0: py0_54
+    };
+    w.TideUI.closeBattle();
+  }
+
+  if (!T54) {
+    fail('撤离：5 个种子里那一下都被闪掉了（布置失败，后面的判据失去意义）');
+  } else if (!T54.fled || !T54.fin) {
+    fail('撤离：撤之后这一场没有结束（fled=' + T54.fled + ', finished=' + T54.fin +
+      '，duelFlee=' + JSON.stringify(T54.res) + '）');
+  } else if (T54.gold !== Math.round(T54.full * FL.lootMul)) {
+    fail('撤离：掉落没有按 ' + FL.lootMul + ' 结算（拿到 ' + T54.gold + '，应为 ' +
+      Math.round(T54.full * FL.lootMul) + ' = 满额 ' + T54.full + ' × ' + FL.lootMul + '）');
+  } else if (T54.drops.length !== 1 || T54.drops[0] !== FL.lootMul) {
+    fail('撤离：掉落掷骰收到的倍率不是 ' + FL.lootMul + '（收到 ' +
+      JSON.stringify(T54.drops) + '）—— 概率那一半没接上');
+  } else if (T54.tide !== FL.tideBeat) {
+    fail('撤离：潮水没有推 ' + FL.tideBeat + ' 节拍（实际 ' + T54.tide + ' 次）');
+  } else if (T54.tough !== T54.dTough) {
+    fail('撤离：还活着的那只血没保留（模型 ' + T54.tough + ' vs 对决里 ' + T54.dTough + '）');
+  } else if (T54.me > T54.dMe) {
+    fail('撤离：玩家的血比撤的那一刻还多（' + T54.me + ' > ' + T54.dMe + '）—— 撤不是回档');
+  } else if (!(T54.me < T54.hp0)) {
+    fail('撤离：挨过的打被抹平了（开战 ' + T54.hp0 + ' → 撤后 ' + T54.me + '）—— 撤不是回档');
+  } else if (T54.px !== T54.px0 || T54.py !== T54.py0) {
+    fail('撤离：玩家被挪动了（' + T54.px0 + ',' + T54.py0 + ' → ' + T54.px + ',' + T54.py +
+      '）—— 他本来就没离开过原格');
+  } else {
+    ok('撤离：按 4 → 这一场结束；收益 ' + T54.full + ' → ' + T54.gold + '（掷骰倍率 ' +
+      T54.drops[0] + '）、潮水推 ' + T54.tide + ' 拍、活着的敌人保留残血 ' + T54.dTough +
+      '、玩家留在原地且挨过的打不算白挨' + (skipped54 ? '（跳过被闪的种子 ' + skipped54 + '）' : ''));
+  }
+
+  /* ---- ③ 同一场里撤第二次必须被挡住 ----
+     必须传**显式句柄**：收场那一刻 finishDuel() 已经把 liveFight 清空了，
+     不传句柄读到的是 nofight（那是"没有对决"，不是"这一场拒绝了你"）。 */
+  var D54 = open54(mk54(88011));
+  kq54('4');
+  var again54 = D54.g.duelFlee(D54.L.duel);
+  var gone54 = D54.g.duelFlee();
+  w.TideUI.closeBattle();
+  if (again54.reason !== 'fled' && again54.reason !== 'over') {
+    fail('撤离：这一场没有拒绝第二次撤（reason=' + JSON.stringify(again54) + '）');
+  } else if (gone54.reason !== 'nofight') {
+    fail('撤离：收场之后的再撤没有报 nofight（' + JSON.stringify(gone54) + '）');
+  } else {
+    ok('撤离：同一场撤第二次被挡（' + again54.reason + '）；收场后再撤报 ' + gone54.reason);
+  }
+
+  /* ---- ④ 开关关掉 = 旧行为（按 4 什么都不发生） ---- */
+  var C54 = open54(mk54(88012, { flee: false }));
+  kq54('4');
+  var still54 = !C54.L.duel.fled && !C54.L.duel.finished;
+  var off54 = C54.g.duelFlee(C54.L.duel);
+  w.TideUI.closeBattle();
+  if (!still54 || off54.reason !== 'off') {
+    fail('撤离：flee=false 时按 4 仍然生效（fled=' + C54.L.duel.fled +
+      '，duelFlee=' + JSON.stringify(off54) + '）');
+  } else {
+    ok('撤离：flee=false → 按 4 无效、duelFlee 返回 off（开关关掉 = 旧行为）');
+  }
+
+  /* ---- ⑤ AI 判据：两个方向都要成立（只验"会撤"等于没验） ---- */
+  var E54 = open54(mk54(88013));
+  var dFifth = E54.L.duel, keepHp54 = dFifth.a.hp;
+  dFifth.a.hp = 1;
+  var willFlee54 = E54.g._shouldFlee(dFifth);
+  dFifth.a.hp = 100000;
+  var wontFlee54 = E54.g._shouldFlee(dFifth);
+  dFifth.a.hp = keepHp54;
+  w.TideUI.closeBattle();
+  if (!willFlee54) {
+    fail('撤离：AI 判据单向失灵 —— 只剩 1 点血也不撤');
+  } else if (wontFlee54) {
+    fail('撤离：AI 判据单向失灵 —— 十万点血还想着撤');
+  } else {
+    ok('撤离：AI 判据双向成立（残血必撤 / 血厚不撤，阈值 ' +
+      Math.round(FL.aiDmgFrac * 100) + '%）');
+  }
+} catch (e) { fail('P3 撤离测试异常: ' + (e && e.stack ? e.stack : e)); }
+
   } catch (e) {
     fail('测试脚本异常: ' + (e && e.stack ? e.stack : e));
   }
