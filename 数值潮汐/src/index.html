@@ -278,17 +278,14 @@
        「先看有谁 → 再决定打谁 → 再选哪一路」，三步排在同一条竖线上。
        单敌时整块隐藏 —— 一对一的构图与 v11.3-c 完全一致。 -->
   <div class="bs-foes hidden" id="bs-foes"></div>
-  <div class="bs-cmd hidden" id="bs-cmd">
-    <button class="bs-cmd-btn" data-atk="p">
-      <span class="k">1</span><span class="t">物理</span><span class="n" id="bs-cmd-p"></span>
-    </button>
-    <button class="bs-cmd-btn" data-atk="m">
-      <span class="k">2</span><span class="t">法术</span><span class="n" id="bs-cmd-m"></span>
-    </button>
-    <button class="bs-cmd-btn auto" id="bs-cmd-auto">
-      <span class="t">托管打完</span><span class="n">空格快进</span>
-    </button>
-  </div>
+  <!-- 菜单内容由 ui.js 的**动作注册表**渲染（v11.5 P3 第一步）。
+       以前这三行按钮是写死在这里的，于是"菜单上有哪些动作"分散在三处：
+       这里的标签与键位、bsMenu() 里的入参文案、battleKey() 里的按键分支。
+       加第四个动作要在三处各改一遍，而漏掉任何一处的表现都只是
+       "这个按钮点了没反应" / "这个键没反应" —— 不报错、不崩，只是安静地少一块。
+       现在标签、键位、能不能点、按下去做什么都只有一个真源，
+       HTML 只留一个空容器。 -->
+  <div class="bs-cmd hidden" id="bs-cmd"></div>
   <div class="bs-foot" id="bs-foot">
     <span id="bs-round"></span>
     <button id="bs-skip" class="btn ghost small">快进 / 托管（空格）</button>

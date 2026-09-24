@@ -1060,6 +1060,8 @@ html, body {
   font-family: var(--mono); font-size: 11px; color: var(--muted);
   margin-left: auto; white-space: nowrap;
 }
+.bs-cmd-btn.off { opacity: 0.38; cursor: not-allowed; }
+.bs-cmd-btn.off:hover { background: inherit; }
 .bs-cmd-btn.auto { flex: 0 0 auto; opacity: 0.72; }
 .bs-cmd-btn.auto:hover { opacity: 1; }
 .bs-cmd-btn.auto .n { margin-left: 8px; }

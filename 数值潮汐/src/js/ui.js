@@ -780,14 +780,22 @@
       });
     }
 
+    /* 先把菜单骨架渲染出来（不带现场，文案留空）。
+       为什么要在开局就渲染：按钮的 id / data-act 是**外部依赖的钩子**
+       （冒烟与探针都按 id 找），第一次战斗之前它们必须已经存在。 */
+    actMenu(null);
+
     const cmdBox = $('bs-cmd');
     if (cmdBox) {
       cmdBox.addEventListener('click', function (evt) {
         const t = evt.target;
         if (!t || !t.closest) return;
-        if (t.closest('#bs-cmd-auto')) { skipBattle(); return; }
-        const b = t.closest('[data-atk]');
-        if (b && bsCmdCb) bsCmdCb(b.dataset.atk);
+        /* 只认 data-act，认完交给注册表 —— 菜单里多出什么动作，
+           这里一个字都不用改（以前 #bs-cmd-auto 是在这里被单独接走的，
+           现在它是动作自己的属性 run()）。 */
+        const b = t.closest('[data-act]');
+        if (!b || !bsCmdCb || b.disabled) return;
+        bsCmdCb(b.dataset.act);
       });
     }
 
@@ -2035,12 +2043,38 @@
       return C.bestAttack(L.duel.a.st, dv, game.K).type;
     }
 
-    function doRound(type) {
-      if (busy) return;
-      busy = true;
-      bsCmdCb = null;
-      bsMenu('hide');
-      const r = game.duelRound(type, bsSel);
+    /* 动作这一侧的全部把手。动作只负责说"这一轮怎么打"，
+       真正动模型的是 api.round —— 于是新动作不可能绕开它自己拼一套推进，
+       而"点和键打出来的不是同一件事"这种漂移也就无从发生。 */
+    const actApi = {
+      round: function (pick) {
+        if (busy) return;
+        busy = true;
+        bsCmdCb = null;
+        bsMenu('hide');
+        runRound(pick);
+      },
+      skip: function () { skipBattle(); },
+      end: function () { endNow(); },
+      autoPick: autoPick
+    };
+
+    /** 收口：菜单上按下（或键盘敲下）的那个 id → 由注册表决定它做什么。 */
+    function doRound(id) {
+      const a = actById(id);
+      // 现场必须取**这一场对决自己的 game**（playDuel 的闭包参数），
+      // 不是 global.TideMain.game：战斗界面从 v11.3 起就不要求那一局
+      // 登记在 TideMain 上（冒烟第 47/51 节直接 new 一局再 playBattle）。
+      // 去查全局的话，那两处的现场恒为 null，表现是"按键没反应" ——
+      // 不报错、不崩，正好是这张表要防的那类失败。
+      if (!a || !game || !game.liveFight) return;
+      const ctx = actCtx(game);
+      if (a.enabled && !a.enabled(ctx)) return;
+      a.run(ctx, actApi);
+    }
+
+    function runRound(pick) {
+      const r = game.duelRound(pick, bsSel);
       if (!r) { busy = false; endNow(); return; }
       playRounds(r.rounds, 0, function () {
         // 血条以**模型**为准。逐条累加出来的值在"克制奖励 / 反伤 / 吸血"
@@ -2076,6 +2110,106 @@
     askRound();
   }
 
+  /* ============================================================
+     对决动作注册表（v11.5 P3 第一步）
+
+     每个动作五件套：
+       id      收口用的字符串（同时也是 DOM 上的 data-act）
+       label   菜单上印的字
+       keys    键盘绑定。**键位是动作自己的属性**，不再是 battleKey 里的分支
+       enabled 这一轮能不能用。不能点 = 灰掉，**不是消失** ——
+               消失会让玩家以为界面坏了；灰掉才读得出"它还差一点条件"
+       info    行右侧那串入参（攻 / 穿 → 防）。只出入参，不出结论
+       run     按下去之后怎么推进这一轮。**它只能通过 api.round 动模型**，
+               于是"动作"与"结算"之间只有一条缝，新动作不可能绕开它自己拼一套推进
+
+     顺序 = 菜单上的顺序。托管永远排最后（它是"不想选了"的出口）。
+     ============================================================ */
+  const ACTS = [];
+
+  /** 注册一个动作。**永远插在"托管"之前** —— 那是出口，不是选项之一。 */
+  function registerAct(a) {
+    for (let i = 0; i < ACTS.length; i++) {
+      if (ACTS[i].id === 'auto') { ACTS.splice(i, 0, a); return a; }
+    }
+    ACTS.push(a);
+    return a;
+  }
+  function actById(id) {
+    for (let i = 0; i < ACTS.length; i++) if (ACTS[i].id === id) return ACTS[i];
+    return null;
+  }
+
+  registerAct({
+    id: 'p', label: '物理', keys: ['1'], atk: true,
+    info: function (ctx) {
+      return '攻 ' + Math.round(C.num(ctx.me.st.atkP)) +
+        ' / 穿 ' + Math.round(C.num(ctx.me.st.penP)) + ' → 防 ' + ctx.r1(C.num(ctx.dv.defP));
+    },
+    run: function (ctx, api) { api.round('p'); }
+  });
+  registerAct({
+    id: 'm', label: '法术', keys: ['2'], atk: true,
+    info: function (ctx) {
+      return '攻 ' + Math.round(C.num(ctx.me.st.atkM)) +
+        ' / 穿 ' + Math.round(C.num(ctx.me.st.penM)) + ' → 防 ' + ctx.r1(C.num(ctx.dv.defM));
+    },
+    run: function (ctx, api) { api.round('m'); }
+  });
+  registerAct({
+    id: 'auto', label: '托管打完', keys: [], auto: true, hint: '空格快进',
+    info: function () { return '空格快进'; },
+    /* 托管**不推进任何一轮**：它只是把这一场剩下的回合都标记成"别问我了"。
+       所以它走 api.skip 而不是 api.round —— 这一点以前是靠
+       "#bs-cmd-auto 的点击被单独接去 skipBattle()"来表达的，
+       现在它是动作自己的属性。 */
+    run: function (ctx, api) { api.skip(); }
+  });
+
+  /**
+   * 注册表要用到的那一份现场。
+   * 抽出来是为了让 info() / enabled() / run() 读到**同一份**数值 ——
+   * 各自去 game 里翻，迟早有一处翻的是上一轮的目标。
+   */
+  function actCtx(game) {
+    const L = game.liveFight;
+    const me = L.duel.a;
+    // 数值必须按**当前选中的那只**给。群战里拿第一只的防御去算，
+    // 玩家照着菜单算出来的答案和实际打出来的就不是同一道题 ——
+    // 而菜单存在的全部意义就是"玩家自己算的那个数是对的"。
+    const tgt = L.duel.bs[bsSel] || L.duel.b;
+    const dv = C.stanceDef(tgt.st, tgt.stance);
+    return {
+      game: game, L: L, duel: L.duel, me: me, tgt: tgt, dv: dv, sel: bsSel,
+      r1: function (v) { return Math.round(v * 10) / 10; }
+    };
+  }
+
+  /** 把注册表渲染成菜单。ctx 为空时只画骨架（按钮先存在，文案随后补）。 */
+  function actMenu(ctx) {
+    const cmd = $('bs-cmd');
+    if (!cmd) return;
+    let h = '';
+    for (let i = 0; i < ACTS.length; i++) {
+      const a = ACTS[i];
+      const en = !ctx ? true : (a.enabled ? !!a.enabled(ctx) : true);
+      const note = (ctx && a.info) ? (a.info(ctx) || '') : (a.hint || '');
+      const key = (a.keys && a.keys.length) ? a.keys[0] : '';
+      // id 与 data-act 都由 id 生成：**既有断言读的 bs-cmd-p / bs-cmd-m /
+      // bs-cmd-auto 因此一个都不用改**，而新动作也自动拿到自己的钩子。
+      h += '<button class="bs-cmd-btn' + (a.auto ? ' auto' : '') +
+        (en ? '' : ' off') + '"' +
+        (a.atk ? ' data-atk="' + a.id + '"' : '') +
+        ' data-act="' + a.id + '"' + (en ? '' : ' disabled') +
+        ' id="bs-cmd-' + a.id + '">' +
+        (key ? '<span class="k">' + esc(key) + '</span>' : '') +
+        '<span class="t">' + esc(a.label) + '</span>' +
+        '<span class="n">' + esc(note) + '</span>' +
+        '</button>';
+    }
+    cmd.innerHTML = h;
+  }
+
   /**
    * 指令菜单。**只出入参，不出结论。**
    *
@@ -2094,22 +2228,7 @@
     if (state === 'hide' || !game) { cmd.classList.add('hidden'); return; }
     const L = game.liveFight;
     if (!L) { cmd.classList.add('hidden'); return; }
-    const me = L.duel.a;
-    // 数值必须按**当前选中的那只**给。群战里拿第一只的防御去算，
-    // 玩家照着菜单算出来的答案和实际打出来的就不是同一道题 ——
-    // 而菜单存在的全部意义就是"玩家自己算的那个数是对的"。
-    const tgt = L.duel.bs[bsSel] || L.duel.b;
-    const dv = C.stanceDef(tgt.st, tgt.stance);
-    const r1 = function (v) { return Math.round(v * 10) / 10; };
-    const ep = $('bs-cmd-p'), em = $('bs-cmd-m');
-    if (ep) {
-      ep.textContent = '攻 ' + Math.round(C.num(me.st.atkP)) +
-        ' / 穿 ' + Math.round(C.num(me.st.penP)) + ' → 防 ' + r1(C.num(dv.defP));
-    }
-    if (em) {
-      em.textContent = '攻 ' + Math.round(C.num(me.st.atkM)) +
-        ' / 穿 ' + Math.round(C.num(me.st.penM)) + ' → 防 ' + r1(C.num(dv.defM));
-    }
+    actMenu(actCtx(game));
     // 高亮沿用 HUD 的出手类型：在 HUD 上养成的习惯不该被菜单忘掉。
     // 于是"不想每场都点一次"的玩家可以在 HUD 上设好，然后一路敲空格。
     const pre = (game.atkType === 'm') ? 'm' : 'p';
@@ -2142,14 +2261,28 @@
         return true;
       }
     }
-    if (k === '1') { bsCmdCb('p'); return true; }
-    if (k === '2') { bsCmdCb('m'); return true; }
-    if (k === ' ' || k === 'Enter') {
-      const g = global.TideMain ? global.TideMain.game : null;
-      bsCmdCb(g && g.atkType === 'm' ? 'm' : 'p');
-      return true;
+    const g = global.TideMain ? global.TideMain.game : null;
+    /* 空格 / 回车 = "用 HUD 上选好的那一路"。
+       它**不是某一个动作的键**，而是两个伤害动作之间的转发 ——
+       所以在这里解析，而不是给物理和法术各挂一个 ' '：
+       挂上去的话，"空格走哪一路"会变成"谁先注册谁赢"。
+       它和"托管打完"不是一回事（那个走 skipBattle，是退出菜单的出口），
+       这一点两处文案早就这么写了，这里只是让它变成代码。 */
+    let id = (k === ' ' || k === 'Enter') ? (g && g.atkType === 'm' ? 'm' : 'p') : null;
+    if (!id) {
+      for (let i = 0; i < ACTS.length; i++) {
+        const a = ACTS[i];
+        if (a.keys && a.keys.indexOf(k) >= 0) { id = a.id; break; }
+      }
     }
-    return false;
+    if (!id) return false;
+    if (!actById(id)) return false;
+    /* 一律交给 bsCmdCb，**不再在这里判 enabled**：
+       返回 true 就已经把这个键吃掉了（不会漏到地图层），
+       而"能不能用"由 doRound 一处判 —— 两边各判一次的话，
+       两边读的还不是同一个 game，迟早会漂成"灰着却能按"或"能按却没反应"。 */
+    bsCmdCb(id);
+    return true;
   }
 
   /**
@@ -2833,6 +2966,10 @@
     // 战斗场景开着时的键盘入口。main.js 必须先问它，再决定要不要吞掉这个键 ——
     // 顺序反了的话，空格会同时被"用物理打"和"原地等一回合"吃掉。
     battleKey: battleKey,
+    /* 注册表本身也要能被外面读到：冒烟要断言"每个动作都真按得下去"，
+       P3 的后两步要往里注册魂技与撤离。**只读副本** ——
+       给出去的是切片，外面改不动真源。 */
+    battleActs: function () { return ACTS.slice(); },
     showTitle: showTitle,
     showGame: showGame,
     showOver: showOver,
