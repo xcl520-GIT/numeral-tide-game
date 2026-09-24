@@ -1015,6 +1015,35 @@
       for (const key of ['atkP', 'atkM', 'penP', 'penM', 'defP', 'defM', 'spd', 'crit', 'leech', 'dodge']) {
         if (!(key in st)) st[key] = 0;
       }
+      /* v11.10：**敌人的穿透** —— 给防御一个对手（"装备堆防御"那条债的正解）。
+
+         在这之前 penP / penM 走的是上面那个循环的"原值透传"分支，而
+         ENEMIES 模板里**一个都没写 penP**，于是被上面这行兜底补成 0：
+         **怪物的穿透恒为 0**。玩家的防御面对的是一支没有武器的军队
+         （eff = def − 0 = def）。这才是"堆防御没有天花板"的第一层原因 ——
+         K=50 的饱和曲线只是第二层（它让边际收益递减，但永不归零）。
+
+         为什么不走"抬攻击"那条老路：伤害 = atk·K/(def+K) 是**饱和**的，
+         抬 atk 会先把低防玩家打死，而对高防玩家几乎无感 ——
+         v11.9 已经量化过（第 5 层 atk ×4.15 只让伤害占血 0.1% → 0.6%）。
+         穿透是**减法**：eff = max(0, def − pen)，它削的是防御的绝对量，
+         所以它是唯一能"对抗防御"而不是"绕过防御"的数值手段。
+         （v11.9 的 deepCorrupt 是无视防御的真实伤害 —— 那是**绕过**。）
+
+         为什么只写在深渊：休闲/标准不写 `penPerDepth` = 0 = 旧行为，
+         逐位不变。可选字段 = 天然开关，跟 speedGap / deepCorrupt 同一条规矩。
+
+         落点依据（n=900，_probe\v11.10\probe_def5.html）：
+           通关率 22.8% → 20.1%（−2.7pp）
+           第 1 层死亡 **541 局逐位不变**（穿透从第 2 层起，第 1 层刚搬过家）
+           装备防御的价值 6.9pp → **4.2pp**（仍然有用，但不再是万能）
+         回退：删掉 `data.js` 里 abyss 的 `penPerDepth: 8` 那一行。 */
+      const penPerDepth = num(this.diff && this.diff.penPerDepth);
+      if (penPerDepth > 0 && depth >= 2) {
+        const penAdd = penPerDepth * (depth - 1);
+        st.penP = num(st.penP) + penAdd;
+        st.penM = num(st.penM) + penAdd;
+      }
       return st;
     }
 
