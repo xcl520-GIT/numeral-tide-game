@@ -1502,6 +1502,13 @@
      */
     newDuel(A, B, af, bf, aFirst, aInfo, bInfo) {
       const g = this, K = this.K, C = D.COMBAT;
+      // 1vN 的入口（v11.4-a）。B / bf / bInfo 允许是单个（旧调用点、
+      // 冒烟里的合成对决、以及所有"只应有一只怪"的路径），也允许是等长数组。
+      // 单元素必须与旧的单值调用**逐位相同** —— 第 1 步的验收标准就是这个，
+      // 所以这里只做归一化：不引入新分支、不消耗随机数、不改日志字段。
+      const Bs = Array.isArray(B) ? B : [B];
+      const bfS = Array.isArray(bf) ? bf : [bf || {}];
+      const bIS = Array.isArray(bInfo) ? bInfo : [bInfo];
       const a = {
         name: aInfo.name, hp: A.hp, maxHp: A.maxHp || A.hp, st: A, flags: af || {},
         dodge: num(A.dodge), isPlayer: !!aInfo.isPlayer,
@@ -1510,13 +1517,25 @@
         // 克制奖励永不触发，而界面看不出任何异常。
         atkType: (aInfo.atkType === 'p' || aInfo.atkType === 'm') ? aInfo.atkType : null
       };
-      const b = {
-        name: bInfo.name, hp: B.hp, maxHp: B.maxHp || B.hp, st: B, flags: bf || {},
-        dodge: num(B.dodge), isPlayer: !!bInfo.isPlayer,
-        wet: num(B.wet),         // 潮湿是挂在敌人身上的状态，结算时读这里
-        stance: B.stance || null, // 姿态：只重分配防御，不改变总量
-        tags: B.tags || []       // 针对词条要判定的目标标签
-      };
+      // 敌方单位数组。N=1 时 bs[0] 的内容与上面那个单一对象逐字相同。
+      //
+      // 为什么每只怪要各自带 src / stance / idx：
+      //   · src    —— 各自的姿态时钟源，否则群战里"谁该翻面"说不清；
+      //   · stance —— 各自的姿态，N=1 时就是 duel.b.stance；
+      //   · idx    —— 同速时的稳定排序键，也供界面按序号选目标。
+      const bs = [];
+      for (let i = 0; i < Bs.length; i++) {
+        const Bx = Bs[i], bx = bfS[i] || {}, bIx = bIS[i] || {};
+        bs.push({
+          name: bIx.name, hp: Bx.hp, maxHp: Bx.maxHp || Bx.hp, st: Bx, flags: bx,
+          dodge: num(Bx.dodge), isPlayer: !!bIx.isPlayer,
+          wet: num(Bx.wet),         // 潮湿是挂在敌人身上的状态，结算时读这里
+          stance: Bx.stance || null, // 姿态：只重分配防御，不改变总量
+          tags: Bx.tags || [],      // 针对词条要判定的目标标签
+          src: bIx.src || null,     // 它的模型对象：姿态时钟靠它继续走
+          idx: i
+        });
+      }
       // 敌人的**模型对象**。有它，姿态时钟才能在战斗里继续走。
       //
       // 为什么这条是必需的、而不是锦上添花：实测 83% 的对决在第 1 轮就分
@@ -1526,13 +1545,36 @@
       // 而如果姿态不翻面，那 6 轮里最优解从头到尾是同一个，
       // 逐轮再选一遍仍然是假决策。姿态翻面才把"轮"变成有意义的时间单位。
       // 冒烟里的伤害数学不传它（那种合成对决本来就不该有姿态轮换）。
-      const bSrc = bInfo.src || null;
+      // 1vN 之后每条敌人都各自持有一个 src（见上面的 bs 构造）——
+      // 于是语义从"整场共用一个姿态时钟"变成"每只怪有自己的"。
+      // 兼容别名：界面（ui.js:1915/1970 读 duel.b.st / duel.b.stance）与
+      // 旧断言读的都是 duel.b，它必须仍然是"第一个敌人"。
+      const b = bs[0];
+      const bSrc = bs[0].src;
       const roundLog = [];
       // 先手权：速度高者先手；平手看参数。整场只判一次 ——
       // 中途重判会让"谁先手"随回合漂移，而意图预告是按当前顺序推出来的，
       // 漂移就等于预告在说谎。
-      const order = (num(a.st.spd) === num(b.st.spd) ? !!aFirst : num(a.st.spd) > num(b.st.spd))
-        ? [a, b] : [b, a];
+      // 出手顺序：按速度从高到低；同速时 aFirst 决定"玩家"与**第一个**敌人的
+      // 先后，敌人之间按 idx 稳定排序。
+      //
+      // 这套比较器在 bs.length === 1 时必须退化成旧的二元比较
+      // (a.spd === b.spd ? aFirst : a.spd > b.spd) ? [a,b] : [b,a]：
+      // 同速 -> 命中 x === a 那一支 -> 由 aFirst 决定；异速 -> 直接比速度。
+      //
+      // 认人必须用**同一性**（x === a），不能用 x.isPlayer：
+      // 冒烟里的合成对决不传 isPlayer，标志位是假的；更要紧的是，
+      // 那时 a.idx 是 undefined，落到最后的 x.idx - y.idx 会返回 NaN，
+      // 而返回 NaN 的比较器等于把顺序交给引擎实现 —— 那就不是等价重构了。
+      const order = [a].concat(bs).sort(function (x, y) {
+        const sx = num(x.st.spd), sy = num(y.st.spd);
+        if (sx !== sy) return sy - sx;
+        const ax = (x === a), ay = (y === a);
+        if (ax && ay) return 0;
+        if (ax) return aFirst ? -1 : 1;
+        if (ay) return aFirst ? 1 : -1;
+        return x.idx - y.idx;
+      });
       let round = 0, capped = false, finished = false, flipped = false;
 
       function atkOf(x) { return bestAttack(x.st, x === a ? b.st : a.st, K); }
@@ -1665,12 +1707,42 @@
        */
       function capOut() {
         capped = true;
-        const ra = a.hp / a.maxHp, rb = b.hp / b.maxHp;
-        if (ra <= rb) a.hp = 0; else b.hp = 0;
+        // 1vN 里对手是**一个整体**，所以右边用全体敌人的剩余血量比之和。
+        // N=1 时这个和就是那唯一的敌人，于是与旧式完全等价。
+        // 这里的 Math.max(0, ...) 对 N=1 是空操作：能走到 capOut 就说明
+        // 双方都还活着（死了的那支会先走 finished 分支）。
+        const ra = a.hp / a.maxHp;
+        let foeHp = 0, foeMax = 0;
+        for (let i = 0; i < bs.length; i++) {
+          foeHp += Math.max(0, bs[i].hp);
+          foeMax += bs[i].maxHp;
+        }
+        const rb = foeMax > 0 ? foeHp / foeMax : 0;
+        if (ra <= rb) a.hp = 0;
+        else for (let i = 0; i < bs.length; i++) bs[i].hp = 0;
+      }
+
+      /**
+       * 本轮的敌方目标：want 优先（单位对象或下标），否则第一个还活着的敌人。
+       * 返回 null 表示敌方全灭 —— 调用方决定拿它怎么办（step 里退回 bs[0]，
+       * 那是为了与旧行为逐位相同）。
+       */
+      function pickFoe(want) {
+        let t = null;
+        if (typeof want === 'number') t = bs[want] || null;
+        else if (want && bs.indexOf(want) >= 0) t = want;
+        if (t && t.hp > 0) return t;
+        for (let i = 0; i < bs.length; i++) if (bs[i].hp > 0) return bs[i];
+        return null;
+      }
+      /** 场上敌人是否全部倒下。N=1 时它就是 `b.hp <= 0`。 */
+      function allFoesDown() {
+        for (let i = 0; i < bs.length; i++) if (bs[i].hp > 0) return false;
+        return true;
       }
 
       const duel = {
-        a: a, b: b, order: order, log: roundLog,
+        a: a, b: b, bs: bs, order: order, log: roundLog,
         /** 谁是玩家 —— 界面据此决定给哪一边开指令菜单。 */
         player: a.isPlayer ? a : (b.isPlayer ? b : null),
         /** 这一轮谁先出手。玩家比敌人慢时，界面要先把对方那一手演完。 */
@@ -1686,19 +1758,35 @@
          * @param {string} playerType 玩家这一轮选的路（'p' / 'm'）；
          *   不传或不是这两个值 = 让引擎按最优打（敌人一直如此，非交互路径也如此）。
          */
-        step(playerType) {
+        step(playerType, wantTarget) {
           if (finished) return [];
           const from = roundLog.length;
           round++;
           for (let i = 0; i < order.length; i++) {
             const src = order[i];
             if (src.hp <= 0) continue;
-            const dst = src === a ? b : a;
+            // 目标：玩家出手时是他这一轮选的那个（wantTarget 可以是单位对象，
+            // 也可以是 bs 的下标 —— 界面与模拟器两条入口）；没选、或选的那个
+            // 已经倒了，就退回"第一个还活着的敌人"。敌人出手时目标恒为玩家：
+            // 敌人之间不会互殴，也不存在"该打谁"这个选择。
+            //
+            // `|| bs[0]` 那一截不是装饰。旧代码在"唯一的对手已经死了"时
+            // **仍然会让玩家对着尸体挥一刀**（会消耗随机数、会写一条明细），
+            // 所以这里必须保留同一个行为，否则随机流就漂了。
+            // 认"这是不是玩家"必须用 src === a，不能用 src.isPlayer ——
+            // 理由同上面的 order 比较器：合成对决的 isPlayer 是假的，
+            // 用标志位会让单位去打自己。
+            const dst = (src === a)
+              ? (pickFoe(wantTarget) || bs[0])
+              : a;
             // 选的那一路只作用在**本轮的玩家出手**上（含下面的追加击）。
             const t = (src.isPlayer && (playerType === 'p' || playerType === 'm'))
               ? playerType : null;
             strike(src, dst, t);
-            if (dst.hp <= 0) break;
+            // 一个对手倒下不再等于整轮结束：只有"场上敌方全灭"或"玩家倒下"才停。
+            // N=1 时这与旧的 `if (dst.hp <= 0) break;` 完全等价 ——
+            // 唯一的对手倒下，就是敌方全灭。
+            if (dst.hp <= 0 && (allFoesDown() || a.hp <= 0)) break;
             // 速度碾压：快的一方多打一次
             const gap = num(src.st.spd) - num(dst.st.spd);
             if (gap >= C.speedGap && src.hp > 0 && dst.hp > 0) strike(src, dst, t);
@@ -1716,11 +1804,16 @@
           // 只在双方都还活着时推进：让一只刚被打死的怪再翻一次姿态，
           // 只会往事件流里塞一条指向尸体的通知。
           flipped = false;
-          if (bSrc && a.hp > 0 && b.hp > 0) {
-            const was = b.stance;
-            g._tickStance(bSrc);
-            b.stance = bSrc.stance;
-            flipped = (b.stance !== was);
+          for (let i = 0; i < bs.length; i++) {
+            const u = bs[i];
+            // 每只活着的敌人各自推进自己的姿态时钟。
+            // 旧式是 `if (bSrc && a.hp > 0 && b.hp > 0)`，N=1 时逐字等价。
+            if (u.src && a.hp > 0 && u.hp > 0) {
+              const was = u.stance;
+              g._tickStance(u.src);
+              u.stance = u.src.stance;
+              if (u.stance !== was) flipped = true;
+            }
           }
           if (a.hp <= 0 || b.hp <= 0) finished = true;
           else if (round >= C.maxRounds) { capOut(); finished = true; }
@@ -1734,13 +1827,26 @@
         runAuto(pick) {
           // 必须写成 duel.step —— step 是**对象的方法**，不是闭包函数。
           // 写成裸 step(...) 会解析到外层作用域，运行时报 "step is not defined"。
-          while (!finished) duel.step(pick ? pick(duel) : null);
+          //
+          // pick 现在允许返回两种东西：
+          //   'p' / 'm' / null   —— 只选路（旧行为，也是所有非交互路径的形态）
+          //   {type, target}     —— 选路 + 选目标（第 2 步的菜单走这条）
+          // 归一化放在这里，step 因此只需要一个 (路, 目标) 的实现。
+          while (!finished) {
+            const r = pick ? pick(duel) : null;
+            if (r && typeof r === 'object') duel.step(r.type, r.target);
+            else duel.step(r, null);
+          }
         },
 
         result() {
           return {
             aHp: Math.max(0, Math.round(a.hp)), bHp: Math.max(0, Math.round(b.hp)),
-            rounds: round, aWin: b.hp <= 0 && a.hp > 0, dead: a.hp <= 0,
+            // bsHp / foesDown 是给 1vN 用的新读法；aHp / bHp 保持旧语义
+            // （bHp = 第一个敌人），因为 _fightSettle 与界面读的就是它。
+            bsHp: bs.map(function (u) { return Math.max(0, Math.round(u.hp)); }),
+            foesDown: allFoesDown(),
+            rounds: round, aWin: allFoesDown() && a.hp > 0, dead: a.hp <= 0,
             capped: capped, log: roundLog
           };
         }
