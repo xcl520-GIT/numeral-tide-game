@@ -219,12 +219,15 @@
       // 战斗中的世界时钟（v11.4-h）：一场仗的每一**轮**推进一次敌人的行动时钟，
       // 而不是整场只推进一次。关掉它 = 回到"战斗期间地图冻结"（对照组）。
       this.tick = (opts.tick === undefined) ? true : !!opts.tick;
-      // 被惊动的房间每回合都挪（v11.4-h）。
-      // 这一步必须放在**分格之后** —— 外部参考里的顺序是"先分格，再加速"，
-      // 而 v11.4-g 的实测正是这条的反证：目标格没分掉时，加速只是
-      // 让它们更快地排进同一条队，四邻 1.04 → 1.05，纹丝不动。
-      // 区域门禁已经保证了"此刻玩家就在这个房间里"，所以这里不需要额外的惊动标记。
-      this.alert = (opts.alert === undefined) ? true : !!opts.alert;
+      /* 被惊动的房间每回合都挪 —— **默认关**（v11.4-i 改）。
+         它已经被证明不解决形状问题（v11.4-g：四邻 1.04 → 1.05），
+         而且把它和守位/分格/半径混在一起改，归因会立刻变糊。
+         保留开关是为了以后单独量它；默认关还有一个附带好处：
+         行军速度回到 0.5 格/回合，与"接触时刻 t* = d / 1.5"那套推演一致。 */
+      this.alert = (opts.alert === undefined) ? false : !!opts.alert;
+      /* 守位 + 惊动半径（v11.4-i）—— 本轮的主角。
+         关掉它就是旧的"区域门禁"（玩家进区才动）—— 对照组。 */
+      this.hold = (opts.hold === undefined) ? true : !!opts.hold;
 
       this.seed = (opts.seed === undefined || opts.seed === null)
         ? ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0)
@@ -847,6 +850,10 @@
         stance: canStance(st, arc) ? (this.rng.chance(0.5) ? 'p' : 'm') : null,
         stanceT: D.STANCE.every, stanceFx: 0,
         region: this.regionAt(x, y),
+        // 守位/惊动状态（v11.4-i）。home 是巢位 —— 回位纪律要求它**真的走回原格**，
+        // 不然玩家反复拉打几轮之后，堆形会永久散掉，数据比不做还难看。
+        homeX: x, homeY: y,
+        awake: false, awayTurns: 0, returning: false,
         // 槽位：由 _assignSlots 每回合重新分配。**必须在这里声明**，
         // 不能等第一次分配再挂上去 —— 给成型对象新增字段会让它发生隐藏类迁移，
         // 而这个字段每回合都要读一次（这个坑在本项目里踩过，整局慢 3 倍）。
@@ -2431,7 +2438,9 @@
         if (this.walkable(x, y)) open.push({ x: x, y: y });
       }
       if (!open.length) return;
-      const r = this.regionAt(this.px, this.py);
+      /* 候选集按**醒着**筛，不再按区域筛 —— 半径脱离门禁之后，
+         来围玩家的那几只本来就可能来自隔壁房间。 */
+      const awakeOK = (e) => this.hold ? (e.awake && !e.returning) : (e.region === this.regionAt(this.px, this.py));
       /* 粘性：上一回合已经拿到槽位、槽位仍然开放、且自己离它 <=3 的，直接续用。
          ------------------------------------------------------------
          不这么做会出现**抢椅子**：玩家每挪一格就重分一次，而"最近的 4 只"
@@ -2440,7 +2449,7 @@
          从别的指标完全看不出来。这是这一整套里最隐蔽的一种失败。 */
       const taken = {}, stuck = new Set();
       for (const e of this.enemies) {
-        if (e.region !== r || e.hp <= 0 || e.stun > 0 || !e.slot) continue;
+        if (!awakeOK(e) || e.hp <= 0 || e.stun > 0 || !e.slot) continue;
         if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) <= 1) continue;
         let si = -1;
         for (let s = 0; s < open.length; s++) {
@@ -2453,7 +2462,7 @@
       }
       const cand = [];
       for (const e of this.enemies) {
-        if (e.region !== r || e.hp <= 0 || e.stun > 0) continue;
+        if (!awakeOK(e) || e.hp <= 0 || e.stun > 0) continue;
         const d2 = Math.abs(e.x - this.px) + Math.abs(e.y - this.py);
         if (d2 <= 1) continue;        // 贴身了：它这一步是出手，不是移动
         if (stuck.has(e)) continue;   // 已经粘住的：不参与重分
@@ -2490,6 +2499,36 @@
       }
     }
 
+    /* 守位 / 惊动 / 回位（v11.4-i）
+       ------------------------------------------------------------
+       三个阈值，两两之间必须留出间隔（迟滞），否则玩家在边缘来回走
+       会让整堆怪跟着抽搐：
+         · 进 alertR（8）才醒；
+         · 退到 disengageR（10）以外**连续** returnAfter（10）回合才开始回巢；
+         · 回巢必须走回**原格**才重新睡下（到附近就睡会把堆形留在半路）。
+       这段"回位纪律"看着啰嗦，但少了它，玩家拉打几轮之后堆形会永久散掉 ——
+       而那种失败在数据上表现为"越玩越不容易被围"，很难归因。 */
+    _updateAwake(e) {
+      const A = D.PACK;
+      const d = Math.abs(e.x - this.px) + Math.abs(e.y - this.py);
+      if (e.returning) {
+        if (e.x === e.homeX && e.y === e.homeY) {
+          e.returning = false; e.awake = false; e.awayTurns = 0;
+        }
+        return;
+      }
+      if (!e.awake) {
+        if (d <= A.alertR) { e.awake = true; e.awayTurns = 0; }
+        return;
+      }
+      if (d >= A.disengageR) {
+        e.awayTurns = (e.awayTurns || 0) + 1;
+        if (e.awayTurns >= A.returnAfter) e.returning = true;
+      } else {
+        e.awayTurns = 0;
+      }
+    }
+
     /**
      * 让一只怪朝目标挪一步。**只挪，不打** —— 出手是 enemyHit 的事，
      * 它只在回合推进里结算。这条边界不能糊：让"挪动的那个函数"顺手打一下，
@@ -2497,16 +2536,30 @@
      * @returns {boolean} 真的挪动了吗
      */
     _stepEnemyTowardPlayer(e) {
-      // 贴身了就该出手，不该挪
-      if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) <= 1) return false;
-      let tx = this.px, ty = this.py;
-      if (e.slot) {
-        // 已经站在自己的槽位上就**停下**。少了这一条，它会继续朝玩家挤，
-        // 把刚分好的四邻又挤成一个方向 —— 那就白分了。
-        if (e.x === e.slot.x && e.y === e.slot.y) return false;
-        tx = e.slot.x; ty = e.slot.y;
+      let tx, ty, onlyRegion;
+      if (e.returning) {
+        // 回巢：目标是自己那一格。它**不受分格影响** —— 回位是纪律，不是战术。
+        tx = e.homeX; ty = e.homeY; onlyRegion = e.region;
+        if (e.x === tx && e.y === ty) return false;
+      } else {
+        // 贴身了就该出手，不该挪
+        if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) <= 1) return false;
+        tx = this.px; ty = this.py;
+        /* 折中：**惊动半径只负责唤醒，房间仍然管着它们能走多远**。
+           放开区域限制（onlyRegion=null）实测确实能把群战抬到 21%，
+           但 standard 通关率同时掉到 34%（-15pp）—— 代价是"被追穿整层"，
+           那不是"进房被扑"，是"甩不掉"。而这一根杠杆要的只是**行军的回合数**：
+           半径 8 让堆在玩家还在走廊里时就开始收网，等他在房门口露面，
+           两路纵队的形状已经展开完毕。这不需要它们跨出房间。 */
+        onlyRegion = e.region;
+        if (e.slot) {
+          // 已经站在自己的槽位上就**停下**。少了这一条，它会继续朝玩家挤，
+          // 把刚分好的四邻又挤成一个方向 —— 那就白分了。
+          if (e.x === e.slot.x && e.y === e.slot.y) return false;
+          tx = e.slot.x; ty = e.slot.y;
+        }
       }
-      const path = this.findPath(e.x, e.y, tx, ty, 260, 0, e.region);
+      const path = this.findPath(e.x, e.y, tx, ty, 260, 0, onlyRegion);
       if (!path || path.length < 2) return false;
       const n = path[1];
       if (this.enemyAt(n.x, n.y) || (n.x === this.px && n.y === this.py)) return false;
@@ -2532,11 +2585,11 @@
        潮汐**不**跟着走 —— 潮水按回合涨，那是它自己的时钟。 */
     _fightRoundTick(participants) {
       if (!this.tick) return;
-      const r = this.regionAt(this.px, this.py);
       this._assignSlots();
       for (const e of this.enemies) {
         if (participants && participants.indexOf(e) >= 0) continue;
-        if (e.region !== r || e.stun > 0) continue;
+        if (e.stun > 0) continue;
+        if (this.hold ? !e.awake : (e.region !== this.regionAt(this.px, this.py))) continue;
         e.cd++;
         if (this.alert || e.cd % 2 === 0 || e.kind === 'elite' || e.kind === 'boss') {
           this._stepEnemyTowardPlayer(e);
@@ -3097,10 +3150,17 @@
           this.events.push({ kind: 'stunned', enemy: e });
           continue;
         }
-        // 区域门禁：玩家不在这一区 → 这只怪待机（不动、不打、也不孵化）。
-        // 放在眩晕之后、行动之前：被震晕的仍然算"跳过"，两种"不行动"的语义要分开。
-        if (e.region !== undefined && e.region >= 0 &&
-            this.regionAt(this.px, this.py) !== e.region) {
+        /* 守位 / 惊动（v11.4-i）：是否行动由**距离与状态**决定，不再由区域门禁决定。
+           为什么必须换掉区域门禁：门禁的判据是"玩家已经踏进这个房间"，
+           也就是它们比玩家晚出发整整一个房间的距离 —— 等玩家走到第一只面前，
+           其余的才刚迈出第一步。收网的距离本来就是**玩家自己跑完**的
+           （t* = d / 1.5，d=7 时约 4.7 回合），门禁把这段跑道直接砍掉了。
+           放在眩晕之后、行动之前：被震晕的仍然算"跳过"，两种"不行动"的语义要分开。 */
+        if (this.hold) {
+          this._updateAwake(e);
+          if (!e.awake) continue;
+        } else if (e.region !== undefined && e.region >= 0 &&
+                   this.regionAt(this.px, this.py) !== e.region) {
           continue;
         }
         // 姿态推进。放在"确认这一轮真的要行动"之后 ——
@@ -3263,7 +3323,8 @@
           squad: opts.squad,
           slots: opts.slots,
           tick: opts.tick,
-          alert: opts.alert
+          alert: opts.alert,
+          hold: opts.hold
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;

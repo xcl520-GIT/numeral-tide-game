@@ -39,7 +39,7 @@
   function reset() {
     st = { total: 0, adj: 0, waited: 0, moved: 0, movedAdj: 0, blockedFoe: 0,
            noPath: 0, playerTile: 0, stunned: 0, other: 0, dead: 0, turns: 0,
-           adjHist: {}, approachTurns: 0, approachN: 0,
+           adjHist: {}, approachTurns: 0, approachN: 0, returning: 0,
            // 目标格冲突（外部参考建议的第 2 列打点）：
            // 这一步有几只怪想走**同一格**。它是"同侧排队"假说的直接判据 ——
            // 冲突率高 = 每只怪都在理性地选同一个最优格，那不是 bug，是均衡。
@@ -57,7 +57,8 @@
     var snap = [];
     for (var i = 0; i < me.enemies.length; i++) {
       var e = me.enemies[i];
-      snap.push({ e: e, x: e.x, y: e.y, cd: e.cd || 0, stun: e.stun || 0, region: e.region });
+      snap.push({ e: e, x: e.x, y: e.y, cd: e.cd || 0, stun: e.stun || 0,
+                  region: e.region, awake: e.awake, returning: e.returning });
     }
     var r = oe.apply(this, arguments);
     st.turns++;
@@ -91,7 +92,12 @@
     for (var j = 0; j < snap.length; j++) {
       var b = snap[j], g = b.e;
       if (!alive.has(g)) continue;                       // 这一回合里死了
-      if (b.region !== undefined && b.region >= 0 && myR !== b.region) continue;  // 区域门禁
+      // 门禁：v11.4-i 之后是"守位/惊动"（没醒的怪本来就不动，不该计入分母）。
+      // 探针必须跟着改 —— 判据换掉而探针不换，归因表就会开始算一些不参与的东西。
+      if (me.hold) {
+        if (!b.awake) continue;
+        if (b.returning) { st.returning = (st.returning || 0) + 1; continue; }
+      } else if (b.region !== undefined && b.region >= 0 && myR !== b.region) continue;
       st.total++;
       var moved = (g.x !== b.x || g.y !== b.y);
       if (moved) {
@@ -154,6 +160,7 @@
     L.push('  走不动:寻路失败     ' + pad(pct(st.noPath, st.total), 7) + '  ' + st.noPath);
     L.push('  走不动:目标是玩家格 ' + pad(pct(st.playerTile, st.total), 7) + '  ' + st.playerTile);
     L.push('  被震晕 / 其他       ' + pad(pct(st.stunned, st.total), 7) + ' / ' + st.other);
+    L.push('  回巢途中（不计入上面）' + (st.returning || 0));
     L.push('  死亡回合的残留      ' + st.dead);
     var h = {}; for (var k = 0; k < adjAtFight.length; k++) h[adjAtFight[k]] = (h[adjAtFight[k]] || 0) + 1;
     var ks = Object.keys(h).sort(function (a, b) { return a - b; });

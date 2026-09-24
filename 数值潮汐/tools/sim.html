@@ -50,7 +50,9 @@
   //   alert=0  没被惊动的房间按老节奏每 2 回合挪一步
   var slots = (q.slots === undefined || q.slots === '') ? 1 : parseInt(q.slots, 10);
   var tick = (q.tick === undefined || q.tick === '') ? 1 : parseInt(q.tick, 10);
-  var alert = (q.alert === undefined || q.alert === '') ? 1 : parseInt(q.alert, 10);
+  var alert = (q.alert === undefined || q.alert === '') ? 0 : parseInt(q.alert, 10);
+  // hold=0 回到旧的区域门禁（玩家进区才动）—— 本轮的对照组。
+  var hold = (q.hold === undefined || q.hold === '') ? 1 : parseInt(q.hold, 10);
   lines.push('fumble=' + fumble + '（AI 失误率）  counterBonus=' +
     (counter === undefined ? '(默认)' : counter) + '  战斗内姿态轮换=' + (stance ? '开' : '关') +
     '  群战=' + (squad ? '开' : '关'));
@@ -69,7 +71,7 @@
     var d = diffs[i];
     var o = TideCore.Game.simulate(n, { difficulty: d, seedBase: 1000, maxTurns: 2400,
       aiFumble: fumble, counterBonus: counter, aiStance: !!stance, squad: !!squad,
-      slots: !!slots, tick: !!tick, alert: !!alert });
+      slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold });
     lines.push('[' + d + '] ' + fmt(o));
     lines.push('        outcome: ' + JSON.stringify(o.outcome));
     if (o.stalls) lines.push('        STALL: ' + JSON.stringify(o.stalls));

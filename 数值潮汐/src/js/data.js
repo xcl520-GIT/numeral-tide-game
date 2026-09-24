@@ -798,6 +798,30 @@
      danger 只用来做 UI 提示与怪物强度的微调，**不参与结算公式** ——
      真正的强度来自区域里怪物自身的属性。
      ============================================================ */
+  /* ============================================================
+     守位 / 惊动半径（v11.4-i）
+
+     为什么这三个数要一起定义、而且必须**两两留间隔**：
+     惊动与脱离如果共用同一个半径，玩家在边界上左右走一步就会让整堆怪
+     反复醒来/睡下，队形抽搐，而且从数据上看不出是"阈值抖动"——
+     只会表现为"群战占比时高时低"。所以脱离半径必须比惊动半径大。
+
+     alertR 取 8 的理由（这是个**时间**常数，不是距离常数）：
+     玩家 1 格/回合、怪 0.5 格/回合，双方相向 ⇒ 接触时刻 t* = d / 1.5。
+     d=8 时 t* ≈ 5.3 回合 —— 整堆同速行军时堆内间距**不缩不放**，
+     所以半径的作用不是"让它们多走几格"，而是**给行军留出足够的回合数**；
+     真正把距离归零的是玩家自己的冲锋。d 太小（比如 3）时，堆还在门外
+     就被惊动，来不及展开成两路纵队，接触瞬间仍然只有前排一只。
+
+     returnAfter 取 10：脱离是"连续 10 回合都在圈外"才算数，
+     否则玩家在圈边拉扯一下，整堆就开始回家，堆形从半路散掉。
+     ============================================================ */
+  const PACK = {
+    alertR: 8,        // 进这个距离就醒（曼哈顿距离）
+    disengageR: 10,   // 退到这么远之外才可能脱战（必须 > alertR）
+    returnAfter: 10   // 圈外连续这么多回合 → 开始回巢
+  };
+
   const REGIONS = {
     normal: { key: 'normal', name: '普通区', color: '#5a6a80', tint: 'rgba(90,106,128,0.10)',  danger: 1, enemMul: 1.00 },
     elite:  { key: 'elite',  name: '精英区', color: '#b06cf0', tint: 'rgba(176,108,240,0.14)', danger: 2, enemMul: 1.25 },
@@ -922,7 +946,7 @@
     AFFIXES: AFFIXES, affixById: affixById,
     RELICS: RELICS, SCHOOLS: SCHOOLS,
   RELIC_FALLBACKS: RELIC_FALLBACKS, RELIC_FALLBACK: RELIC_FALLBACK,
-    TAGS: TAGS, THEMES: THEMES, STANCE: STANCE,
+    TAGS: TAGS, THEMES: THEMES, STANCE: STANCE, PACK: PACK,
     ENEMIES: ENEMIES, enemyById: enemyById, BOSSES: BOSSES,
     DIFFICULTIES: DIFFICULTIES, DIFF_ORDER: DIFF_ORDER,
     MAP: MAP, DEPTH_CFG: DEPTH_CFG, LOOT: LOOT, PROGRESSION: PROGRESSION,
