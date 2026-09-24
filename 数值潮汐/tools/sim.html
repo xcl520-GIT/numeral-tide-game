@@ -83,6 +83,12 @@
   // AI 贴身留手（默认 0 = 旧行为：地图上照放）。
   // 实测它值 −6.4/−4.4/−9.7pp：地图上的裂地斩是"免战"，收起来就逃不掉了。
   var duelai = (q.duelai === undefined || q.duelai === '') ? 0 : parseInt(q.duelai, 10);
+  // P3 第三步（v11.5）：撤离。两个开关，和 P3 第二步同一个形状：
+  //   flee=0    关掉**玩家入口**（默认 1）。它只往菜单加一个动作，模拟器不碰界面，
+  //             所以默认档的平衡逐位不变 —— 玩法入口和 AI 策略必须分开。
+  //   fleeai=1  无头 AI 也会撤（默认 0 = 死战到底 = 旧行为）。
+  var flee = (q.flee === undefined || q.flee === '') ? 1 : parseInt(q.flee, 10);
+  var fleeai = (q.fleeai === undefined || q.fleeai === '') ? 0 : parseInt(q.fleeai, 10);
   lines.push('fumble=' + fumble + '（AI 失误率）  counterBonus=' +
     (counter === undefined ? '(默认)' : counter) + '  战斗内姿态轮换=' + (stance ? '开' : '关') +
     '  群战=' + (squad ? '开' : '关'));
@@ -98,7 +104,8 @@
     '  Boss行为=' + (bossfx ? '开' : '关（只有数值差别）') +
     '  对决魂技=' + (duelskill ? '开（默认）' : '关（只在地图上放 · 对照）') +
     '  冷却随战斗轮=' + (duelcd ? '走' : '不走（默认 · 旧口径）') +
-    '  AI留手=' + (duelai ? '开' : '关（默认 · 旧行为）'));
+    '  AI留手=' + (duelai ? '开' : '关（默认 · 旧行为）') +
+    '  撤离=' + (flee ? (fleeai ? '开 + AI会撤' : '开（默认 · 仅玩家）') : '关'));
 
   function fmt(o) {
     return 'winRate=' + o.winRate + '%  turns=' + o.turns + '  kills=' + o.kills +
@@ -160,6 +167,7 @@
       ' | 等待 ' + o.waitRate + '% | 承伤/局 ' + o.dmgTaken +
       ' | 战斗 ' + avgFr() + ' 轮/场' +
       ' | 对决魂技 ' + o.duelSkills + ' 次' +
+      ' | 撤离 ' + o.flees + ' 次' +
       ' | 第1层死亡 ' + (o.byDepth['1'] || 0);
   }
 
@@ -174,7 +182,8 @@
       slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold,
       cleave: !!cleave, keepPay: !!keeppay, waitCost: waitcost, aiWait: !!aiwait,
       roadW: roadw, packAnchor: !!packanchor, bossFx: !!bossfx,
-      duelSkill: !!duelskill, duelCd: !!duelcd, duelAi: !!duelai });
+      duelSkill: !!duelskill, duelCd: !!duelcd, duelAi: !!duelai,
+      flee: !!flee, fleeAi: !!fleeai });
     lines.push('[' + d + '] ' + fmt(o));
     lines.push('        群战拆分 野生 ' + pct(byKind.wild) + ' (n=' + byKind.wild.n + ')' +
       '  召唤物 ' + pct(byKind.minion) + ' (n=' + byKind.minion.n + ')' +
@@ -203,7 +212,8 @@
         slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold,
         cleave: !!cleave, keepPay: !!keeppay, waitCost: waitcost, aiWait: !!aiwait,
         roadW: roadw, packAnchor: !!packanchor, bossFx: !!bossfx,
-        duelSkill: !!duelskill, duelCd: !!duelcd, duelAi: !!duelai
+        duelSkill: !!duelskill, duelCd: !!duelcd, duelAi: !!duelai,
+        flee: !!flee, fleeAi: !!fleeai
       });
       lines.push('[cls:' + c + '] ' + fmt(o));
       lines.push('        ' + resident(o));

@@ -651,6 +651,27 @@
     goldChestPerDepth: 9
   };
 
+  /* 撤离（v11.5 P3 第三步）的**定价三件套** —— 改价只改这一处。
+
+     为什么要"先定价再实现"（工作单里 A4 那条）：撤离如果免费，
+     它就不是一个决策，而是一个免死按钮 —— 打不过就撤，于是"打不过"
+     这件事不再有任何后果，而整部游戏的难度都建在那件事上。
+
+     三件：
+       lootMul   本场**已经倒下**的敌人，金币与掉落掷骰都减半。
+                 没倒下的敌人当然什么都不掉（它们还活着）。
+                 注意它只在这个人自己撤的时候生效 —— 那是"你放弃了战场"，
+                 而不是"系统扣了你一半"。
+       tideBeat  立刻推进的潮汐节拍数。这是**时间**那一侧的代价：
+                 潮水不等你，撤退是拿地图压力换命。
+       aiDmgFrac AI 判据：**预期本轮承伤 > 剩余生命的这个比例**就撤。
+                 （工作单原文："预期本轮承伤 > 剩余血量 30% 时撤"。） */
+  const FLEE = {
+    lootMul: 0.5,
+    tideBeat: 1,
+    aiDmgFrac: 0.30
+  };
+
   /* 遗物三选一节奏 */
   const PROGRESSION = {
     relicEvery: 6,              // 每击杀 6 个敌人给一次三选一
@@ -1023,7 +1044,7 @@
     TAGS: TAGS, THEMES: THEMES, STANCE: STANCE, PACK: PACK,
     ENEMIES: ENEMIES, enemyById: enemyById, BOSSES: BOSSES,
     DIFFICULTIES: DIFFICULTIES, DIFF_ORDER: DIFF_ORDER,
-    MAP: MAP, DEPTH_CFG: DEPTH_CFG, LOOT: LOOT, PROGRESSION: PROGRESSION,
+    MAP: MAP, DEPTH_CFG: DEPTH_CFG, LOOT: LOOT, PROGRESSION: PROGRESSION, FLEE: FLEE,
     META: META
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -318,6 +318,14 @@
          要让它反转，得先把对决那一侧的价值做大（或者让地图侧不再能免战），
          而不是靠改 AI 的偏好硬拗。 */
       this.duelAiHold = !!opts.duelAi;
+      /* 撤离（v11.5 P3 第三步）。两个开关，和 P3 第二步同一个形状：
+           flee   玩家能不能撤（默认 **1** = 开）。它只往菜单里加一个动作，
+                  模拟器不碰 ui.js，所以**默认档的平衡逐位不变** ——
+                  这正是"玩法入口"和"AI 策略"必须分开的那条经验。
+           fleeAi AI 会不会自己撤（默认 **0** = 旧行为：死战到底）。
+                  它单独值多少只能靠对照量，见 sim.html 的 ?fleeai=1。 */
+      this.fleeOn = (opts.flee === undefined) ? true : !!opts.flee;
+      this.fleeAiOn = !!opts.fleeAi;
 
       this.seed = (opts.seed === undefined || opts.seed === null)
         ? ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0)
@@ -402,7 +410,10 @@
          纯计数、不参与任何判定，但它必须在 reset 里声明 ——
          给已经定型的 Game 实例补字段会触发隐藏类迁移，整局慢 3 倍，
          而症状出现在离改动最远的地方（本项目踩过两次）。 */
-      this.duelSkills = 0;        // 一局里放过几次魂技（平衡分析用）
+      this.duelSkills = 0;
+      /* 一局里撤了几次（纯计数、不参与判定，但必须在 reset 里声明 ——
+         给定型对象补字段会触发隐藏类迁移，本项目踩过两次）。 */
+      this.flees = 0;        // 一局里放过几次魂技（平衡分析用）
       this.freeMoves = 0;        // 免费行动次数（疾影）—— 不推进潮汐，敌人也不动
       this.buffs = [];           // 临时增益（魂技），随回合递减
       // 默认出手类型 = 这个职业**基础双攻更高**的那一路。
@@ -1848,7 +1859,12 @@
     }
 
     /** 掉落判定与生成 */
-    _rollDrop(enemy) {
+    /**
+     * @param {number} [mul] 掉落倍率（撤离时 < 1）。默认 1 = 与改动前逐字相同。
+     *   只乘**概率**，不乘品质：把品质也压一半会让"减半"变成"减到没有"，
+     *   而定价要的是"亏一半"，不是"白打一场"。
+     */
+    _rollDrop(enemy, mul) {
       const fl = this.flags();
       const L = D.LOOT;
       let chance = L.baseChance + num(fl.dropBonus);
@@ -1858,6 +1874,10 @@
       // 守门堆：掉落率按精英给。和金币那条是同一份"保费"的两半。
       const keepPay = !!enemy.keep && this.keepPay;
       if (keepPay) chance += L.eliteBonus;
+      /* 撤离的代价：概率减半。
+         ⚠ 只改**概率**，不改下面 rng.chance 的调用次数 ——
+         那么改这一处不会挪动随机流的**个数**（挪了就别想再做逐位对照）。 */
+      if (mul !== undefined && num(mul) !== 1) chance *= num(mul);
       if (!this.rng.chance(Math.min(1.0, chance))) return null;
       const bonus = (enemy.kind === 'boss' ? 3 : enemy.kind === 'elite' ? 1 : enemy.kind === 'treasure' ? 2 : 0)
         + (keepPay ? 1 : 0);
@@ -1988,6 +2008,10 @@
         return x.idx - y.idx;
       });
       let round = 0, capped = false, finished = false, flipped = false;
+      /* 这一场是不是"玩家自己撤了"（v11.5 P3 第三步）。和 capped 并列：
+         两者都是"没有分出胜负就结束"的方式，但后果完全不同 ——
+         僵持按剩余生命判谁先撑不住，撤离则谁都没死、收益减半。 */
+      let fled = false;
       /* 本轮技能效果槽（v11.5 P3 第二步）。null = 这一轮没有任何魂技生效。
          为什么放在**对决内部**而不是去读 game.skillCd：
          "效果在哪一轮生效"是这场对决自己的事，而 skillCd 是跨场的资源；
@@ -2241,6 +2265,9 @@
            于是同一场仗里能放第二次（而那看起来像是"技能很强"，
            不像是"规则写错了"）。 */
         used: false,
+        /* 本场收益倍率（撤离时 < 1）。初值 1 = 正常结算，
+           于是 `_fightSettle` 那一行对没撤离的路径是空操作。 */
+        lootMul: 1,
         /** 谁是玩家 —— 界面据此决定给哪一边开指令菜单。 */
         player: a.isPlayer ? a : (b.isPlayer ? b : null),
         /** 这一轮谁先出手。玩家比敌人慢时，界面要先把对方那一手演完。 */
@@ -2268,6 +2295,28 @@
         },
         /** 这一轮挂着什么效果（界面据此把按钮标成"已挂"，不是藏起来）。 */
         get pendingFx() { return roundFx; },
+
+        /**
+         * 放弃这一场（v1.5 P3 第三步 · 撤离）。
+         *
+         * @param {number} lootMul 本场已倒下的敌人按这个倍率结算收益。
+         * @returns {boolean} false = 这场已经收过场了
+         *
+         * 它只做三件属于**对决**的事：标记结束、清掉还挂着的技能效果、
+         * 记下收益倍率。潮汐、日志、界面收场都不在这里 ——
+         * 那些是对决之外的事（地图层与表现层各自有自己的归属地）。
+         * 效果必须清掉的原因很具体：不清的话"撤"完还挂着下一轮的 ×1.6，
+         * 而那一轮永远不会来 —— 下一次进战会照常读它。
+         */
+        abandon(lootMul) {
+          if (finished) return false;
+          finished = true;
+          fled = true;
+          roundFx = null;
+          this.lootMul = (lootMul === undefined) ? 1 : num(lootMul);
+          return true;
+        },
+        get fled() { return fled; },
 
         /**
          * 推进**一轮**，返回这一轮新增的明细（供演出逐条播）。
@@ -2537,8 +2586,11 @@
       // 都按**只数**全额计入。这是有意为之 —— 否则"多打几只"会变成惩罚，
       // 正好和群战的意图相反。代价（一轮挨 N 次打）在别处付。
       let killed = 0;
+      /* 本场收益倍率：撤离 = 0.5，其余 = 1（初值）。
+         注意它只作用在**已经倒下**的那些身上 —— 还活着的什么都不掉。 */
+      const gainMul = num(L.duel.lootMul) || 1;
       for (let i = 0; i < list.length; i++) {
-        if (list[i].hp <= 0) { this._killEnemy(list[i], true); killed++; }
+        if (list[i].hp <= 0) { this._killEnemy(list[i], true, gainMul); killed++; }
       }
       if (killed > 0) {
         return { win: true, died: res.dead, rounds: res.log, killed: killed };
@@ -2546,6 +2598,13 @@
       if (res.dead) {
         this._die(this._killerName(res, list));
         return { win: false, died: true, rounds: res.log };
+      }
+      /* 撤离要单独报：它和"没打完"（双方都活着）在界面上是两件事 ——
+         前者是玩家自己按的，后者是僵持。混成同一个返回值的话，
+         界面就没法给出"你放弃了这一场"这句话。 */
+      if (L.duel.fled) {
+        this._log('你退出了这场对决 —— 本场收益减半，潮水立刻推进了一节拍。', 'warn');
+        return { win: false, died: false, fled: true, killed: killed, rounds: res.log };
       }
       return { win: false, died: false, rounds: res.log };
     }
@@ -2760,7 +2819,11 @@
            所以"?duelskill=0 逐位相同"这条对照仍然干净。
            ⚠ 它只在 aiStance 打开时可达（_autoPicker 在关闭时返回 null，
              那条路径走的是"开战前定死一路"的旧形态）—— 见 sim.html 的说明。 */
-        if (g.duelSkillOn && !d.used && g.skillCd <= 0) g.duelUseSkill(d);
+        /* 撤离优先于放技能：都是 CD/收益尺度的决定，但"这一轮会被打残"
+           比"这一轮多打一截"更紧急，而且撤了就轮不到技能了 ——
+           顺序反了会先花掉冷却再撤退，那是纯粹的白给。 */
+        if (g.fleeAiOn && g.fleeOn && !d.fled && g._shouldFlee(d)) g.duelFlee(d);
+        else if (g.duelSkillOn && !d.used && g.skillCd <= 0) g.duelUseSkill(d);
         return lastPick;
       };
     }
@@ -3239,7 +3302,12 @@
       if (moved > 0) this._log('渊喉一声闷吼，地板把你推开了 ' + moved + ' 格。', 'warn');
     }
 
-    _killEnemy(enemy, byPlayer) {
+    /**
+     * @param {number} [mul] 本场收益倍率（撤离时 0.5）。
+     *   默认 1 = 与改动前逐字相同 —— 另外两个调用点因此一个字都不用改。
+     */
+    _killEnemy(enemy, byPlayer, mul) {
+      const gain = (mul === undefined) ? 1 : num(mul);
       const i = this.enemies.indexOf(enemy);
       if (i >= 0) this.enemies.splice(i, 1);
       this.kills++;
@@ -3266,10 +3334,11 @@
          超出来的部分全在金币上。原因还是那条老动态：这个游戏里
          "给更多资源"会顺着击杀→升级→掉落复利回去，休闲档放大得最狠。
          补偿必须按"刚好抵消"来定，按"打得爽"来定一定会漂。 */
+      gold = Math.round(gold * gain);
       this.gold += gold;
       this.events.push({ kind: 'gold', amount: gold });
 
-      const drop = this._rollDrop(enemy);
+      const drop = this._rollDrop(enemy, gain);
       if (drop) {
         if (this.bag.length < this.bagCap()) {
           this.bag.push(drop);
@@ -3716,6 +3785,64 @@
     }
 
     /**
+     * 从对决里撤出来（v1.5 P3 第三步）。
+     *
+     * 三条从代码里读出来的前提，决定了它比想象中简单得多：
+     *   ① `stepTo` 撞上敌人时**不把玩家挪到敌人格上**（只开一场对决），
+     *      所以玩家本来就在原地 —— "撤到哪一格"这道题不存在，
+     *      不需要任何新的位置状态。
+     *   ② 敌人血量写回模型只有 `_fightSettle` 一处，所以"保留残血、
+     *      再进战从当前血继续"是**自动成立**的，一个字都不用写。
+     *   ③ 潮汐"推进一节拍"有现成函数（P1 为"等待的代价 a"抽出来的
+     *      `_tideAdvance`）—— 复用同一份周期代码，不抄第二份。
+     *
+     * 于是这里只做三件必须收在一处的事：这场标记结束、
+     * 潮水立刻推一节拍、日志里说清楚代价。
+     * 收场（写回模型 / 关战斗层）仍然由各自的路径做：
+     * 界面走 finishDuel()，无头走 fight() 的 _fightSettle。
+     *
+     * @param {object} [duel] 显式对决句柄（无头路径没有 liveFight，见 duelUseSkill）
+     * @returns {{ok:boolean, reason?:string}}
+     *   reason: 'nofight' / 'off'（开关关着） / 'fled'（已经撤过） / 'over'（已收场）
+     */
+    duelFlee(duel) {
+      const d = duel || (this.liveFight ? this.liveFight.duel : null);
+      if (!d) return { ok: false, reason: 'nofight' };
+      if (!this.fleeOn) return { ok: false, reason: 'off' };
+      if (d.fled) return { ok: false, reason: 'fled' };
+      if (d.finished) return { ok: false, reason: 'over' };
+      if (!d.abandon(D.FLEE.lootMul)) return { ok: false, reason: 'over' };
+      for (let i = 0; i < D.FLEE.tideBeat; i++) this._tideAdvance();
+      this.flees = (this.flees || 0) + 1;
+      return { ok: true };
+    }
+
+    /**
+     * AI 该不该撤 —— **纯函数，不碰 this.rng**。
+     *
+     * 判据（工作单原文）：预期本轮承伤 > 剩余生命的 30%。
+     * "预期本轮承伤"用每只活着的敌人**一次**最强攻击的确定性部分相加：
+     * 不含暴击/闪避的随机，和意图预告同一个口径 —— 两边一旦用了不同的
+     * 算法，玩家读到的预告和 AI 做的决定就会开始各说各话。
+     *
+     * ⚠ 它只看**一轮**。所以它撤的是"这一轮就要把我打残"的场，
+     * 而不是"再打三轮我会输"的场 —— 后者需要的东西（还要几轮、
+     * 我还能打多少）每一个都是新的估计量，而每个估计量都会变成
+     * 一个新的可调参数。先只做这一条，量出来再谈要不要加。
+     */
+    _shouldFlee(d) {
+      if (!d || d.finished) return false;
+      const st = this.stats();
+      let inc = 0;
+      for (let i = 0; i < d.bs.length; i++) {
+        const u = d.bs[i];
+        if (u.hp <= 0) continue;
+        inc += Math.max(1, Math.round(bestAttack(u.st, st, this.K).base));
+      }
+      return inc > d.a.hp * D.FLEE.aiDmgFrac;
+    }
+
+    /**
      * 把敌人沿"远离玩家"的方向推开。
      * @returns {boolean} true = 一步都推不动（撞墙 / 被别的怪顶着 / 撞到玩家）→ 改判为眩晕
      *
@@ -4124,7 +4251,11 @@
            "对决里多了一个选项"和"地图上冷却走得更快"。
            有它才能回答"AI 到底用没用上这个新入口"，
            而不是对着一个变了 1pp 的通关率猜（那 1pp 也可能来自冷却）。 */
-        duelSkills: 0
+        duelSkills: 0,
+        /* P3 第三步（v11.5）：一局里从对决里撤出来几次。
+           和 duelSkills 同理："AI 会不会撤"这件事必须能被直接读出来，
+           而不是对着一个动了 3pp 的通关率猜那 3pp 是不是撤离造成的。 */
+        flees: 0
       };
       for (let i = 0; i < n; i++) {
         const seed = (opts.seedBase || 1) + i * 7919;
@@ -4159,12 +4290,15 @@
              "这个机制的代价是多少"就只能看代码猜，而代价只有对照实验能回答。 */
           duelSkill: opts.duelSkill,
           duelCd: opts.duelCd,
-          duelAi: opts.duelAi
+          duelAi: opts.duelAi,
+          flee: opts.flee,
+          fleeAi: opts.fleeAi
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;
         out.waits += g.waits; out.dmgTaken += g.dmgTaken;
         out.duelSkills += g.duelSkills;
+        out.flees += g.flees;
         out.bossTide += g.bossFx.tide;
         out.bossSummon += g.bossFx.summon;
         out.bossRoar += g.bossFx.roar;

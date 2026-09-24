@@ -2068,6 +2068,18 @@
         const r = game.duelUseSkill ? game.duelUseSkill() : null;
         if (!r || !r.ok) return;
         if (game.liveFight) bsMenu('show', game);
+      },
+      /* 撤离：标记这一场结束 → 立刻收场。
+         走 endNow() 而不是自己拼一套关场流程，是因为它已经做对了顺序：
+         先把模型算完（finishDuel 会写回血量、推潮汐、发掉落），再关掉战斗层。
+         反过来的话，关场那一刻模型还没结算，表现是"撤完黑一下"。
+         这里**不推进结算面板以外的任何东西** —— 潮汐那一下已经由
+         duelFlee 推过了（它属于模型层，界面不重复收费）。 */
+      flee: function () {
+        if (busy) return;
+        const r = game.duelFlee ? game.duelFlee() : null;
+        if (!r || !r.ok) return;
+        endNow();
       }
     };
 
@@ -2207,6 +2219,24 @@
       return ctx.fx.short || ctx.fx.text;
     },
     run: function (ctx, api) { api.skill(); }
+  });
+
+  /* 撤离（v11.5 P3 第三步）。
+     它是菜单里唯一一个"结束这件事"的动作，所以排最后：
+     顺序按**破坏性**排 —— 打（物理/法术）→ 挂算式（魂技）→ 退出（撤离）。
+     定价一个字都不在界面里：掉落减半、潮水推一节拍全在 core 的 duelFlee()。
+     界面只报**代价**（那一行 `.n`），不给结论 —— "现在该不该撤"
+     仍然是玩家自己的判断题，和物法那两行同一个规矩。 */
+  registerAct({
+    id: 'flee', keys: ['4'], flee: true,
+    label: '撤离',
+    enabled: function (ctx) {
+      return !!(ctx.duel && ctx.game.fleeOn && !ctx.duel.fled && !ctx.duel.finished);
+    },
+    info: function (ctx) {
+      return '收益减半 · 潮水 +' + D.FLEE.tideBeat + ' 拍';
+    },
+    run: function (ctx, api) { api.flee(); }
   });
 
   /**
