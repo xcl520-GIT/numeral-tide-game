@@ -242,6 +242,19 @@
          skillPick：不问的时候按什么策略定（'class' 保留本职业技 = 旧行为）。 */
       this.askSkill = !!opts.askSkill;
       this.skillPick = opts.skillPick || 'class';
+      /* P1（v11.5）：让等待有代价。两个**互相独立**的开关 ——
+         把"代价"和"AI 会不会去利用这个漏洞"分开，否则 A/B 对照里
+         "机制变了"和"AI 行为变了"会搅在一起，谁也归不了因。
+           waitCost：'0' = 旧行为（等待免费）
+                     'a' = 等待额外推进一个潮汐节拍
+                     'b' = 等待时半径内**已醒**的敌人各免费挪一步
+           aiWait  ：无头 AI 会不会"刷回合"（默认 0 = 旧 AI，一次都不等）
+         两个都默认旧行为，所以 ?n=300&diff=all&cls=0 这条基线命令逐位不变 ——
+         "纯结构改动必须逐位相同"和"新机制必须带开关"这两条规矩靠它同时成立。
+         在构造函数里读（不是 reset）是因为 reset 收不到 opts，和 hold /
+         cleaveOn / keepPay / askSkill 同一个形状。 */
+      this.waitCost = (opts.waitCost === 'a' || opts.waitCost === 'b') ? opts.waitCost : '0';
+      this.aiWait = !!opts.aiWait;
 
       this.seed = (opts.seed === undefined || opts.seed === null)
         ? ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0)
@@ -294,6 +307,9 @@
            dmgTaken 玩家累计承伤。三个来源：对决结算 / 贴身挨打 / 踩水腐蚀 */
       this.waits = 0;
       this.dmgTaken = 0;
+      // P1 的 AI 策略用它兜底，防死等（连续等待上限 3）。
+      // 和上面两个同理：**必须在 reset 里声明**。
+      this.aiWaitStreak = 0;
       this.devourStacks = 0;
       this.skillCd = 0;          // 魂技冷却剩余回合
       /* 魂技三选一（v11.4-q）。
@@ -3419,6 +3435,37 @@
     wait() {
       this.waits++;
       this.endTurn();
+      if (this.status !== 'playing') return;
+      /* P1：代价就挂在这两行上 —— 这是"等待零代价"唯一被拆掉的地方。
+         两个做法各自独立、不叠加（一次只开一个，方便归因）。 */
+      if (this.waitCost === 'a') this._tideAdvance();      // a · 潮汐节拍
+      else if (this.waitCost === 'b') this._waitAlert();   // b · 累积惊动
+    }
+
+    /**
+     * b · 累积惊动：等待时，**已醒**且在自己视野半径内的敌人各免费挪一步。
+     *
+     * 复用 v11.4-i 已经实现的那条移动路径（_stepEnemyTowardPlayer），
+     * 不新写一套移动逻辑 —— 新写一套就等于埋了第二个真源，它一旦和回合
+     * 结算里那套漂移，数据就会开始指着游戏里根本不存在的行为。
+     *
+     * 为什么只给"已醒"的：没醒的怪在等待期间本来就该待在原地。把睡眠中的
+     * 也叫醒，惩罚的是**探索**而不是**等待** —— 那是另一件事。
+     * 为什么半径用 alertR：那本来就是"它察觉得到你"的距离。复用同一个常量，
+     * 玩家从画面上就能预期到谁会动。
+     * 为什么不在这里再 _assignSlots()：endTurn 刚刚分过，槽位就是这一回合的；
+     * 再分一次会让"等待"和"行动"发生在两个不同的槽位分配下，白白多一次抖动。
+     */
+    _waitAlert() {
+      const A = D.PACK;
+      const list = this.enemies.slice();
+      for (const e of list) {
+        if (this.enemies.indexOf(e) < 0) continue;
+        if (e.stun > 0) continue;
+        if (this.hold ? !e.awake : (e.region !== this.regionAt(this.px, this.py))) continue;
+        if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) > A.alertR) continue;
+        this._stepEnemyTowardPlayer(e);
+      }
     }
 
     endTurn() {
@@ -3557,6 +3604,19 @@
      */
     _tideTick() {
       if (this.turn % this.diff.tideEvery !== 0) return;
+      this._tideAdvance();
+    }
+
+    /**
+     * 推进**一个潮汐节拍**（v11.5 P1 从 _tideTick 里抽出来的那一半）。
+     *
+     * 抽出来的唯一理由：等待的代价 a 要"额外推一个节拍"，而那一下必须和
+     * 自然涨落走**同一份**周期代码。抄一份就会有第二个真源 ——
+     * pattern 一改，等待推的那一下就和自然环境里的潮汐对不上，
+     * 而这种错位不会报错，只会让"潮汐周期"这个说法慢慢变成假的。
+     * waitCost='0' 时这条路径只被 _tideTick 调用，逐字等价于改造前。
+     */
+    _tideAdvance() {
       const pattern = [0, 1, 2, 3, 3, 2, 1];
       this.tidePhase = (this.tidePhase || 0) + 1;
       const prev = this.tideLevel;
@@ -3656,7 +3716,12 @@
           hold: opts.hold,
           cleave: opts.cleave,
           keepPay: opts.keepPay,
-          skillPick: opts.skillPick
+          skillPick: opts.skillPick,
+          // P1（v11.5）：等待的代价 / AI 会不会刷回合。**必须转发** ——
+          // 开关漏转发一个，"这个机制的代价是多少"就只能看代码猜，
+          // 而代价这件事只有对照实验能回答。
+          waitCost: opts.waitCost,
+          aiWait: opts.aiWait
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;
@@ -3972,6 +4037,61 @@
      * 两个格子之间无限横跳，120 局里 8% 的对局因此跑满回合上限。
      * 轨迹记录下来一眼就能看出来：「15,15 → 14,15 → 15,15 → 14,15 …」
      */
+    /**
+     * AI 该不该"刷回合"（v11.5 P1 的联动改动）。
+     *
+     * 为什么必须给 AI 这条策略：等待在改造前是**零代价**的。改造前的 AI
+     * 一次都不等 —— 于是模拟器量出来的是"没人用这个漏洞"的通关率，与真人脱节。
+     *
+     * ── 条件 ④ 的第一稿：盯"敌人姿态翻面" —— **已证伪**，留在这里当路标 ──
+     * 原始推理：姿态每 STANCE.every 次行动翻一面，等到它把软的那一侧朝向我，
+     * 这一轮就多打一截伤害。实测（三组 × 三档，aiwait=1）：等待占比
+     * **0.0 ~ 0.1%**，等于从未触发。
+     * 证伪的理由不是判据写错，是杠杆本身不成立：**姿态只影响敌人自己的防御**
+     * （stanceDef），而玩家/AI 每一轮本来就能自己换一路 ——
+     * bestAttack 在两种姿态下的取值几乎一样，所以"等它翻面"换不到任何东西。
+     * 凡是"我随时能自己拿到的东西"，都不可能靠等来赚。
+     *
+     * ── 现在的条件 ④：等**魂技冷却** —— 全游戏唯一随回合变好的量 ──
+     * endTurn() 里每回合在动的东西只有一件是往好的方向：this.skillCd--。
+     * 其余全在变坏（潮汐在涨、敌人在靠近、增益在过期）。
+     * 所以"值得等"只可能是"魂技快转好了"：差 1~3 回合时等一等，
+     * 下一场仗就从"没有技能"变成"有技能"。
+     * 这也是为什么只在 1 <= skillCd <= 3 时才等 —— 差 8 回合去等，
+     * 等来的东西比赔掉的（8 回合的潮汐 + 8 回合的敌人）还便宜。
+     *
+     * 判据（四条同时成立才等）：
+     *   ① 安全：没有贴身的敌人。等的时候被贴脸打，那不叫刷回合，叫挨打。
+     *   ② 残血：血量 >55% 时不值得为这点伤害去等。
+     *   ③ 目标不远：等完就要打它，太远的目标等不到那一刻。
+     *   ④ 魂技差 1~3 回合转好（见上）。
+     * 全程是纯函数，**不碰 this.rng** —— 一局里的随机数**个数**一变，
+     * 三档基线当场失去可比性（本项目最贵的一条规矩）。
+     *
+     * 兜底：连续等待不超过 3 次，否则 AI 会和"永远差 4 回合"的冷却互相看到
+     * 天荒地老 —— 那会直接变成 stall。
+     */
+    _aiShouldWait(g) {
+      if (!this.aiWait) return false;
+      if (this.aiWaitStreak >= 3) return false;
+      // ④ 等真的换到东西：魂技快转好了（唯一随回合变好的量）
+      if (this.skillCd <= 0 || this.skillCd > 3) return false;
+      if (this.pendingSkill) return false;
+      if (!g || g.type !== 'enemy') return false;
+      const e = g.ref;
+      if (!e || this.enemies.indexOf(e) < 0) return false;
+      // ① 安全：身边一格都不能有敌人
+      for (const o of this.enemies) {
+        if (Math.abs(o.x - this.px) + Math.abs(o.y - this.py) <= 1) return false;
+      }
+      // ② 残血
+      const st = this.stats();
+      if (this.hp / st.hp > 0.55) return false;
+      // ③ 目标不远
+      if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) > 4) return false;
+      return true;
+    }
+
     _autoStep() {
       const st = this.stats();
       const hpPct = this.hp / st.hp;
@@ -4018,6 +4138,17 @@
         if (!g) g = { type: 'exit', x: this.exit.x, y: this.exit.y };
         this.aiGoal = g;
       }
+
+      // —— P1：先问一句"该不该刷一回合" ——
+      // 放在选完目标之后、执行之前：判据里要用 g.ref（马上要打的那一只）。
+      // 走 this.wait() 而不是自己拼 endTurn()：等待的代价挂在 wait() 里，
+      // AI 绕过去就等于给自己留了一条免费的后门。
+      if (this._aiShouldWait(g)) {
+        this.aiWaitStreak++;
+        this.wait();
+        return true;
+      }
+      this.aiWaitStreak = 0;
 
       // —— 执行 ——
       if (g.type === 'enemy') {

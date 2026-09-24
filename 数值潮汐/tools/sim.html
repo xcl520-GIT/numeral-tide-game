@@ -57,12 +57,21 @@
   var cleave = (q.cleave === undefined || q.cleave === '') ? 1 : parseInt(q.cleave, 10);
   // keeppay=0 关掉守门堆的保费 —— 用来把"布局的代价"和"保费的补偿"分开量。
   var keeppay = (q.keeppay === undefined || q.keeppay === '') ? 1 : parseInt(q.keeppay, 10);
+  // P1（v11.5）的两个开关，默认都是**旧行为** —— 所以基线命令逐位不变。
+  //   waitcost=0|a|b   a = 等待额外推进一个潮汐节拍 / b = 累积惊动（已醒的敌人免费挪一步）
+  //   aiwait=0|1       无头 AI 会不会刷回合（0 = 旧 AI，一次都不等）
+  var waitcost = (q.waitcost === 'a' || q.waitcost === 'b') ? q.waitcost : '0';
+  var aiwait = (q.aiwait === undefined || q.aiwait === '') ? 0 : parseInt(q.aiwait, 10);
   lines.push('fumble=' + fumble + '（AI 失误率）  counterBonus=' +
     (counter === undefined ? '(默认)' : counter) + '  战斗内姿态轮换=' + (stance ? '开' : '关') +
     '  群战=' + (squad ? '开' : '关'));
   lines.push(fumble <= 0
     ? '  ⚠ fumble=0 表示完美玩法 —— 这是**上限**，不是玩家均值。'
     : '  → 该失误率模拟"普通水平玩家"的均值。');
+  lines.push('  等待的代价=' + (waitcost === '0' ? '关（等待免费 = 旧行为）'
+    : (waitcost === 'a' ? 'a · 额外推进一个潮汐节拍'
+      : 'b · 累积惊动（已醒的敌人免费挪一步）')) +
+    '  AI刷回合=' + (aiwait ? '开' : '关（一次都不等 = 旧行为）'));
 
   function fmt(o) {
     return 'winRate=' + o.winRate + '%  turns=' + o.turns + '  kills=' + o.kills +
@@ -135,7 +144,7 @@
     var o = TideCore.Game.simulate(n, { difficulty: d, seedBase: 1000, maxTurns: 2400,
       aiFumble: fumble, counterBonus: counter, aiStance: !!stance, squad: !!squad,
       slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold,
-      cleave: !!cleave, keepPay: !!keeppay });
+      cleave: !!cleave, keepPay: !!keeppay, waitCost: waitcost, aiWait: !!aiwait });
     lines.push('[' + d + '] ' + fmt(o));
     lines.push('        群战拆分 野生 ' + pct(byKind.wild) + ' (n=' + byKind.wild.n + ')' +
       '  召唤物 ' + pct(byKind.minion) + ' (n=' + byKind.minion.n + ')' +
@@ -160,7 +169,7 @@
         difficulty: diffs[0], classKey: c, seedBase: 1000, maxTurns: 2400,
         aiFumble: fumble, counterBonus: counter, aiStance: !!stance, squad: !!squad,
         slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold,
-        cleave: !!cleave, keepPay: !!keeppay
+        cleave: !!cleave, keepPay: !!keeppay, waitCost: waitcost, aiWait: !!aiwait
       });
       lines.push('[cls:' + c + '] ' + fmt(o));
       lines.push('        ' + resident(o));
