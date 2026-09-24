@@ -1,0 +1,44 @@
+﻿<html lang="zh-CN">
+<head><meta charset="utf-8"><title>packcheck</title></head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* 敌人到底有没有"成群"？纯静态检查：开局就把每只怪和它的近邻数出来。
+   为什么必须单独验一次：如果堆根本没生成，那所有"让它们更快过来"的努力
+   都是在优化一个不存在的东西，而症状只会是"群战发生率不涨"——
+   看起来像 AI 问题，其实是布点问题。 */
+(function () {
+  var L = ['PACKCHECK'];
+  var hist = {}, pairs = 0, total = 0, minSame = 99, maxSame = 0;
+  var seed = parseInt((location.search.match(/seed=(\d+)/) || [])[1] || '1000', 10);
+  var n = parseInt((location.search.match(/n=(\d+)/) || [])[1] || '20', 10);
+  var diff = (location.search.match(/diff=(\w+)/) || [])[1] || 'standard';
+  for (var g = 0; g < n; g++) {
+    var gm = new TideCore.Game({ difficulty: diff, seed: 1000 + g * 7919, classKey: 'warlord' });
+    for (var i = 0; i < gm.enemies.length; i++) {
+      var same = 0;
+      for (var j = 0; j < gm.enemies.length; j++) {
+        if (i === j) continue;
+        var d = Math.abs(gm.enemies[i].x - gm.enemies[j].x) + Math.abs(gm.enemies[i].y - gm.enemies[j].y);
+        if (d <= 2) same++;
+      }
+      hist[same] = (hist[same] || 0) + 1;
+      total++;
+      pairs += same;
+      if (same < minSame) minSame = same;
+      if (same > maxSame) maxSame = same;
+    }
+  }
+  var ks = Object.keys(hist).sort(function (a, b) { return a - b; });
+  L.push('开局第 1 层 · ' + diff + ' · ' + n + ' 局 · 敌人数 ' + total);
+  L.push('每只怪"距离≤2 的同伴数"分布：' + ks.map(function (k) {
+    return k + '只:' + Math.round(hist[k] / total * 100) + '%';
+  }).join('  '));
+  L.push('平均同伴数 ' + (Math.round(pairs / total * 100) / 100) + '（0 表示完全散开）  最少 ' + minSame + '  最多 ' + maxSame);
+  document.getElementById('out').textContent = 'PACKCHECKDONE\n' + L.join('\n');
+})();
+</script>
+</body>
+</html>

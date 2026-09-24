@@ -80,7 +80,7 @@
 
   function measure(diff) {
     var s = { n1: 0, r1: 0, one1: 0, nAll: 0, rAll: 0, oneAll: 0, nAll1v1: 0, rAll1v1: 0, oneAll1v1: 0, squad: 0,
-              nW: 0, rW: 0, oneW: 0 };
+              nW: 0, rW: 0, oneW: 0, d1: 0, d2: 0 };
     // 逐场明细：只记 1v1 杂兵。用来回答"血量已经够厚了，为什么还是一轮结束"。
     // 判据是 ehp 与**实测每击**的关系，而不是面板单击 ——
     // 面板单击在遗物多了之后会低估 1.5~3.5 倍（见 probe_curve）。
@@ -90,6 +90,15 @@
       var L = ob.apply(this, arguments);
       L.__t = (L.duel.bs[0].src ? L.duel.bs[0].src.arc.tier : 1);
       L.__k = (L.duel.bs[0].src ? (L.duel.bs[0].src.arc.kind || 'normal') : 'normal');
+      // 开战那一刻，主角四邻里站着几只怪 —— 群战的**唯一**判据。
+      // 这一列不加解释，数字会被误读成"敌人不够快"。
+      var d1 = 0, d2 = 0;
+      for (var ei = 0; ei < this.enemies.length; ei++) {
+        var ee = this.enemies[ei];
+        var dd = Math.abs(ee.x - this.px) + Math.abs(ee.y - this.py);
+        if (dd === 1) d1++; else if (dd === 2) d2++;
+      }
+      L.__d1 = d1; L.__d2 = d2;
       pn = L.duel.a.name;
       return L;
     };
@@ -97,6 +106,7 @@
       var r = os.apply(this, arguments);
       if (L && L.duel) {
         var rd = L.duel.round, one = (rd <= 1 ? 1 : 0), k = L.duel.bs.length;
+        s.d1 += (L.__d1 || 0); s.d2 += (L.__d2 || 0);
         if (k > 1) s.squad++;
         s.nAll++; s.rAll += rd; s.oneAll += one;
         if (k === 1) { s.nAll1v1++; s.rAll1v1 += rd; s.oneAll1v1 += one; }
@@ -159,6 +169,7 @@
           ' 一轮 ' + pad(pc(s.one1, s.n1) + '%', 5) +
           ' | 1v1 均轮 ' + pad(a(s.rAll1v1, s.nAll1v1), 6) + ' 一轮 ' + pad(pc(s.oneAll1v1, s.nAll1v1) + '%', 5) +
           ' | 群战 ' + pad(pc(s.squad, s.nAll) + '%', 5) +
+          ' | 开战四邻 ' + pad(a(s.d1, s.nAll), 5) + ' 距离2 ' + pad(a(s.d2, s.nAll), 5) +
           ' | 回合 ' + pad(s.turns, 6) + ' 杀 ' + pad(s.kills, 5) +
           ' TO ' + s.timeout + ' ST ' + s.stall);
         if (Q.detail && s.detail && s.detail.length) {
