@@ -3815,6 +3815,71 @@ try {
   else ok('打击感：战斗界面出手即顿帧（第 ' + (froze47 + 1) + ' 个种子命中）');
 } catch (e) { fail('打击感（战斗界面）测试异常: ' + (e && e.stack ? e.stack : e)); }
 
+/* ---------- 49. 层尾守门堆（A-lite）----------
+   这一条盯的是三件**会静默失效**的事：
+     ① 锚点找不到贴门的格子时会**静默回退**到随机空地 —— 于是"可见可预判"没了，
+        而群战率看起来还是好的（甚至更好，因为随机空地更容易撞上）；
+     ② 门区可能一只怪都没有（区域太小 / 锚点全被占）；
+     ③ keep 标记没打上 —— 保费就成了空条文，而它不会报任何错。
+
+   所以断言必须盯住"贴门"这个**具体距离**，而不是"门区有怪"。
+   注意它不证明"玩家一定会打这一场"：那要跑完整局才看得出，属于平衡验证。 */
+try {
+  var gTries = 0, gOK = 0, gNote = '';
+  for (var gs = 0; gs < 6; gs++) {
+    var gg = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 52000 + gs });
+    gTries++;
+    if (gg.gateRegion < 0 || !gg.exit) { gNote = '第 ' + gs + ' 局没有出口/门区'; continue; }
+    var inGate = 0, kept = 0, near = 99;
+    for (var ge = 0; ge < gg.enemies.length; ge++) {
+      var eg = gg.enemies[ge];
+      if (eg.region !== gg.gateRegion) continue;
+      inGate++;
+      if (eg.keep) kept++;
+      var dg = Math.abs(eg.x - gg.exit.x) + Math.abs(eg.y - gg.exit.y);
+      if (dg < near) near = dg;
+    }
+    if (inGate >= 2 && kept === inGate && near <= 3) gOK++;
+    else if (!gNote) {
+      gNote = '门区 ' + inGate + ' 只 / 带标记 ' + kept + ' / 最近距出口 ' + near;
+    }
+  }
+  if (gOK !== gTries) {
+    fail('层尾守门堆：' + gOK + '/' + gTries + ' 局成立（' + gNote + '）');
+  } else {
+    ok('层尾守门堆：' + gTries + ' 局每局门区都有 >=2 只、全部带 keep、且最近一只距出口 <=3');
+  }
+
+  // 保费：掉落升档必须真的接在 keep 上。
+  // 不去杀怪比掉落件数 —— 那是随机的，样本少时会变成一条偶尔红偶尔绿的测试。
+  // 把 rng.chance 换成桩、只读它被喂进来的概率，就是确定性断言：
+  //   keep 怪必须高于普通怪；关掉 keepPay 时必须**相等**（这条才是真正的护栏，
+  //   少了它，一个把 keepPay 读漏的实现照样能让上面那条绿）。
+  var dropP = function (g, isKeep) {
+    var got = null;
+    var rc = g.rng.chance;
+    g.rng.chance = function (p) { got = p; return false; };   // 永远不掉，只为读参数
+    var en = g._makeEnemy(g.px + 2, g.py, 1);
+    if (isKeep) en.keep = true;
+    g._rollDrop(en);
+    g.rng.chance = rc;
+    return got;
+  };
+  var gP = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 52001 });
+  var gN = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 52001, keepPay: false });
+  var pPlain = dropP(gP, false), pKeep = dropP(gP, true);
+  var pOff = dropP(gN, true);
+  if (pPlain === null || pKeep === null || pOff === null) {
+    fail('守门堆保费：_rollDrop 没有走 rng.chance（掉落路径改了？）');
+  } else if (!(pKeep > pPlain)) {
+    fail('守门堆保费：keep 怪的掉落率没有加成（' + pKeep + ' vs ' + pPlain + '）');
+  } else if (pOff !== pPlain) {
+    fail('守门堆保费：keepPay 关掉后掉落率没有回到普通（' + pOff + ' vs ' + pPlain + '）');
+  } else {
+    ok('守门堆保费：掉落率 ' + pPlain + ' → ' + pKeep + '，关掉 keepPay 回到 ' + pOff);
+  }
+} catch (e) { fail('层尾守门堆测试异常: ' + (e && e.stack ? e.stack : e)); }
+
   } catch (e) {
     fail('测试脚本异常: ' + (e && e.stack ? e.stack : e));
   }

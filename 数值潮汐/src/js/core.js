@@ -231,6 +231,11 @@
       /* 横扫（群攻）的总开关。它有三个来源（遗物/秘藏词条、武器词条、职业魂技），
          一个总开关才能回答"群攻这一整套值多少"，而不是三个来源各管各的。 */
       this.cleaveOn = (opts.cleave === undefined) ? true : !!opts.cleave;
+      /* 守门堆的"保费"（A-lite）—— 金币翻倍 + 掉落升档。
+         做成开关是为了把两件事分开：**布局**的代价，和**保费**的补偿。
+         这两条的可调方向相反 —— 代价在布局身上就该保留保费；
+         代价在保费身上就该把保费调小。混在一起看只能凭猜。 */
+      this.keepPay = (opts.keepPay === undefined) ? true : !!opts.keepPay;
 
       this.seed = (opts.seed === undefined || opts.seed === null)
         ? ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0)
@@ -860,6 +865,9 @@
         // 受击后坐的幅度（0~1，= 这一场掉了多少血）。表现层字段，
         // 与 hitFlash / stanceFx 同一类；在这里声明是为了隐藏类稳定。
         hitKb: 0,
+        // 守门堆成员（A-lite）。它是**绕不开**的那一场，掉落要对得起它。
+        // 和 slot / hitKb 一样必须在字面量里声明：每回合都会被读到。
+        keep: false,
         // 守位/惊动状态（v11.4-i）。home 是巢位 —— 回位纪律要求它**真的走回原格**，
         // 不然玩家反复拉打几轮之后，堆形会永久散掉，数据比不做还难看。
         homeX: x, homeY: y,
@@ -1109,6 +1117,33 @@
         return null;
       };
 
+      /* 守门堆的锚点：本区里**离出口最近**的那块空地板（v11.4-p）。
+         和 anchorIn（随机空地）分开，是因为"可见可预判"全靠它：
+         玩家从已知方向来、出口是这一层唯一的真 chokepoint，
+         堆贴在门口就一定读得到、绕不开 —— 这也就是它能读成
+         "守门人"而不是"路障"的全部原因。
+         按半径一圈圈找（1→5），取最先找到的那一圈里的随机一块：
+         这样既贴近门口，又不会每局都摆在同一格上。 */
+      const anchorNearExit = (reg) => {
+        if (!this.exit) return null;
+        for (let r = 1; r <= 5; r++) {
+          const cands = [];
+          for (let dx = -r; dx <= r; dx++) {
+            const dy = r - Math.abs(dx);
+            const sgns = (dy === 0) ? [1] : [1, -1];
+            for (let s = 0; s < sgns.length; s++) {
+              const x = this.exit.x + dx, y = this.exit.y + dy * sgns[s];
+              if (!this.walkable(x, y)) continue;
+              if (this.regionAt(x, y) !== reg.id) continue;
+              if (occ.has(x + ',' + y)) continue;
+              cands.push({ x: x, y: y });
+            }
+          }
+          if (cands.length) return this.rng.pick(cands);
+        }
+        return null;
+      };
+
       if (this.regions && this.regions.length) {
         /* 堆的规模与堆的数量（v11.4-h 修正）
            ------------------------------------------------
@@ -1131,13 +1166,28 @@
           const j = this.rng.int(0, i);
           const t = order[i]; order[i] = order[j]; order[j] = t;
         }
+        /* 层尾守门堆（A-lite）：把**出口所在区**换到第一位，让它必然拿到第一堆。
+           注意是"恰好一场"，不是"至少一场" —— 其余区域的分配完全不动，
+           空房间还是空房间。
+           为什么不是"每间房都放"：每间都有怪会让走廊变成排队送死，
+           而"这间是空的"本来就是节奏里的呼吸点。层尾那一场才是重音。 */
+        if (this.gateRegion >= 0) {
+          for (let i = 0; i < order.length; i++) {
+            if (order[i].id === this.gateRegion) {
+              if (i !== 0) { const t2 = order[0]; order[0] = order[i]; order[i] = t2; }
+              break;
+            }
+          }
+        }
         for (let pi = 0; pi < numPacks && pi < order.length; pi++) {
           const reg = order[pi];
           const per = packSizes[pi];
           if (placed >= count) break;
-          const a = anchorIn(reg);
+          const isKeep = (reg.id === this.gateRegion);
+          const a = isKeep ? (anchorNearExit(reg) || anchorIn(reg)) : anchorIn(reg);
           if (!a) continue;
           occ.add(a.x + ',' + a.y);
+          const packStart = this.enemies.length;   // 这一堆在 enemies 里的起点
           this.enemies.push(this._makeEnemy(a.x, a.y, depth));
           placed++;
           const blob = [{ x: a.x, y: a.y }];
@@ -1157,6 +1207,10 @@
             blob.push(p);
             placed++;
           }
+          /* 打上 keep：它是**绕不开**的那一场，击杀要给得起保费（见 _killEnemy）。
+             标记打在怪身上而不是"看区域类型"—— 区域以后可能被别的东西复用，
+             而"这一堆是守门的"是布点这一刻才知道的事实。 */
+          if (isKeep) for (let k = packStart; k < this.enemies.length; k++) this.enemies[k].keep = true;
         }
       }
 
@@ -1609,8 +1663,12 @@
       if (enemy.kind === 'elite') chance += L.eliteBonus;
       if (enemy.kind === 'treasure') chance = L.treasureChance;
       if (enemy.kind === 'boss') chance = 1.6;      // 必掉，且掉两件里的最好那件
+      // 守门堆：掉落率按精英给。和金币那条是同一份"保费"的两半。
+      const keepPay = !!enemy.keep && this.keepPay;
+      if (keepPay) chance += L.eliteBonus;
       if (!this.rng.chance(Math.min(1.0, chance))) return null;
-      const bonus = (enemy.kind === 'boss' ? 3 : enemy.kind === 'elite' ? 1 : enemy.kind === 'treasure' ? 2 : 0);
+      const bonus = (enemy.kind === 'boss' ? 3 : enemy.kind === 'elite' ? 1 : enemy.kind === 'treasure' ? 2 : 0)
+        + (keepPay ? 1 : 0);
       if (enemy.kind === 'boss') {
         // Boss 掉两件，取稀有度更高的那件，避免"打死 Boss 掉白装"的挫败
         const a = this.makeItem({ depth: this.depth + 1, bonus: bonus });
@@ -2816,6 +2874,12 @@
       if (enemy.kind === 'elite') gold += D.LOOT.goldElite;
       if (enemy.kind === 'treasure') gold += D.LOOT.goldElite;
       if (enemy.kind === 'boss') gold += D.LOOT.goldBoss;
+      /* 守门堆的保费（A-lite）只做**掉落**这一半。
+         金币翻倍试过并撤掉：分开量之后，布局自己的代价是 -3.7/0/-1.0pp，
+         而"金币翻倍 + 掉落升档"买回来 +7.0/+3.3/+1.6pp —— 超了 2~3 倍，
+         超出来的部分全在金币上。原因还是那条老动态：这个游戏里
+         "给更多资源"会顺着击杀→升级→掉落复利回去，休闲档放大得最狠。
+         补偿必须按"刚好抵消"来定，按"打得爽"来定一定会漂。 */
       this.gold += gold;
       this.events.push({ kind: 'gold', amount: gold });
 
@@ -3473,7 +3537,8 @@
           tick: opts.tick,
           alert: opts.alert,
           hold: opts.hold,
-          cleave: opts.cleave
+          cleave: opts.cleave,
+          keepPay: opts.keepPay
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;

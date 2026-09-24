@@ -55,6 +55,8 @@
   var hold = (q.hold === undefined || q.hold === '') ? 1 : parseInt(q.hold, 10);
   // cleave=0 关掉横扫（三个来源一起关）—— 量【群攻值多少】的对照组。
   var cleave = (q.cleave === undefined || q.cleave === '') ? 1 : parseInt(q.cleave, 10);
+  // keeppay=0 关掉守门堆的保费 —— 用来把"布局的代价"和"保费的补偿"分开量。
+  var keeppay = (q.keeppay === undefined || q.keeppay === '') ? 1 : parseInt(q.keeppay, 10);
   lines.push('fumble=' + fumble + '（AI 失误率）  counterBonus=' +
     (counter === undefined ? '(默认)' : counter) + '  战斗内姿态轮换=' + (stance ? '开' : '关') +
     '  群战=' + (squad ? '开' : '关'));
@@ -66,16 +68,43 @@
     return 'winRate=' + o.winRate + '%  turns=' + o.turns + '  kills=' + o.kills +
       '  relics=' + o.avgRelics + '  endDepth=' + JSON.stringify(o.byDepth);
   }
+  /* 群战占比按"被接战那只从哪来"劈开（v11.4 的 C）。
+     判据沿用探针那条：名字和它的模板同名 = 野生；被改过名 = 召唤物
+     （孢子母的"幼体"是用黏液怪模板现造的）。不把"幼体"两个字写死在这里。
+     量具包在 prototype 上，不改游戏 —— 这类统计一旦混进模型，
+     平衡数据就会开始依赖"谁在看着它"。 */
+  var byKind = { wild: { n: 0, sq: 0 }, minion: { n: 0, sq: 0 } };
+  var PP = TideCore.Game.prototype;
+  if (!PP.__splitWrapped) {
+    PP.__splitWrapped = true;
+    var _osW = PP._fightSettle;
+    PP._fightSettle = function (L) {
+      var r = _osW.apply(this, arguments);
+      if (L && L.duel && L.duel.bs && L.duel.bs.length) {
+        var u = L.duel.bs[0];
+        var isWild = (!u.src || u.name === u.src.arc.name);
+        var g = isWild ? byKind.wild : byKind.minion;
+        g.n++; if (L.duel.bs.length > 1) g.sq++;
+      }
+      return r;
+    };
+  }
+
   var t0 = Date.now();
   try {
   var diffs = diff === 'all' ? ['casual', 'standard', 'abyss'] : [diff];
   for (var i = 0; i < diffs.length; i++) {
     var d = diffs[i];
+    byKind.wild.n = 0; byKind.wild.sq = 0;
+    byKind.minion.n = 0; byKind.minion.sq = 0;
     var o = TideCore.Game.simulate(n, { difficulty: d, seedBase: 1000, maxTurns: 2400,
       aiFumble: fumble, counterBonus: counter, aiStance: !!stance, squad: !!squad,
       slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold,
-      cleave: !!cleave });
+      cleave: !!cleave, keepPay: !!keeppay });
     lines.push('[' + d + '] ' + fmt(o));
+    var pctK = function (g) { return g.n ? Math.round(g.sq / g.n * 100) + "%" : "-"; };
+    lines.push('        群战拆分 野生 ' + pctK(byKind.wild) + ' (n=' + byKind.wild.n + ')' + '  召唤物 ' + pctK(byKind.minion) + ' (n=' + byKind.minion.n + ')'
+ + '  ← 达标线看的是**野生**这一列');
     lines.push('        outcome: ' + JSON.stringify(o.outcome));
     if (o.stalls) lines.push('        STALL: ' + JSON.stringify(o.stalls));
     lines.push('        relics: ' + JSON.stringify(o.relicPick));
