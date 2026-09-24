@@ -1,0 +1,186 @@
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>probe-curve</title>
+<style>body{background:#0a0e18;color:#ccd6e6;font:13px Consolas,monospace}pre{padding:12px;white-space:pre-wrap}</style>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* 战斗长度到底是被什么决定的？
+ *
+ * probe_fightlen 只回答了"打几轮"。它答不了"为什么"。而这个项目里
+ * "为什么"才是要调的东西 —— v10.5 的教训是照着症状打补丁会换个形态复发。
+ *
+ * 所以这里把每一场战斗的两个量并排记下来：
+ *   rounds —— 实际打了几轮
+ *   need   —— 按开战时的面板，把对手全部打光**理论上**要几轮
+ *             Σ ceil(敌人血 / 玩家对它那一路的最优单击)
+ *
+ * 两者相等 → 模型成立，可以解出"敌人的血量该乘几"。
+ * rounds 明显小于 need → 有别的东西提前收场（玩家被秒、或全灭判定漏了），
+ *   那种情况下先别动数值，先查那个东西。
+ *
+ * 为什么要按**每一只**算、而不是拿总血量除以平均伤害：
+ * 群战里玩家一轮只打一个目标，伤害会"溢出"到最后一只身上，
+ * 用总量除会系统性地低估需要的轮数。
+ */
+(function () {
+  var lines = ['CURVE'];
+  var Q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return;
+    var p = kv.split('='); Q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+  var N = parseInt(Q.n || '60', 10);
+  var DIFFS = (Q.diff && Q.diff !== 'all') ? [Q.diff] : ['casual', 'standard', 'abyss'];
+
+  function tierName(t) {
+    if (!t || t < 2) return 't1';
+    if (t === 2) return 't2';
+    if (t === 3) return 't3';
+    return 't4';
+  }
+  function pct(a, b) { return b ? Math.round(a / b * 100) : 0; }
+  function avg(sum, n) { return n ? Math.round(sum / n * 100) / 100 : 0; }
+
+  for (var di = 0; di < DIFFS.length; di++) {
+    var diff = DIFFS[di];
+    var recs = [];
+    var ok = true;
+    try {
+      var P = TideCore.Game.prototype;
+      var ob = P._fightBegin, os = P._fightSettle;
+      P._fightBegin = function (foes, atkType) {
+        var L = ob.apply(this, arguments);
+        var d = L.duel, K = this.K;
+        var snap = { depth: this.depth, n: d.bs.length, foes: [] };
+        for (var i = 0; i < d.bs.length; i++) {
+          var u = d.bs[i];
+          var ba = TideCore.bestAttack(d.a.st, u.st, K);
+          snap.foes.push({
+            name: u.name, hp: u.maxHp, dmg: ba.base,
+            tier: tierName(u.src ? u.src.arc.tier : 1),
+            // 命中一次要扣的伤害 = 单击 + 克制奖励（AI 选对时才有）。
+            need: Math.max(1, Math.ceil(u.maxHp / Math.max(1, ba.base)))
+          });
+        }
+        snap.atkP = d.a.st.atkP; snap.atkM = d.a.st.atkM;
+        snap.hp = d.a.maxHp;
+        L.__snap = snap;
+        return L;
+      };
+      P._fightSettle = function (L, played) {
+        var r = os.apply(this, arguments);
+        if (L && L.__snap && L.duel) {
+          var s = L.__snap, lg = L.duel.log, pn = this.cls.name;
+          var dealt = 0, hits = 0, d1 = 0, h1 = 0, crit = 0, counter = 0;
+          for (var i = 0; i < lg.length; i++) {
+            var e = lg[i];
+            if (e.from !== pn) continue;
+            var amt = (e.dmg || 0) + (e.counter || 0);
+            if (e.dmg > 0) { dealt += amt; hits++; if (e.crit) crit++; counter += (e.counter || 0); }
+            if (e.to === s.foes[0].name) { d1 += amt; h1++; }
+          }
+          s.hits1 = h1;
+          // 真实每击伤害 = 打在**第一只怪**身上的总伤害 / 打它的次数。
+          // 用日志而不是重算公式：重算就等于把"遗物 flags / 暴击 / 克制奖励 /
+          // 针对词条"全部再实现一遍，而那个复刻件迟早和结算漂移 ——
+          // 那正是本项目里被反复警告的坑。
+          s.perHit = h1 ? d1 / h1 : 0;
+          s.needReal = s.perHit > 0 ? Math.ceil(s.foes[0].hp / s.perHit) : 0;
+          s.overkill = s.perHit > 0 ? Math.round(s.foes[0].hp / s.perHit * 100) / 100 : 0;
+          s.rounds = L.duel.round;
+          s.capped = !!L.duel.capped;
+          s.win = !!(L.duel.a.hp > 0);
+          recs.push(s);
+        }
+        return r;
+      };
+      var sim = TideCore.Game.simulate(N, {
+        difficulty: diff, seedBase: 1000, maxTurns: 2400
+      });
+      P._fightBegin = ob; P._fightSettle = os;
+      lines.push('');
+      lines.push('=== ' + diff + '  n=' + N + '  win=' + (sim && sim.winRate) + '%  fights=' + recs.length + ' ===');
+    } catch (e) {
+      ok = false;
+      lines.push('ERR ' + diff + ' ' + (e && e.stack ? e.stack : e));
+    }
+    if (!ok) continue;
+
+    var tot = { n: 0, r: 0, one: 0, need: 0, capped: 0, dead: 0 };
+    var byTier = {};
+    var byN = {};
+    var byDepth = {};
+    var hits = {};
+    for (var i = 0; i < recs.length; i++) {
+      var s = recs[i];
+      var need = 0;
+      for (var j = 0; j < s.foes.length; j++) need += s.foes[j].need;
+      var t = tot;
+      t.n++; t.r += s.rounds; t.need += need; t.one += (s.rounds <= 1 ? 1 : 0);
+      t.capped += (s.capped ? 1 : 0);
+      hits[s.rounds] = (hits[s.rounds] || 0) + 1;
+      var key = s.foes[0].tier;
+      var a = byTier[key] || (byTier[key] = { n: 0, r: 0, one: 0, need: 0, hp: 0, dmg: 0, real: 0, ph: 0 });
+      a.n++; a.r += s.rounds; a.one += (s.rounds <= 1 ? 1 : 0); a.need += need;
+      a.hp += s.foes[0].hp; a.dmg += s.foes[0].dmg;
+      a.real += s.needReal; a.ph += s.perHit;
+      var kn = 'N=' + s.n;
+      var g = byN[kn] || (byN[kn] = { n: 0, r: 0, one: 0, need: 0 });
+      g.n++; g.r += s.rounds; g.one += (s.rounds <= 1 ? 1 : 0); g.need += need;
+      var kd = 'd' + s.depth;
+      var h = byDepth[kd] || (byDepth[kd] = { n: 0, r: 0, need: 0, hp: 0, dmg: 0, atkP: 0, real: 0, ph: 0, one: 0 });
+      h.n++; h.r += s.rounds; h.need += need; h.hp += s.foes[0].hp;
+      h.dmg += s.foes[0].dmg; h.atkP += s.atkP;
+      h.real += s.needReal; h.ph += s.perHit; h.one += (s.rounds <= 1 ? 1 : 0);
+    }
+    lines.push('合计  fights=' + tot.n + '  均轮数=' + avg(tot.r, tot.n) +
+      '  一轮结束=' + pct(tot.one, tot.n) + '%' +
+      '  均需求轮=' + avg(tot.need, tot.n) +
+      '  回合上限收场=' + tot.capped);
+    var ks = Object.keys(hits).map(Number).sort(function (a, b) { return a - b; });
+    var hh = [];
+    for (var x = 0; x < ks.length && x < 10; x++) hh.push(ks[x] + '轮:' + pct(hits[ks[x]], tot.n) + '%');
+    lines.push('实际轮数分布  ' + hh.join(' '));
+
+    lines.push('');
+    lines.push('按敌人档位（用第一只怪的 tier 归类）');
+    lines.push('  档位   场次   均轮数   一轮结束   理论轮   实测轮   均血量   面板单击   实测每击');
+    var tk = Object.keys(byTier).sort();
+    for (var y = 0; y < tk.length; y++) {
+      var v = byTier[tk[y]];
+      lines.push('  ' + tk[y] + '     ' + v.n + '     ' + avg(v.r, v.n) + '     ' +
+        pct(v.one, v.n) + '%     ' + avg(v.need, v.n) + '     ' + avg(v.real, v.n) + '     ' +
+        Math.round(avg(v.hp, v.n)) + '     ' + Math.round(avg(v.dmg, v.n)) + '     ' +
+        Math.round(avg(v.ph, v.n)) + '    ×' + avg(avg(v.ph, v.n) / Math.max(1, avg(v.dmg, v.n)), 1));
+    }
+
+    lines.push('');
+    lines.push('按参战只数');
+    lines.push('  只数   场次   均轮数   一轮结束   均需求轮');
+    var nk = Object.keys(byN).sort();
+    for (var z = 0; z < nk.length; z++) {
+      var w = byN[nk[z]];
+      lines.push('  ' + nk[z] + '     ' + w.n + '     ' + avg(w.r, w.n) + '     ' +
+        pct(w.one, w.n) + '%     ' + avg(w.need, w.n));
+    }
+
+    lines.push('');
+    lines.push('按深度（第一只怪的血量 vs 玩家实测每击 —— 这就是曲线要不要改的地方）');
+    lines.push('  深度   场次   均轮数   一轮结束   玩家均物攻   敌人均血量   面板单击   实测每击   实测轮');
+    var dk = Object.keys(byDepth).sort();
+    for (var q = 0; q < dk.length; q++) {
+      var u2 = byDepth[dk[q]];
+      lines.push('  ' + dk[q] + '     ' + u2.n + '     ' + avg(u2.r, u2.n) + '     ' +
+        pct(u2.one, u2.n) + '%     ' + Math.round(avg(u2.atkP, u2.n)) + '     ' +
+        Math.round(avg(u2.hp, u2.n)) + '     ' + Math.round(avg(u2.dmg, u2.n)) + '     ' +
+        Math.round(avg(u2.ph, u2.n)) + '     ' + avg(u2.real, u2.n));
+    }
+  }
+  document.getElementById('out').textContent = 'CURVEDONE\n' + lines.join('\n');
+})();
+</script>
+</body>
+</html>

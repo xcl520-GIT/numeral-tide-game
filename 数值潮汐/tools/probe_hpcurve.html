@@ -1,0 +1,217 @@
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>probe-hpcurve</title>
+<style>body{background:#0a0e18;color:#ccd6e6;font:13px Consolas,monospace}pre{padding:12px;white-space:pre-wrap}</style>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* 普通怪血量曲线扫描器。
+ *
+ * 为什么要有它：probe_curve 量出"实际每击伤害是面板的 1.5~3.5 倍"
+ * （遗物 flags + 暴击 + 克制奖励），所以"敌人该有多少血"不能靠手算 ——
+ * 手算出来的每个数都会被那三个乘数埋掉。这里直接把血量乘一个系数跑一遍，
+ * 看 A1 的达标线（单怪均轮数 / 一轮结束占比）落在哪。
+ *
+ * 一次扫描同时给出通关率，是因为这两件事**必须一起看**：
+ * 拉长战斗会让敌人多出手，通关率必然下移；只看战斗长度选出来的值
+ * 很可能把某一档打穿 20pp 的归因线。表里并排显示，才能一次选对。
+ *
+ * 只改内存里的 TideData，源码一行不动，扫完即忘。
+ * 用法： probe_hpcurve.html?pts=1:1,2:0.7&pd=0.34&n=60
+ *   pts  每个点 = "血量倍率:攻击倍率"，可用冒号继续分档："血量:攻击:t2血:t2攻"（最多 4 段）
+ *        只写一个数 = 血量倍率，攻击不动
+ *   pd   enemyHpPerDepth 覆盖值（可选）
+ */
+(function () {
+  var lines = ['HPCURVE'];
+  var Q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return;
+    var p = kv.split('='); Q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+  var N = parseInt(Q.n || '60', 10);
+  var PTS = (Q.pts || '1:1').split(',').filter(Boolean);
+  var DIFFS = (Q.diff && Q.diff !== 'all') ? [Q.diff] : ['casual', 'standard', 'abyss'];
+  var D = TideData;
+
+  // 原始血量快照。BOSSES 不参与 —— 首领本来就打 3~4 轮，
+  // A1 的问题全在杂兵身上，动首领只会顺手把首领那一档也推歪。
+  var BASE = {};
+  D.ENEMIES.forEach(function (e) { BASE[e.id] = { hp: e.stats.hp, atkP: e.stats.atkP, atkM: e.stats.atkM }; });
+  var BASE_PD = D.DEPTH_CFG.enemyHpPerDepth;
+  var PDS = (Q.pd || String(BASE_PD)).split(',').filter(Boolean).map(parseFloat);
+  // 职业必须能和别处的基线记录对上：sim.html?cls=0 只跑破军，
+  // 而"轮换四个职业"跑出来的通关率会整体高一档（秘仪/铁壁更耐打）。
+  // 两边不一致的话，这里的每一行数字都没法和已有基线比较。
+  var CLSNAME = ['warlord', 'arcanist', 'ranger', 'warden'];
+  // 默认与 sim.html 的主行对齐：**职业轮换 + fumble=0.2**。
+  // 这两条任何一个不对，"通关率"就和已记录的基线不是一个东西 ——
+  // 第一次跑这里时两边差了 20pp（abyss 17% vs 记录的 38%），
+  // 根因就是这里默认 fumble=0（完美玩法）而 sim.html 默认 0.2（玩家均值）。
+  var CLS = (Q.cls === 'all' || Q.cls === undefined) ? undefined
+    : CLSNAME[parseInt(Q.cls, 10) || 0];
+  var CLSLABEL = CLS ? CLS : '轮换';
+  var FUMBLE = (Q.fumble === undefined) ? 0.2 : parseFloat(Q.fumble);
+  var COUNTER = (Q.counter === undefined) ? undefined : parseFloat(Q.counter);
+  var SQUAD = (Q.squad === undefined) ? 1 : parseInt(Q.squad, 10);
+
+  /* 一个扫描点 = 血量倍率 + 攻击倍率。
+     为什么两个必须一起扫：只抬血量，敌人就多出手几轮，
+     玩家每场挨的伤害直接翻倍 —— 实测 standard 通关率 66%→10%。
+     那不是"战斗变长"，那是"难度翻倍"。同一个威胁摊到更多轮次上，
+     才既长了战斗、又不改总伤害。 */
+  function applyPt(pt) {
+    var p = pt.split(':').map(parseFloat);
+    var m1 = p[0], a1 = (p.length > 1 ? p[1] : 1),
+        m2 = (p.length > 2 ? p[2] : m1), a2 = (p.length > 3 ? p[3] : a1);
+    D.ENEMIES.forEach(function (e) {
+      var is2 = e.tier >= 2;
+      var m = is2 ? m2 : m1, a = is2 ? a2 : a1;
+      e.stats.hp = Math.round(BASE[e.id].hp * m);
+      e.stats.atkP = Math.round(BASE[e.id].atkP * a);
+      e.stats.atkM = Math.round(BASE[e.id].atkM * a);
+    });
+  }
+
+  var P = TideCore.Game.prototype;
+  var ob = P._fightBegin, os = P._fightSettle;
+
+  function measure(diff) {
+    var s = { n1: 0, r1: 0, one1: 0, nAll: 0, rAll: 0, oneAll: 0, nAll1v1: 0, rAll1v1: 0, oneAll1v1: 0, squad: 0,
+              nW: 0, rW: 0, oneW: 0 };
+    // 逐场明细：只记 1v1 杂兵。用来回答"血量已经够厚了，为什么还是一轮结束"。
+    // 判据是 ehp 与**实测每击**的关系，而不是面板单击 ——
+    // 面板单击在遗物多了之后会低估 1.5~3.5 倍（见 probe_curve）。
+    s.detail = [];
+    var pn = null;
+    P._fightBegin = function (foes, atkType) {
+      var L = ob.apply(this, arguments);
+      L.__t = (L.duel.bs[0].src ? L.duel.bs[0].src.arc.tier : 1);
+      L.__k = (L.duel.bs[0].src ? (L.duel.bs[0].src.arc.kind || 'normal') : 'normal');
+      pn = L.duel.a.name;
+      return L;
+    };
+    P._fightSettle = function (L, played) {
+      var r = os.apply(this, arguments);
+      if (L && L.duel) {
+        var rd = L.duel.round, one = (rd <= 1 ? 1 : 0), k = L.duel.bs.length;
+        if (k > 1) s.squad++;
+        s.nAll++; s.rAll += rd; s.oneAll += one;
+        if (k === 1) { s.nAll1v1++; s.rAll1v1 += rd; s.oneAll1v1 += one; }
+        // 「单怪」= 一只、且是杂兵（tier 1、kind normal）。A1 的达标线看的就是它。
+        if (k === 1 && L.__t <= 1 && L.__k === 'normal') {
+          s.n1++; s.r1 += rd; s.one1 += one;
+          // 「野生」= 名字和它的模板同名。孢子母的召唤物「幼体」是用
+          // 黏液怪模板现造的，名字被改过 —— 用这条差别把它们分开，
+          // 而不是把"幼体"两个字写死在探针里。
+          var u0 = L.duel.bs[0];
+          if (!u0.src || u0.name === u0.src.arc.name) { s.nW++; s.rW += rd; s.oneW += one; }
+          var lg = L.duel.log, d1 = 0, h1 = 0;
+          for (var i = 0; i < lg.length; i++) {
+            var e = lg[i];
+            if (e.from !== pn || !(e.dmg > 0)) continue;
+            d1 += (e.dmg || 0) + (e.counter || 0); h1++;
+          }
+          var ph = h1 ? d1 / h1 : 0;
+          s.detail.push({
+            ehp: L.duel.bs[0].maxHp, ph: ph, hits: h1, rd: rd,
+            atkP: L.duel.a.st.atkP, nm: L.duel.bs[0].name
+          });
+        }
+      }
+      return r;
+    };
+    var o = TideCore.Game.simulate(N, {
+      difficulty: diff, seedBase: 1000, maxTurns: 2400, classKey: CLS,
+      aiFumble: FUMBLE, counterBonus: COUNTER, aiStance: true, squad: !!SQUAD
+    });
+    P._fightBegin = ob; P._fightSettle = os;
+    s.win = o.winRate; s.turns = o.turns; s.kills = o.kills;
+    s.timeout = (o.outcome && (o.outcome.timeout || 0)) || 0;
+    s.stall = (o.outcome && (o.outcome.stall || 0)) || 0;
+    // 死因 + 深度分布。少了这两个，"通关率掉了"只能靠猜是死在杂兵、
+    // 首领还是潮水手里 —— 而这三者的处置完全不同。
+    s.cause = o.deathCause || {};
+    s.byDepth = o.byDepth || {};
+    s.relics = o.avgRelics;
+    return s;
+  }
+
+  function a(sum, n) { return n ? Math.round(sum / n * 100) / 100 : 0; }
+  function pc(x, n) { return n ? Math.round(x / n * 100) : 0; }
+
+  for (var pi = 0; pi < PDS.length; pi++) {
+   D.DEPTH_CFG.enemyHpPerDepth = PDS[pi];
+   for (var i = 0; i < PTS.length; i++) {
+    applyPt(PTS[i]);
+    lines.push('');
+    lines.push('### 血量:攻击 = ' + PTS[i] + '   (hpPerDepth=' + D.DEPTH_CFG.enemyHpPerDepth +
+      '  职业=' + CLSLABEL + '  fumble=' + FUMBLE + ')');
+    for (var d = 0; d < DIFFS.length; d++) {
+      try {
+        var s = measure(DIFFS[d]);
+        lines.push('  ' + pad(DIFFS[d], 9) + ' 通关 ' + pad(s.win + '%', 7) +
+          ' | 野生杂兵 n=' + pad(s.nW, 6) + ' 均轮 ' + pad(a(s.rW, s.nW), 6) +
+          ' 一轮 ' + pad(pc(s.oneW, s.nW) + '%', 5) +
+          ' | 含召唤物 n=' + pad(s.n1, 6) + ' 均轮 ' + pad(a(s.r1, s.n1), 6) +
+          ' 一轮 ' + pad(pc(s.one1, s.n1) + '%', 5) +
+          ' | 1v1 均轮 ' + pad(a(s.rAll1v1, s.nAll1v1), 6) + ' 一轮 ' + pad(pc(s.oneAll1v1, s.nAll1v1) + '%', 5) +
+          ' | 群战 ' + pad(pc(s.squad, s.nAll) + '%', 5) +
+          ' | 回合 ' + pad(s.turns, 6) + ' 杀 ' + pad(s.kills, 5) +
+          ' TO ' + s.timeout + ' ST ' + s.stall);
+        if (Q.detail && s.detail && s.detail.length) {
+          var ds = s.detail.slice().sort(function (x, y) { return x.ehp / Math.max(1, x.ph) - y.ehp / Math.max(1, y.ph); });
+          var rq = [0.1, 0.25, 0.5, 0.75, 0.9].map(function (q) {
+            var v = ds[Math.min(ds.length - 1, Math.floor(ds.length * q))];
+            return q + ':' + (Math.round(v.ehp / Math.max(1, v.ph) * 100) / 100);
+          }).join(' ');
+          var hr = {};
+          ds.forEach(function (v) { hr[v.rd] = (hr[v.rd] || 0) + 1; });
+          var hh = Object.keys(hr).sort(function (a, b) { return a - b; })
+            .map(function (k) { return k + '轮:' + pc(hr[k], ds.length) + '%'; }).join(' ');
+          lines.push('        明细 1v1杂兵 n=' + ds.length +
+            '  ehp/实测每击 分位 ' + rq + '  实打轮数 ' + hh);
+          lines.push('        均 ehp=' + Math.round(ds.reduce(function (t, v) { return t + v.ehp; }, 0) / ds.length) +
+            '  均实测每击=' + Math.round(ds.reduce(function (t, v) { return t + v.ph; }, 0) / ds.length) +
+            '  均命中次数=' + a(ds.reduce(function (t, v) { return t + v.hits; }, 0), ds.length));
+          lines.push('        死因 ' + JSON.stringify(s.cause) + '  深度分布 ' + JSON.stringify(s.byDepth) +
+            '  均遗物 ' + s.relics);
+          // 逐怪种明细：哪一只在变成"肉墙"。
+          // 均匀乘一个倍率一定会踩到这个坑 —— 反伤/高防的怪会被放大成 15 轮，
+          // 而它们本来就不该是杂兵里最难啃的。
+          var byName = {};
+          ds.forEach(function (v) {
+            var g2 = byName[v.nm] || (byName[v.nm] = { n: 0, r: 0, one: 0, hp: 0, ph: 0 });
+            g2.n++; g2.r += v.rd; g2.one += (v.rd <= 1 ? 1 : 0);
+            g2.hp += v.ehp; g2.ph += v.ph;
+          });
+          Object.keys(byName).sort(function (a2, b2) { return byName[b2].n - byName[a2].n; })
+            .forEach(function (nm) {
+              var g3 = byName[nm];
+              if (g3.n < 30) return;
+              lines.push('          · ' + nm + ' n=' + g3.n + ' 均轮 ' + a(g3.r, g3.n) +
+                ' 一轮 ' + pc(g3.one, g3.n) + '% 血 ' + Math.round(a(g3.hp, g3.n)) +
+                ' 每击 ' + Math.round(a(g3.ph, g3.n)) +
+                ' 比 ' + a(a(g3.hp, g3.n) / Math.max(1, a(g3.ph, g3.n)), 1));
+            });
+        }
+      } catch (e) {
+        lines.push('  ERR ' + DIFFS[d] + ' ' + (e && e.stack ? e.stack : e));
+      }
+    }
+   }
+  }
+  D.ENEMIES.forEach(function (e) {
+    e.stats.hp = BASE[e.id].hp;
+    e.stats.atkP = BASE[e.id].atkP;
+    e.stats.atkM = BASE[e.id].atkM;
+  });
+  D.DEPTH_CFG.enemyHpPerDepth = BASE_PD;
+  function pad(s, w) { s = String(s); while (s.length < w) s += ' '; return s; }
+  document.getElementById('out').textContent = 'HPCURVEDONE\n' + lines.join('\n');
+})();
+</script>
+</body>
+</html>

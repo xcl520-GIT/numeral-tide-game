@@ -36,7 +36,7 @@
     /* 吞噬（遗物）的成长：每层 +2 物攻，但**有上限**。
        为什么必须封顶：它每击杀永久叠层、原实现无上限。实测深渊一局 70 杀
        就是 +280~420 物攻，而破军基础物攻只有 44 —— 6~10 倍。
-       后果直接量得到：1v1 场次里玩家平均要打出 957 点伤害才杀得掉一只怪，
+       后果直接量得到：1v1 场次里玩家平均要打出 957 点伤害才杀得掉一只怪（v11.4-f 之前的口径），
        敌人一辈子没机会出手（均掉血 1.4），"每轮选一次"这类决策全部退化。
        上限取 10 层 = +20 物攻（对基础 44 是 +45%）：仍是爽点，但不再无限。
        放在这里而不是散在 core.js 里，是为了让"它有多强"只有一个出处。 */
@@ -429,22 +429,22 @@
   const ENEMIES = [
     { id: 'slime',  name: '黏液怪', tier: 1, weight: 10, kind: 'normal',
       shape: { body: 'blob', w: 20, h: 15, eye: 2, color: '#5fc98a', accent: '#2f8a58', spikes: 0, arms: 0 },
-      stats: { hp: 38, atkP: 10, atkM: 7, defP: 2, defM: 2, spd: 8 },
+      stats: { hp: 115, atkP: 6, atkM: 4, defP: 2, defM: 2, spd: 8 },
       note: '平庸的杂兵，用来试刀' },
 
     { id: 'brute',  name: '石甲兽', tier: 1, weight: 8, kind: 'normal',
       shape: { body: 'brute', w: 22, h: 19, eye: 2, color: '#8d939c', accent: '#5a6069', spikes: 3, arms: 2 },
-      stats: { hp: 66, atkP: 16, atkM: 0, defP: 26, defM: 0, spd: 6 },
+      stats: { hp: 100, atkP: 9, atkM: 0, defP: 26, defM: 0, spd: 6 },
       note: '物防极高、法防为零 —— 该换法术打' },
 
     { id: 'wraith', name: '幽魂',   tier: 1, weight: 8, kind: 'normal',
       shape: { body: 'ghost', w: 18, h: 20, eye: 2, color: '#9fb3e8', accent: '#5a6fb8', spikes: 0, arms: 2, ghost: true },
-      stats: { hp: 42, atkP: 0, atkM: 20, defP: 0, defM: 28, spd: 11 },
+      stats: { hp: 85, atkP: 0, atkM: 11, defP: 0, defM: 28, spd: 11 },
       note: '法防极高、物防为零 —— 该换物理打' },
 
     { id: 'runner', name: '疾风兽', tier: 1, weight: 8, kind: 'normal',
       shape: { body: 'beast', w: 24, h: 16, eye: 2, color: '#e0a45a', accent: '#a06a2a', spikes: 4, arms: 0 },
-      stats: { hp: 34, atkP: 14, atkM: 0, defP: 3, defM: 3, spd: 26 },
+      stats: { hp: 102, atkP: 8, atkM: 0, defP: 3, defM: 3, spd: 26 },
       note: '速度极快，会抢在你前面出手' },
 
     { id: 'spawner', name: '孢子母', tier: 2, weight: 4, kind: 'elite',
@@ -673,7 +673,17 @@
      变成这套机制的门面 —— 它每一轮都恰好露出一个不同的破绽。
      ============================================================ */
   const STANCE = {
-    every: 3,      // 每行动 3 次切换一次
+    /* 每行动 2 次切换一次（v11.4-f 由 3 改 2）。
+       为什么要重标：姿态的价值是“这一轮该打哪一路会变”，
+       而它只在敌人活得够久时才兑现。旧值 3 是配**旧战斗长度**定的：
+       那时杂兵一刀就死（普通怪 92% 在第一轮分胜负），能打 3 轮以上的只有精英，
+       于是 every=3 恰好等于“精英战里翻一次”。
+       普通怪血量上调之后，一场仗变成 2~3 轮，every=3 反而变成
+       “整场都看不到翻面”——机制还在，玩家一次也遇不到。
+       2 让一场 3 轮的仗至少翻一次。
+       注意它**不改变难度**：硬化 ×1.5 / 软化 ×0.5 是零和重分配，
+       平均强度恒为 1.0，改的只是“翻面的频率”——也就是这条线索的可读性。 */
+    every: 2,
     hard: 1.5,     // 硬化侧倍率
     soft: 0.5,     // 另一侧倍率
     minDef: 6      // 双侧防御都 >= 此值才配拥有姿态

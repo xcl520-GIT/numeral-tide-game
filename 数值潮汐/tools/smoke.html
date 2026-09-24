@@ -2931,7 +2931,7 @@ try {
   var flips = 0, sd = 0;
   while (sd < 6 && !dd.finished) { dd.step('p'); sd++; if (dd.lastFlip) flips += 1; }
   if (sd !== 6) fail('6 轮之内对决就结束了（假想敌的参数不该致死）: ' + sd);
-  else if (flips !== 2) fail('6 轮里姿态该翻 2 次（every=3），实际 ' + flips);
+  else if (flips !== 3) fail('6 轮里姿态该翻 3 次（every=2），实际 ' + flips);
   else ok('对决内姿态轮换：6 轮翻 ' + flips + ' 次 —— 题目确实会在战斗中改变');
 
   // ---- D. 不传 src 的合成对决**不许**轮换（伤害数学靠这条保持纯净）----
@@ -3565,6 +3565,76 @@ try {
     }
   }
 } catch (e) { fail('等级上限测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+/* ---------- 45. 普通怪曲线（A1：让战斗长到 2~3 轮） ----------
+   这一节守的是 A1 的**设计意图**，不是某个具体数字：
+
+     ① **普通怪不许被一刀秒**。判据是行为而不是面板：拿四个职业的真实开局
+        面板，跟 depth 1 的每只普通怪各打一轮，断言"一轮之后它还没死"。
+        静态比较血量/攻击是算不准的 —— 伤害要过 K/(K+防) 与穿透，
+        手抄一遍公式就等于埋了第二个真源。
+        把暴击/闪避清零是为了让这条断言**确定**：冒烟不能时好时坏。
+        职业被动与遗物造成的偶发一击必杀属于概率尾巴，由 A1 的
+        "一轮结束 ≤30%" 去管，不在这条断言的射程内。
+     ② 普通怪的攻击被下调过。这条是**反向护栏**，也是本节的另一半：
+        只抬血量不降攻击，战斗变长就直接等于难度变高 ——
+        实测 standard 通关率会从 66% 掉到 10%。把上限钉住，
+        以后谁想把攻击顺手调回去，先得看这段注释。
+     ③ 召唤物「幼体」必须比同层野生黏液怪弱一档。它是孢子母每 3 回合产一只
+        的东西；跟野生怪一样厚的话，孢子母就从"要优先处理"变成"打不掉"。 */
+try {
+  var D45 = w.TideData, C45 = w.TideCore;
+  var CLS45 = ['warlord', 'arcanist', 'ranger', 'warden'];
+  var tier1 = D45.ENEMIES.filter(function (e) { return e.tier === 1; });
+
+  var oneShot = [];
+  CLS45.forEach(function (ck) {
+    var g45 = new C45.Game({ classKey: ck, difficulty: 'standard', seed: 11 });
+    var panel = g45.stats();
+    tier1.forEach(function (arc) {
+      var st = g45._scaleEnemyStats(arc, 1);
+      var A = {}, B = {}, k;
+      for (k in panel) A[k] = panel[k];
+      for (k in st) B[k] = st[k];
+      A.maxHp = A.hp; A.crit = 0; A.dodge = 0;   // 清零 = 这条断言要确定性
+      B.hp = st.hp; B.maxHp = st.hp; B.wet = 0; B.stance = null;
+      B.dodge = 0; B.tags = C45.tagsOf(st, arc);
+      // newDuel 的 B 参数就是**属性对象本身**（hp/maxHp 直接挂在它上面），
+      // 不能再包一层 {st: B}。多包一层会让 Bx.st.spd 变成 undefined，
+      // 速度差被算成 26 → 白送一次速度追击 → 断言误报"一刀秒"。
+      var d45 = g45.newDuel(A, B, {}, {}, true,
+        { name: g45.cls.name, isPlayer: true, atkType: null }, { name: arc.name });
+      d45.step(C45.bestAttack(A, B, g45.K).type);
+      if (d45.finished) oneShot.push(ck + '×' + arc.name);
+    });
+  });
+  if (oneShot.length) {
+    fail('普通怪被一刀秒了（' + oneShot.join('、') + '）—— A1 的前提被破坏');
+  } else {
+    ok('普通怪不再被一刀秒：4 职业 × ' + tier1.length + ' 只，第一轮打完之后都还活着');
+  }
+
+  // 改前的化石值（v11.4-e 末）。把它写死在冒烟里是刻意的：
+  // "攻击被调回去了"这件事从当前数据里看不出来，必须有第二个时间点做参照。
+  var ATK_BEFORE = { slime: 17, brute: 16, wraith: 20, runner: 14 };
+  var crept = [];
+  tier1.forEach(function (e) {
+    var sum = e.stats.atkP + e.stats.atkM;
+    if (sum > ATK_BEFORE[e.id]) crept.push(e.name + ' ' + sum + ' > ' + ATK_BEFORE[e.id]);
+  });
+  if (crept.length) {
+    fail('普通怪的攻击被调回去了（' + crept.join('、') + '）—— 战斗变长会直接变成难度变高');
+  } else {
+    ok('普通怪的攻击仍在下调后的区间（4 只都没超过改前）');
+  }
+
+  var g45b = new C45.Game({ classKey: 'warlord', difficulty: 'standard', seed: 11 });
+  var mini45 = D45.enemyById('slime');
+  var wild = g45b._scaleEnemyStats(mini45, 3).hp;
+  var baby = g45b._scaleEnemyStats(mini45, 2).hp;
+  if (!(baby < wild)) fail('幼体不比野生黏液怪弱：' + baby + ' vs ' + wild);
+  else ok('召唤物幼体仍比同层野生黏液怪弱一档（' + baby + ' < ' + wild + '）');
+} catch (e) { fail('普通怪曲线测试异常: ' + (e && e.stack ? e.stack : e)); }
 
   w.TideUI.closeBattle();
   w.TideMeta.reset();
