@@ -255,6 +255,17 @@
          cleaveOn / keepPay / askSkill 同一个形状。 */
       this.waitCost = (opts.waitCost === 'a' || opts.waitCost === 'b') ? opts.waitCost : '0';
       this.aiWait = !!opts.aiWait;
+      /* P2（v11.5）：路宽。1 = 旧地图（单格走廊）／2 = 走廊多挖一行/列。
+         为什么做成开关而不是直接改：**地图拓扑一变，所有基线都会动**
+         （不是逐位可比）。留着 1 这一档，改造前的每一个数才还有对照物 ——
+         这是本项目"先能对照、再谈改动"的底线。 */
+      this.roadW = (opts.roadW === 2 || opts.roadW === '2') ? 2 : 1;
+      /* P2（v11.5）：堆的布点。0 = 旧行为（只有守门区贴出口，其余区随机空地）
+         ／1 = 泛化成"贴本区门位"，即玩家进这个区唯一必须穿过的地方。
+         ⚠️ 这个机制**已经在 A-lite 上验证过半次**：v11.4-p 把出口所在区
+         换成贴出口之后，三套配置下群战野生率都是 14~17%，一动不动。
+         所以默认值就是 0 —— 不是保守，是那条证据还站在 0 这一边。 */
+      this.packAnchor = !!opts.packAnchor;
 
       this.seed = (opts.seed === undefined || opts.seed === null)
         ? ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0)
@@ -565,8 +576,24 @@
       }
       /* —— 2. 连走廊（按房间顺序串起来，再补几条捷径形成环路）—— */
       const cen = (r) => ({ x: Math.floor(r.x + r.w / 2), y: Math.floor(r.y + r.h / 2) });
-      const carveH = (x0, x1, y) => { for (let x = Math.min(x0, x1); x <= Math.max(x0, x1); x++) if (getT(x, y) === T.WALL) setT(x, y, T.FLOOR); };
-      const carveV = (y0, y1, x) => { for (let y = Math.min(y0, y1); y <= Math.max(y0, y1); y++) if (getT(x, y) === T.WALL) setT(x, y, T.FLOOR); };
+      /* 走廊的宽度（P2）。
+         roadW=1 时下面两个内层循环只跑 d=0 一次 —— 与原式**逐字等价**，
+         所以默认关的那一组三档基线必须逐位相同。
+         roadW=2 时横走廊多挖一行（+y）、竖走廊多挖一列（+x）：
+         L 型拐角与两条走廊的交汇自然变成 2×2，所以**不需要**再给"路口"
+         单开特例 —— 那会多出一份需要同步维护的规则。
+         为什么固定往 +方向多挖，而不是"两侧各半格"：格子没有半格。
+         居中就得在上下（左右）两格里挑一个，那还不如固定一个方向 ——
+         至少每个拐角的形状是可预期的。 */
+      const RW = this.roadW || 1;
+      const carveH = (x0, x1, y) => {
+        for (let x = Math.min(x0, x1); x <= Math.max(x0, x1); x++)
+          for (let d = 0; d < RW; d++) if (getT(x, y + d) === T.WALL) setT(x, y + d, T.FLOOR);
+      };
+      const carveV = (y0, y1, x) => {
+        for (let y = Math.min(y0, y1); y <= Math.max(y0, y1); y++)
+          for (let d = 0; d < RW; d++) if (getT(x + d, y) === T.WALL) setT(x + d, y, T.FLOOR);
+      };
       for (let i = 1; i < rooms.length; i++) {
         const a = cen(rooms[i - 1]), b = cen(rooms[i]);
         if (rng.chance(0.5)) { carveH(a.x, b.x, a.y); carveV(a.y, b.y, b.x); }
@@ -1193,6 +1220,46 @@
         return null;
       };
 
+      /* 堆的锚点（P2-b）：本区的一个**门位**旁边 —— 玩家进这个区唯一
+         必须穿过的地方。
+
+         为什么这一条和 anchorNearExit 是同一件事的泛化：v11.4-n 把站位
+         这一侧的杠杆走完之后，留下的话是"唯一没试过的方向是关卡布局：
+         把堆放在玩家**必须穿过**的地方，让他走进堆里，而不是撞在堆的边缘"。
+         A-lite 只在**出口所在区**做了这件事（一个区、恰好一场）；
+         这里把同一个判断搬到每一个区。
+
+         为什么从门位往**区内部**退 1~3 格：门那一格自己贴着走廊，
+         堆摆在上面会顺着走廊摊成一列 —— 而"一列"正是要被消除的那个形状。
+         退进来才是"站在他前进的路上"。
+
+         为什么还要 >=4 的离玩家距离：贴脸刷怪不是围攻，是伏击。
+         开局第一回合就被围，玩家学到的不是"要不要绕开"，而是"只能硬碰硬"。 */
+      const anchorNearDoor = (reg) => {
+        const doors = this._regionDoors()[reg.id];
+        if (!doors || !doors.length) return null;
+        for (let t = 0; t < 12; t++) {
+          const d = doors[this.rng.int(0, doors.length - 1)];
+          for (let r = 1; r <= 3; r++) {
+            const cands = [];
+            for (let dx = -r; dx <= r; dx++) {
+              const dy = r - Math.abs(dx);
+              const sgns = (dy === 0) ? [1] : [1, -1];
+              for (let s = 0; s < sgns.length; s++) {
+                const x = d.x + dx, y = d.y + dy * sgns[s];
+                if (!this.walkable(x, y)) continue;
+                if (this.regionAt(x, y) !== reg.id) continue;
+                if (occ.has(x + ',' + y)) continue;
+                if (Math.abs(x - this.px) + Math.abs(y - this.py) < 4) continue;
+                cands.push({ x: x, y: y });
+              }
+            }
+            if (cands.length) return this.rng.pick(cands);
+          }
+        }
+        return null;
+      };
+
       if (this.regions && this.regions.length) {
         /* 堆的规模与堆的数量（v11.4-h 修正）
            ------------------------------------------------
@@ -1233,7 +1300,16 @@
           const per = packSizes[pi];
           if (placed >= count) break;
           const isKeep = (reg.id === this.gateRegion);
-          const a = isKeep ? (anchorNearExit(reg) || anchorIn(reg)) : anchorIn(reg);
+          /* packAnchor=0 时下面这三级判断的结果与改造前**逐字等价**
+             （isKeep 走 anchorNearExit || anchorIn，否则走 anchorIn），
+             而且不会多消耗一个随机数 —— 所以默认档的三档基线必须逐位相同。
+             第 1 层不参与：它是教学层（v11.0 定的原则），
+             开局就把每一区的怪怼在门口，玩家学到的不是"读地图"而是"别进门"。 */
+          let a;
+          const useDoor = this.packAnchor && depth >= 2 && !isKeep;
+          if (isKeep) a = anchorNearExit(reg) || anchorIn(reg);
+          else if (useDoor) a = anchorNearDoor(reg) || anchorIn(reg);
+          else a = anchorIn(reg);
           if (!a) continue;
           occ.add(a.x + ',' + a.y);
           const packStart = this.enemies.length;   // 这一堆在 enemies 里的起点
@@ -3721,7 +3797,9 @@
           // 开关漏转发一个，"这个机制的代价是多少"就只能看代码猜，
           // 而代价这件事只有对照实验能回答。
           waitCost: opts.waitCost,
-          aiWait: opts.aiWait
+          aiWait: opts.aiWait,
+          roadW: opts.roadW,
+          packAnchor: opts.packAnchor
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;

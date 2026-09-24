@@ -33,7 +33,9 @@
   var bTiles = 0, narrow = 0, degHist = {}, pairRuns = {}, runHist = {};
 
   for (var g = 0; g < n; g++) {
-    var gm = new TideCore.Game({ difficulty: diff, seed: 1000 + g * 7919, classKey: 'warlord' });
+    var gm = new TideCore.Game({ difficulty: diff, seed: 1000 + g * 7919, classKey: 'warlord',
+                                 roadW: (parseInt(Q.roadw, 10) === 2) ? 2 : 1,
+                                 packAnchor: parseInt(Q.packanchor, 10) === 1 });
 
     // ① 近邻
     for (var i = 0; i < gm.enemies.length; i++) {

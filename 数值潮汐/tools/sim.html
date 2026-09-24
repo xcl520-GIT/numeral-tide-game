@@ -62,6 +62,10 @@
   //   aiwait=0|1       无头 AI 会不会刷回合（0 = 旧 AI，一次都不等）
   var waitcost = (q.waitcost === 'a' || q.waitcost === 'b') ? q.waitcost : '0';
   var aiwait = (q.aiwait === undefined || q.aiwait === '') ? 0 : parseInt(q.aiwait, 10);
+  // P2（v11.5）：路宽。默认 1 = 旧地图（单格走廊）。传 2 得到 2 格宽的走廊。
+  var roadw = (parseInt(q.roadw, 10) === 2) ? 2 : 1;
+  // P2（v11.5）：堆贴门位（默认 0 = 旧布点）。第 1 层始终不参与。
+  var packanchor = (q.packanchor === undefined || q.packanchor === '') ? 0 : parseInt(q.packanchor, 10);
   lines.push('fumble=' + fumble + '（AI 失误率）  counterBonus=' +
     (counter === undefined ? '(默认)' : counter) + '  战斗内姿态轮换=' + (stance ? '开' : '关') +
     '  群战=' + (squad ? '开' : '关'));
@@ -71,7 +75,9 @@
   lines.push('  等待的代价=' + (waitcost === '0' ? '关（等待免费 = 旧行为）'
     : (waitcost === 'a' ? 'a · 额外推进一个潮汐节拍'
       : 'b · 累积惊动（已醒的敌人免费挪一步）')) +
-    '  AI刷回合=' + (aiwait ? '开' : '关（一次都不等 = 旧行为）'));
+    '  AI刷回合=' + (aiwait ? '开' : '关（一次都不等 = 旧行为）') +
+    '  路宽=' + roadw + (roadw === 1 ? '（旧地图）' : ' 格') +
+    '  堆贴门位=' + (packanchor ? '开' : '关（旧布点）'));
 
   function fmt(o) {
     return 'winRate=' + o.winRate + '%  turns=' + o.turns + '  kills=' + o.kills +
@@ -144,7 +150,8 @@
     var o = TideCore.Game.simulate(n, { difficulty: d, seedBase: 1000, maxTurns: 2400,
       aiFumble: fumble, counterBonus: counter, aiStance: !!stance, squad: !!squad,
       slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold,
-      cleave: !!cleave, keepPay: !!keeppay, waitCost: waitcost, aiWait: !!aiwait });
+      cleave: !!cleave, keepPay: !!keeppay, waitCost: waitcost, aiWait: !!aiwait,
+      roadW: roadw, packAnchor: !!packanchor });
     lines.push('[' + d + '] ' + fmt(o));
     lines.push('        群战拆分 野生 ' + pct(byKind.wild) + ' (n=' + byKind.wild.n + ')' +
       '  召唤物 ' + pct(byKind.minion) + ' (n=' + byKind.minion.n + ')' +
@@ -169,7 +176,8 @@
         difficulty: diffs[0], classKey: c, seedBase: 1000, maxTurns: 2400,
         aiFumble: fumble, counterBonus: counter, aiStance: !!stance, squad: !!squad,
         slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold,
-        cleave: !!cleave, keepPay: !!keeppay, waitCost: waitcost, aiWait: !!aiwait
+        cleave: !!cleave, keepPay: !!keeppay, waitCost: waitcost, aiWait: !!aiwait,
+        roadW: roadw, packAnchor: !!packanchor
       });
       lines.push('[cls:' + c + '] ' + fmt(o));
       lines.push('        ' + resident(o));
