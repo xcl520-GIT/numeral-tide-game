@@ -468,7 +468,7 @@ numeral-tide/
 │  ├─ 说明.txt                   随包说明
 │  ├─ www/                      游戏本体（**构建产物**，由 src/ 复制而来，不要手改）
 │  ├─ release/数值潮汐/          干净分发包（只含可运行文件，传网盘用）
-│  ├─ release/数值潮汐-v11.9.zip
+│  ├─ release/数值潮汐-v11.10.zip
 │  ├─ src/                      游戏源码（构建时整体复制到 www\）
 │  │  ├─ index.html
 │  │  ├─ css/style.css
@@ -663,7 +663,7 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1
 | 产物 | 位置 | 用途 |
 |---|---|---|
 | 可运行文件 | 项目根：`数值潮汐.exe` + 3 个 DLL + `www\` + `说明.txt` | 双击即玩，启动器就在最表层 |
-| 干净分发包 | `release\数值潮汐\` 与 `release\数值潮汐-v11.9.zip` | 只含可运行文件，传网盘用 |
+| 干净分发包 | `release\数值潮汐\` 与 `release\数值潮汐-v11.10.zip` | 只含可运行文件，传网盘用 |
 
 ### 清理动作的安全闸门（改这个脚本之前必读）
 
