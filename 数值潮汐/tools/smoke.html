@@ -4077,6 +4077,235 @@ try {
   fail('战斗音效测试异常: ' + (e && e.stack ? e.stack : e));
 }
 
+/* ---------- 52. P4：Boss 行为差异化（四条真链路断言） ----------
+   为什么三条行为要各验一条：它们挂在**同一个总开关**后面，于是
+   "开关一开、但三条里有一条其实没接上"这种失败，在任何分布上都只表现为
+   "好像没什么变化" —— 而 P1 那两张一模一样的矩阵已经教过一次：
+   **看不出变化**和**没有变化**是两件必须分开确认的事。
+   本节还钉住"关 = 旧行为"：不是靠读代码推的，是把开关关掉再跑一遍。
+
+   另一个刻意的选择：所有断言都用**同一张图**（同一个 seed）。
+   不然"开着被推开 2 格、关着没动"里藏着两个变量（开关 + 地图），
+   而那种对照恰恰是本项目反复踩过的坑。 */
+try {
+  var BOSSES52 = {};
+  w.TideData.BOSSES.forEach(function (b) { BOSSES52[b.id] = b; });
+  var SEED52 = 91007;
+  var mk52 = function (on) {
+    return new w.TideCore.Game({
+      classKey: 'warlord', difficulty: 'standard', seed: SEED52, bossFx: !!on
+    });
+  };
+  /* _makeBoss 是**随机挑模板**的，而测试要的是确定的那一只 ——
+     模板、名字、行为标签都在这里显式钉死，不让随机数决定测的是谁。 */
+  var putBoss52 = function (g, id, x, y) {
+    var b = g._makeBoss(x, y, 1);
+    b.arc = BOSSES52[id]; b.name = BOSSES52[id].name; b.isBoss = true;
+    b.bossBehavior = BOSSES52[id].bossBehavior || null;
+    g.enemies = [b];
+    return b;
+  };
+  // 找一条 4 格横走廊：既保证玩家推得动，也保证督军身边**一定**有一格能放幼体。
+  var ref52 = mk52(false);
+  var run52 = null;
+  for (var ry52 = 1; ry52 < ref52.H - 1 && !run52; ry52++) {
+    for (var rx52 = 1; rx52 < ref52.W - 5; rx52++) {
+      if (ref52.walkable(rx52, ry52) && ref52.walkable(rx52 + 1, ry52) &&
+          ref52.walkable(rx52 + 2, ry52) && ref52.walkable(rx52 + 3, ry52)) {
+        run52 = { x: rx52, y: ry52 };
+        break;
+      }
+    }
+  }
+
+  if (!run52) {
+    fail('P4：这张图上找不到一条 4 格走廊（三条行为都没法验）');
+  } else {
+    /* ---- ① 总开关关着 = 旧行为（两条都试：节拍不许变、督军不许孵） ---- */
+    var gA52 = mk52(false);
+    putBoss52(gA52, 'tidelord', run52.x, run52.y);
+    var pA52 = gA52._tidePeriod();
+    var gA52b = mk52(false);
+    var bA52b = putBoss52(gA52b, 'bonelord', run52.x, run52.y);
+    gA52b.px = run52.x + 2; gA52b.py = run52.y;
+    gA52b.turn = 3;                       // 下一次 endTurn 把回合推到 4（孵化回合）
+    var n0A52 = gA52b.enemies.length;
+    gA52b.endTurn();
+    var grewA52 = gA52b.enemies.length - n0A52;
+    if (pA52 !== gA52.diff.tideEvery) {
+      fail('P4 开关：关着时潮汐节拍是 ' + pA52 + '（应为难度表原值 ' + gA52.diff.tideEvery + '）');
+    } else if (grewA52 !== 0 || gA52b.bossFx.summon !== 0) {
+      fail('P4 开关：关着时骨潮督军仍然孵出了 ' + grewA52 + ' 只（旧行为被改掉了）');
+    } else {
+      ok('P4 开关：关着时潮汐节拍 = 难度表原值 ' + pA52 + '、督军一只不孵（关 = 旧行为）');
+    }
+
+    /* ---- ② 潮汐之主：在场时缩短一档，死了立刻回落；计数只在它活着时涨 ---- */
+    var gB52 = mk52(true);
+    var bB52 = putBoss52(gB52, 'tidelord', run52.x, run52.y);
+    var pOn52 = gB52._tidePeriod();
+    var pExp52 = Math.max(2, gB52.diff.tideEvery - 4);
+    var c0_52 = gB52.bossFx.tide;
+    gB52._tideAdvance();
+    var c1_52 = gB52.bossFx.tide;
+    gB52._killEnemy(bB52, true);          // 它一死，水位就该退
+    var pOff52 = gB52._tidePeriod();
+    gB52._tideAdvance();                  // 已经不在场了，这一下不许计数
+    var c2_52 = gB52.bossFx.tide;
+    if (pOn52 !== pExp52) {
+      fail('P4 潮汐之主：在场时节拍是 ' + pOn52 + '（应为 ' + pExp52 + '）');
+    } else if (pOff52 !== gB52.diff.tideEvery) {
+      fail('P4 潮汐之主：它死了节拍没有回落，仍是 ' + pOff52);
+    } else if (c1_52 !== c0_52 + 1 || c2_52 !== c1_52) {
+      fail('P4 潮汐之主：可读计数没有跟着"在不在场"走（' + c0_52 + ' → ' + c1_52 + ' → ' + c2_52 + '）');
+    } else {
+      ok('P4 潮汐之主：在场时节拍 ' + gB52.diff.tideEvery + ' → ' + pOn52 + '，一死立刻回落 ' +
+        pOff52 + '；计数只在它活着时增长（' + c0_52 + ' → ' + c1_52 + ' ↛ ' + c2_52 + '）');
+    }
+
+    /* ---- ③ 骨潮督军：每 4 回合孵一只；杀掉本体立刻停 ---- */
+    var gC52 = mk52(true);
+    var bC52 = putBoss52(gC52, 'bonelord', run52.x, run52.y);
+    gC52.px = run52.x + 2; gC52.py = run52.y;
+    gC52.turn = 3;
+    gC52.endTurn();                       // → 回合 4
+    var born52 = null;
+    for (var ci52 = 0; ci52 < gC52.enemies.length; ci52++) {
+      if (gC52.enemies[ci52].name === '幼体') born52 = gC52.enemies[ci52];
+    }
+    if (!born52) {
+      fail('P4 骨潮督军：到了孵化回合却没有孵出幼体（应召 1 只）');
+    } else {
+      gC52._killEnemy(bC52, true);        // 杀本体即停
+      var n1C52 = gC52.enemies.length;
+      gC52.turn = 7;                      // 下一次 endTurn → 回合 8（下一个孵化回合）
+      gC52.endTurn();
+      var n2C52 = gC52.enemies.length;
+      if (n2C52 !== n1C52) {
+        fail('P4 骨潮督军：本体已死却还在孵（又多了 ' + (n2C52 - n1C52) + ' 只）');
+      } else {
+        ok('P4 骨潮督军：回合 4 孵出幼体「' + born52.name + '」；杀掉本体后下一轮不再孵（' +
+          n1C52 + ' → ' + n2C52 + '）—— 台词"把死掉的东西叫起来"第一次真的成立');
+      }
+    }
+
+    /* ---- ④ 渊喉：每 3 回合吼一次把玩家推开，且**不造成伤害** ---- */
+    var offD52 = mk52(false);
+    offD52.px = run52.x + 2; offD52.py = run52.y; offD52.turn = 3;
+    putBoss52(offD52, 'deepmaw', run52.x, run52.y);
+    offD52._bossRoar();
+    var offMoved52 = (offD52.px !== run52.x + 2) || (offD52.py !== run52.y);
+
+    var onD52 = mk52(true);
+    onD52.px = run52.x + 2; onD52.py = run52.y; onD52.turn = 3;
+    var bD52 = putBoss52(onD52, 'deepmaw', run52.x, run52.y);
+    var hpBefore52 = onD52.hp;
+    onD52._bossRoar();
+    var ev52 = null;
+    for (var ei52 = 0; ei52 < onD52.events.length; ei52++) {
+      if (onD52.events[ei52].kind === 'roar') ev52 = onD52.events[ei52];
+    }
+    if (offMoved52) {
+      fail('P4 渊喉：开关关着时玩家仍被推开（关必须等于旧行为）');
+    } else if (bD52.bossBehavior !== 'roar') {
+      fail('P4 渊喉：模板上的行为标签没接上（bossBehavior=' + bD52.bossBehavior + '）');
+    } else if (!ev52) {
+      fail('P4 渊喉：开关开着、回合 ' + onD52.turn + ' 是 3 的倍数，却一次吼都没发生');
+    } else if (ev52.moved < 1) {
+      fail('P4 渊喉：吼了但玩家一步都没被推动（走廊明明是通的）');
+    } else if (onD52.px !== run52.x + 2 + ev52.moved) {
+      fail('P4 渊喉：事件记的位移和玩家的实际位置对不上（' + ev52.moved + ' vs ' +
+        (onD52.px - run52.x - 2) + '）');
+    } else if (onD52.hp !== hpBefore52) {
+      fail('P4 渊喉：吼造成了伤害（' + hpBefore52 + ' → ' + onD52.hp + '）—— 它是空间惩罚，不该掉血');
+    } else {
+      ok('P4 渊喉：回合 3 触发吼 → 沿主轴推开 ' + ev52.moved + ' 格（' + (run52.x + 2) + ' → ' +
+        onD52.px + '），血量一点没动（空间惩罚，不是又一个伤害来源）');
+    }
+
+    /* ---- ⑤ 吼必须"看得见是谁干的"：玩家在感知半径之外时不许被推 ----
+       这一条钉的是一个**已经在第一版里真实出现过**的缺陷：当时只判了
+       `回合 % 3`，于是它隔着半张图每 3 回合推玩家一次（300 局里响了 2921 次）。
+       那种缺陷不报错、不崩、通关率也只动了 1.x pp ——
+       删掉修复代码，其余门禁照旧全绿。所以必须单独一条钉住它。 */
+    var far52 = null;
+    for (var fy52 = 1; fy52 < ref52.H - 1 && !far52; fy52++) {
+      for (var fx52 = 1; fx52 < ref52.W - 1; fx52++) {
+        if (!ref52.walkable(fx52, fy52)) continue;
+        if (Math.abs(fx52 - (run52.x + 2)) + Math.abs(fy52 - run52.y) > 20) {
+          far52 = { x: fx52, y: fy52 };
+          break;
+        }
+      }
+    }
+    if (!far52) {
+      fail('P4 渊喉：这张图上找不到一个"离 20 格以上"的落点来验感知半径');
+    } else {
+      var gE52 = mk52(true);
+      gE52.px = far52.x; gE52.py = far52.y;
+      gE52.turn = 3;                      // 是 3 的倍数，本该触发
+      putBoss52(gE52, 'deepmaw', run52.x, run52.y);
+      gE52._bossRoar();
+      var roared52 = 0;
+      for (var qi52 = 0; qi52 < gE52.events.length; qi52++) {
+        if (gE52.events[qi52].kind === 'roar') roared52++;
+      }
+      var d52 = Math.abs(run52.x - far52.x) + Math.abs(run52.y - far52.y);
+      if (roared52 || gE52.px !== far52.x || gE52.py !== far52.y) {
+        fail('P4 渊喉：玩家离它 ' + d52 + ' 格仍被吼到（看不见是谁干的位移 = bug）');
+      } else {
+        ok('P4 渊喉：玩家在感知半径之外（' + d52 + ' 格 > alertR）时一声不吼、人不动');
+      }
+    }
+
+    /* ---- ⑥ 一次逼近只推一次：闩必须真的挡住"吼把推进原样吐回去"的循环 ----
+       隔离探针（tools/probe_bossfx_iso.html，2700 局）里 4 例 timeout 的 trace
+       是 8,14 → 8,13 → 8,12 → 8,14 … 的纯周期环：吼的周期(3) 和玩家被推回来的
+       周期对齐了，于是每一吼都把 3 回合的推进原样吐回去。
+       这条断言要钉的正是"离得不够近时，第二次吼不许响"。 */
+    var run6_52 = null;
+    for (var hy52 = 1; hy52 < ref52.H - 1 && !run6_52; hy52++) {
+      for (var hx52 = 1; hx52 < ref52.W - 7; hx52++) {
+        var all6_52 = true;
+        for (var hk52 = 0; hk52 < 6; hk52++) {
+          if (!ref52.walkable(hx52 + hk52, hy52)) { all6_52 = false; break; }
+        }
+        if (all6_52) { run6_52 = { x: hx52, y: hy52 }; break; }
+      }
+    }
+    if (!run6_52) {
+      fail('P4 渊喉：这张图上找不到一条 6 格走廊来验"一次逼近只推一次"');
+    } else {
+      var gF52 = mk52(true);
+      putBoss52(gF52, 'deepmaw', run6_52.x, run6_52.y);
+      gF52.px = run6_52.x + 3; gF52.py = run6_52.y;   // 离它 3 格：够远，闩不会被近身解除
+      gF52.turn = 3;
+      gF52._bossRoar();
+      var r1_52 = gF52.bossFx.roar, x1_52 = gF52.px;
+      gF52.turn = 6;                                   // 又到一个吼回合，但闩还挂着
+      gF52._bossRoar();
+      var r2_52 = gF52.bossFx.roar, x2_52 = gF52.px;
+      gF52.px = run6_52.x + 2; gF52.py = run6_52.y;    // 重新逼到近身 → 闩解除
+      gF52.turn = 9;
+      gF52._bossRoar();
+      var r3_52 = gF52.bossFx.roar;
+      if (r1_52 !== 1 || x1_52 === run6_52.x + 3) {
+        fail('P4 渊喉：第一次逼近时吼没有生效（计数 ' + r1_52 + '，位置 ' + x1_52 + '）');
+      } else if (r2_52 !== r1_52 || x2_52 !== x1_52) {
+        fail('P4 渊喉：闩没挡住第二次吼（' + r1_52 + ' → ' + r2_52 + '，位置 ' + x2_52 +
+          '）—— 吼会再次把推进吐回去，死循环的成因就还在');
+      } else if (r3_52 !== r2_52 + 1) {
+        fail('P4 渊喉：玩家重新逼近后闩没有解除（' + r2_52 + ' → ' + r3_52 +
+          '）—— 那就变成"一只 Boss 一辈子只吼一次"了');
+      } else {
+        ok('P4 渊喉：闩生效 —— 离它 3 格时只推得动一次（计数停在 ' + r1_52 +
+          '），回到 2 格内立刻恢复（' + r2_52 + ' → ' + r3_52 + '）');
+      }
+    }
+  }
+  w.TideUI.closeBattle();
+} catch (e) { fail('P4 Boss 行为测试异常: ' + (e && e.stack ? e.stack : e)); }
+
   } catch (e) {
     fail('测试脚本异常: ' + (e && e.stack ? e.stack : e));
   }
