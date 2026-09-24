@@ -4380,6 +4380,32 @@ try {
     ok('P3 第二步：注册表 ' + acts53.length + ' 个动作（含 skill · 键位 3），每个都渲染出了按钮');
   }
 
+  /* ---- ①b 5 个按钮之后的宽度账：入参那一格不许被裁掉 ----
+     为什么它必须是一条**常驻断言**而不是"人工看一张截图"：
+     溢出不报错、不崩、不撑开布局，只让字跑到框外 ——
+     截图会被看漏，而这条每次门禁都会跑。
+     判据用 scrollWidth vs clientWidth：`.n` 上有 overflow:hidden + 省略号，
+     所以"放不下"就表现为 scrollWidth 更大（而不是把按钮撑宽）。 */
+  var over53 = [], measured53 = 0;
+  for (var w53 = 0; w53 < acts53.length; w53++) {
+    var bm53 = d.getElementById('bs-cmd-' + acts53[w53].id);
+    if (!bm53) continue;
+    var nm53 = bm53.querySelector('.n');
+    if (!nm53 || !nm53.clientWidth) continue;
+    measured53++;
+    if (nm53.scrollWidth > nm53.clientWidth + 2) {
+      over53.push(acts53[w53].id + '（' + nm53.scrollWidth + ' > ' + nm53.clientWidth + '）');
+    }
+  }
+  if (!measured53) {
+    fail('P3 第二步：量不到菜单按钮的宽度（战斗层没显示？）—— 这条断言会变成空转，必须查');
+  } else if (over53.length) {
+    fail('P3 第二步：' + acts53.length + ' 个按钮之后入参被裁掉了：' + over53.join(' / ') +
+      ' —— 菜单溢出（按钮数还可能再涨）');
+  } else {
+    ok('P3 第二步：' + measured53 + ' 个按钮的入参都在框内（5 个按钮之后没有溢出）');
+  }
+
   /* ---- ② 按 3 = 挂效果，且**不占回合** ---- */
   var r0_53 = A53.L.duel.round, t0_53 = A53.g.turn;
   kq53('3');
