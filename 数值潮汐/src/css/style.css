@@ -1029,6 +1029,11 @@ html, body {
 }
 .bs-cmd-btn {
   flex: 1 1 0; min-width: 0; cursor: pointer;
+  /* 菜单从 3 个按钮变成 4 个之后（v11.5 P3 第二步加了魂技），
+     每个按钮分到的宽度少了一格，而 `.n` 那一格是 nowrap 的。
+     溢出**不会**报错，也不会把布局撑开 —— 它只会让字跑到边框外面，
+     只有看截图才发现。所以在按钮上直接裁掉。 */
+  overflow: hidden;
   display: flex; align-items: baseline; gap: 8px;
   padding: 9px 12px; border-radius: 8px;
   background: rgba(16,22,34,0.92);
@@ -1059,6 +1064,8 @@ html, body {
 .bs-cmd-btn .n {
   font-family: var(--mono); font-size: 11px; color: var(--muted);
   margin-left: auto; white-space: nowrap;
+  /* 窄到放不下时给省略号，而不是硬切一个字：硬切的观感是"界面坏了"。 */
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
 }
 .bs-cmd-btn.off { opacity: 0.38; cursor: not-allowed; }
 .bs-cmd-btn.off:hover { background: inherit; }

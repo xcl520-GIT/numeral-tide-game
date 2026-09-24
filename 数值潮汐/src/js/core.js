@@ -279,6 +279,45 @@
          总开关负责**对照实验**（代价与收益只能靠 A/B 回答），
          模板字段负责**逐只回滚**（某个行为单独不合适时不必把三个一起关掉）。 */
       this.bossFxOn = (opts.bossFx === undefined) ? false : !!opts.bossFx;
+      /* P3 第二步（v11.5）：魂技可以在**对决里**放一次。
+         默认 **1 = 开** —— 这是本轮要交付的玩法本身，不是可选的难度旋钮。
+         传 0 得到的是"魂技只在地图上放"的旧行为，也就是对照组；
+         "这个改动值多少"只能由它回答（本项目所有代价都必须能被 A/B 量出来）。
+
+         注意它和 bossFxOn 的默认**相反**（那个默认关），而且理由是反的：
+         Boss 行为改的是**难度**，必须先证明它在噪声带内才敢开；
+         魂技改的是**玩家侧的新选项**，关掉它等于这一轮什么都没做。 */
+      this.duelSkillOn = (opts.duelSkill === undefined) ? true : !!opts.duelSkill;
+      /* 冷却的**口径**开关（v11.5 P3 第二步）：一场对决打完一轮，skillCd 也走一格。
+         为什么它必须和上面那个分开：实测把两件事一起打开时三档动了
+         +1.6 / +6.6 / +4.3pp，而"对决魂技"的计数是 **0 次** ——
+         也就是那几 pp 全部来自这条口径，与"魂技能不能在对决里放"无关。
+         混在一起交出去，等于把一个口径变化记成了玩法收益。
+         拆开之后 2×2 四格各有一个明确的读数：
+           duelSkill=0            → 旧行为（逐位相同）
+           duelSkill=0 & duelCd=1 → **只**量这条口径值多少
+           duelSkill=1 & duelCd=0 → **只**量新入口值多少
+           duelSkill=1 & duelCd=1 → 默认（两者相加）
+         口径本身仍然是对的（一轮 = 一个世界回合，和 _fightRoundTick 里
+         敌人的行动时钟同一个理由），只是它值多少必须单独记账。 */
+      /* ⚠ 默认 **0** = 冷却不随战斗轮走（= 旧行为）。
+         实测它单独就值 +1.6 / +6.6 / +4.3pp —— 那是一次**难度下调**，
+         量级还不小：战斗很频繁（约 30 场 × 2.5 轮），每局等于多走 75 格冷却，
+         差不多把冷切减半。口径上它是对的（一轮 = 一个世界回合，和
+         _fightRoundTick 里敌人的行动时钟同一个理由），但"口径对不对"
+         和"要不要现在改难度"是两件事 —— 后者归用户拍板，所以开关留着、
+         默认按兵不动。 */
+      this.duelCdOn = (opts.duelCd === undefined) ? false : !!opts.duelCd;
+      /* AI 会不会"贴身留手"（把技能省下来给对决）。默认 **0** = 旧行为：地图上照放。
+         实测（n=300×3，duelSkill=1 & duelCd=0）这只手值 −6.4 / −4.4 / −9.7pp ——
+         也就是说它现在是**有害**的，而且原因很具体：地图上的裂地斩同时给了
+         "掀开一格 + 撞墙震晕 + 不吃反击"，那是一次**免战**；把它收起来留给对决，
+         AI 就再也逃不掉，于是死得更多。
+         留着这个开关是因为它回答了一个真问题 ——
+         两个入口抢同一份冷却时，**眼下是地图那一侧赢**。
+         要让它反转，得先把对决那一侧的价值做大（或者让地图侧不再能免战），
+         而不是靠改 AI 的偏好硬拗。 */
+      this.duelAiHold = !!opts.duelAi;
 
       this.seed = (opts.seed === undefined || opts.seed === null)
         ? ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0)
@@ -359,6 +398,11 @@
         this.skillKey = cand[r.int(0, cand.length - 1)];
       }
       this.skillUses = 0;        // 一局里放过几次魂技（平衡分析用）
+      /* 其中在**对决里**放掉的次数（v11.5 P3 第二步）。
+         纯计数、不参与任何判定，但它必须在 reset 里声明 ——
+         给已经定型的 Game 实例补字段会触发隐藏类迁移，整局慢 3 倍，
+         而症状出现在离改动最远的地方（本项目踩过两次）。 */
+      this.duelSkills = 0;        // 一局里放过几次魂技（平衡分析用）
       this.freeMoves = 0;        // 免费行动次数（疾影）—— 不推进潮汐，敌人也不动
       this.buffs = [];           // 临时增益（魂技），随回合递减
       // 默认出手类型 = 这个职业**基础双攻更高**的那一路。
@@ -1944,16 +1988,32 @@
         return x.idx - y.idx;
       });
       let round = 0, capped = false, finished = false, flipped = false;
+      /* 本轮技能效果槽（v11.5 P3 第二步）。null = 这一轮没有任何魂技生效。
+         为什么放在**对决内部**而不是去读 game.skillCd：
+         "效果在哪一轮生效"是这场对决自己的事，而 skillCd 是跨场的资源；
+         两者混用会让效果泄漏到后面每一轮，而症状只是"伤害莫名其妙偏高"。 */
+      let roundFx = null;
 
       function atkOf(x) { return bestAttack(x.st, x === a ? b.st : a.st, K); }
 
-      function strike(src, dst, atkType) {
+      function strike(src, dst, atkType, fx) {
         if (src.hp <= 0) return 0;
         // 防守方带姿态时，用**调整后的防御视图**结算。
         // 玩家没有姿态，stanceDef 会原样返回 st，所以这里不需要分支。
-        const dv = stanceDef(dst.st, dst.stance);
+        //
+        // fx = 这一轮生效的技能效果（没有就是 undefined）。它做成**参数**
+        // 而不是闭包变量是刻意的：只有 step 会把它传进来，于是
+        // "效果只作用在它被指定的那一轮"是结构性的，不靠"记得清空"这种约定。
+        let dv = stanceDef(dst.st, dst.stance);
+        /* 技能：破姿（潮语洪流）—— 本轮无视对方姿态。
+           为什么"回到原始面板"就等于"按对方的弱化侧打"：
+           姿态只做防御的**重分配**（硬化一侧必然削另一侧，总量不变），
+           所以原始 st 就是两侧未被分配的那一份；下面那一支再用 bestAttack
+           取更有利的一路，而"更有利"必然落在**没被硬化**的那一侧 ——
+           也就是玩家从徽章上看到的那一侧。 */
+        if (fx && src === a && fx.breakStance) dv = dst.st;
         let atk, countered = false;
-        if (src.isPlayer && atkType) {
+        if (src.isPlayer && atkType && !(fx && src === a && fx.breakStance)) {
           // 玩家自己选的那一路，由调用方逐轮传进来（界面上就是那个按钮）。
           // 引擎不再替他算 —— 这是本次改动的地基。
           atk = attackVia(src.st, dv, atkType, K);
@@ -1963,10 +2023,26 @@
           countered = (bestAttack(src.st, dv, K).type === atk.type);
         } else {
           // 敌人没有"选择"：它按自己最强的一路打。
+          // 破姿（潮语洪流）也走这里 —— 是技能替玩家取了更有利的一路，
+          // 而"替玩家做决定"正是它**不能**拿克制奖励的原因（countered 保持
+          // false）：奖励发的是"你读对了面板"，不是"技能帮你读了"。
           atk = bestAttack(src.st, dv, K);
         }
         let dmg = atk.base;
+        /* 免伤**之前**的那一笔（坚守的反伤按它算，见下面 ref 那段）。
+           默认 0 = "这一击没有走过承伤乘区" —— 用一个显式的 0 而不是 undefined，
+           是为了让下面那一行不必判两种空值。 */
+        let preMit = 0;
         let crit = false, dodged = false, extra = [];
+        if (fx && src === a && fx.breakStance) extra.push('破姿');
+        /* 技能：重击（裂地斩）—— 本轮我方的**伤害乘区**。
+           走的是和遗物 flags 完全同一套乘法系数通道，于是结算层不必知道
+           这份 ×1.6 是魂技给的还是秘藏给的。（本项目反复踩过
+           "两个来源各写一份实现、只有玩家能发现两边不一致"的坑，
+           群攻的 cleave 就是这么收口的。） */
+        if (fx && src === a && num(fx.dmgOut) > 0) {
+          dmg *= num(fx.dmgOut); extra.push('重击');
+        }
         // 闪避
         const dg = num(dst.dodge) + num(dst.flags.dodge);
         if (dg > 0 && g.rng.chance(Math.min(0.7, dg))) {
@@ -2010,7 +2086,20 @@
         if (num(dst.flags.lastStand) > 0 && dst.hp / dst.maxHp < 0.4) {
           dmg *= 1 / (1 + num(dst.flags.lastStand)); extra.push('坚守');
         }
-        dmg = Math.max(1, Math.round(dmg));
+        /* 技能：本轮我方的**承伤乘区**（重击的代价 ×0.5 / 坚守的免伤 ×0）。
+           两个必须同时成立的口径：
+             ① 只在**我方挨打**时生效（dst === a），不吃到别人头上；
+             ② 免伤要能真的到 0 —— 所以取整那一步得知道"这一击已被归零"，
+                否则 Math.max(1, …) 会把免伤强行抬回 1 点，
+                而"免伤"的文案就在骗人（这条量起来极难，肉眼看不出来）。
+           没挂技能时 hitFx 恒为 false，下面那一行与改动前逐字相同。 */
+        const hitFx = !!(fx && dst === a && fx.taken !== undefined && num(fx.taken) !== 1);
+        if (hitFx) {
+          preMit = dmg;
+          dmg *= num(fx.taken);
+          extra.push(num(fx.taken) === 0 ? '免伤' : '减伤');
+        }
+        dmg = (hitFx && num(fx.taken) === 0) ? 0 : Math.max(1, Math.round(dmg));
         dst.hp -= dmg;
         // 克制奖励：选对的那一路，追加一段**真实伤害**（不走 rawDamage、无视防御）。
         //
@@ -2071,6 +2160,15 @@
           back = Math.round(dmg * num(dst.flags.thorns));
           src.hp -= back;
           if (back > 0) extra.push('反伤' + back);
+        } else if (fx && dst === a && num(fx.thorns) > 0) {
+          /* 技能：坚守的反伤。基数取**免伤之前**的那一笔（preMit）——
+             "先免掉 100%，再按 0 的 40% 反伤"是自相矛盾的；
+             文案写的是"反弹本来要挨的那笔伤害的 40%"，而"本来要挨的"
+             就是 preMit。preMit 为 0（没走承伤乘区）时退回 dmg，
+             免得这一条在任何没预料到的路径上变成 0 反伤。 */
+          back = Math.max(1, Math.round((preMit || dmg) * num(fx.thorns)));
+          src.hp -= back;
+          extra.push('反伤' + back);
         }
         roundLog.push({
           r: round, from: src.name, to: dst.name, dmg: dmg, type: atk.type,
@@ -2136,6 +2234,13 @@
 
       const duel = {
         a: a, b: b, bs: bs, order: order, log: roundLog,
+        /* 这一场里魂技放过没有（v11.5 P3 第二步）。
+           **每场对决只允许一次**，判定放在这里而不是 skillCd 上：
+           skillCd 是"跨场"的资源，而"一场一次"是这一场自己的规则 ——
+           两者混用会漏掉一种情形：冷却刚好在这一场里转好，
+           于是同一场仗里能放第二次（而那看起来像是"技能很强"，
+           不像是"规则写错了"）。 */
+        used: false,
         /** 谁是玩家 —— 界面据此决定给哪一边开指令菜单。 */
         player: a.isPlayer ? a : (b.isPlayer ? b : null),
         /** 这一轮谁先出手。玩家比敌人慢时，界面要先把对方那一手演完。 */
@@ -2147,6 +2252,24 @@
         get lastFlip() { return flipped; },
 
         /**
+         * 给**下一轮**挂一份技能效果（v11.5 P3 第二步的内部接口）。
+         *
+         * @returns {boolean} false = 已经挂着一份了（同一轮不能叠两层）
+         *
+         * 为什么是"挂给下一轮"而不是"立刻结算"：技能改的是**这一轮的算式**
+         * （伤害乘区 / 承伤乘区 / 无视姿态 / 额外出手），而算式在对决内部。
+         * 让外面直接把数改掉，就等于规则有了第二份归属地 ——
+         * 那正是这个项目花了一整轮去拆掉的东西。
+         */
+        armRound(f) {
+          if (roundFx) return false;
+          roundFx = f || null;
+          return !!roundFx;
+        },
+        /** 这一轮挂着什么效果（界面据此把按钮标成"已挂"，不是藏起来）。 */
+        get pendingFx() { return roundFx; },
+
+        /**
          * 推进**一轮**，返回这一轮新增的明细（供演出逐条播）。
          * @param {string} playerType 玩家这一轮选的路（'p' / 'm'）；
          *   不传或不是这两个值 = 让引擎按最优打（敌人一直如此，非交互路径也如此）。
@@ -2155,6 +2278,12 @@
           if (finished) return [];
           const from = roundLog.length;
           round++;
+          /* 取走本轮挂上的技能效果，并**立刻清空槽位**。
+             效果只作用在它被指定的那一轮 —— 清空放在这里而不是轮末，
+             是因为轮末还有一堆提前 return 的分支（有人倒下就 break），
+             那种地方漏清一次，效果就会悄悄延续到下一轮。 */
+          const fx = roundFx;
+          roundFx = null;
           for (let i = 0; i < order.length; i++) {
             const src = order[i];
             if (src.hp <= 0) continue;
@@ -2175,17 +2304,37 @@
             // 选的那一路只作用在**本轮的玩家出手**上（含下面的追加击）。
             const t = (src.isPlayer && (playerType === 'p' || playerType === 'm'))
               ? playerType : null;
-            strike(src, dst, t);
+            strike(src, dst, t, fx);
+            /* 技能：追打（疾影）—— 本回合额外一次出手。
+               它**不额外推进回合**：追加的这一击就在同一轮里打完，
+               敌人因此不会多挨一次机会 —— 这正是文案"不额外推进回合"的字面兑现。
+               目标死了就不再补刀（`dst.hp > 0`）：让追加击打在尸体上会白耗一个
+               随机数流，还会往明细里塞一条 0 伤害的记录。 */
+            if (fx && src === a && num(fx.extra) > 0) {
+              let tg = dst;
+              for (let k = 0; k < num(fx.extra) && src.hp > 0; k++) {
+                /* 主击把目标收掉了，就换一个**还活着**的敌人接着打。
+                   为什么不能让这一击落空：它是"额外一次出手"，
+                   而"你这下打得太准，所以额外那一击没了"读起来像 bug ——
+                   实测就是这么发生的（疾风第 1 击 59 点直接收掉祷者，
+                   额外一击凭空蒸发）。1v1 且场上已经没有活人时才真的停，
+                   而那时也**不该**对着尸体挥一刀：白耗一次随机数流，
+                   还会往明细里塞一条 0 伤害的记录。 */
+                if (tg.hp <= 0) tg = pickFoe(null);
+                if (!tg) break;
+                strike(src, tg, t, fx);
+              }
+            }
             // 一个对手倒下不再等于整轮结束：只有"场上敌方全灭"或"玩家倒下"才停。
             // N=1 时这与旧的 `if (dst.hp <= 0) break;` 完全等价 ——
             // 唯一的对手倒下，就是敌方全灭。
             if (dst.hp <= 0 && (allFoesDown() || a.hp <= 0)) break;
             // 速度碾压：快的一方多打一次
             const gap = num(src.st.spd) - num(dst.st.spd);
-            if (gap >= C.speedGap && src.hp > 0 && dst.hp > 0) strike(src, dst, t);
+            if (gap >= C.speedGap && src.hp > 0 && dst.hp > 0) strike(src, dst, t, fx);
             // 连击词条：达标就每轮两次
             if (num(src.flags.doubleAtSpd) > 0 && num(src.st.spd) >= num(src.flags.doubleAtSpd) &&
-                src.hp > 0 && dst.hp > 0) strike(src, dst, t);
+                src.hp > 0 && dst.hp > 0) strike(src, dst, t, fx);
           }
           // 一轮打完，推进敌人的姿态时钟。
           //
@@ -2605,6 +2754,13 @@
           lastSig = sig;
           lastPick = g._autoPickFor(d);
         }
+        /* 魂技在对决里也放一次（v11.5 P3 第二步）。
+           为什么第 1 轮就放：一场对决只有 2~4 轮，晚一轮就少收一轮的利息，
+           而它是 CD 资源、留着不生息。这里**纯判定、不碰随机数**，
+           所以"?duelskill=0 逐位相同"这条对照仍然干净。
+           ⚠ 它只在 aiStance 打开时可达（_autoPicker 在关闭时返回 null，
+             那条路径走的是"开战前定死一路"的旧形态）—— 见 sim.html 的说明。 */
+        if (g.duelSkillOn && !d.used && g.skillCd <= 0) g.duelUseSkill(d);
         return lastPick;
       };
     }
@@ -2938,6 +3094,13 @@
        潮汐**不**跟着走 —— 潮水按回合涨，那是它自己的时钟。 */
     _fightRoundTick(participants) {
       if (!this.tick) return;
+      /* 魂技冷却在战斗里也走一格（v11.5 P3 第二步）。
+         口径和下面敌人的行动时钟**完全一致**：一轮 = 一个世界回合，
+         所以"冷却按回合数"这句话在战斗里必须同样成立 ——
+         否则停在同一场仗里可以让冷却相对变慢（战斗越久，冷却越不值钱）。
+         ⚠ 只在总开关打开时走：这一句会改动**地图层**的技能可用性，
+           它必须能整条关掉，否则"新机制关掉就逐位相同"这条验收失效。 */
+      if (this.duelCdOn && this.skillCd > 0) this.skillCd--;
       this._assignSlots();
       this._doorCache = {};
       for (const e of this.enemies) {
@@ -3502,6 +3665,57 @@
     }
 
     /**
+     * 在**对决里**放魂技（v11.5 P3 第二步）。
+     *
+     * 和 useSkill() 的关系，一句话：**useSkill 打的是地图，它打的是算式。**
+     * 地图上的裂地斩要把相邻的怪掀开一格、要震晕；而对决里只有一个单位、
+     * 没有格子可掀 —— 所以它不是"同一件事换个地方放"，而是同一张技能表
+     * 在对决场景下的另一套语义（见 data.js 的 DUEL_SKILL）。
+     *
+     * 三件事在这里收口，界面和模拟器 AI 都只能从这一个门进来：
+     *   ① 每场一次（duel.used）
+     *   ② 冷却由这一处扣（skillCd = s.cd），于是"地图上刚放过"和
+     *      "对决里刚放过"共用同一个资源，玩家不可能两边各白拿一次
+     *   ③ 效果只挂一轮（armRound），不越界到后续轮次
+     *
+     * **不消耗回合**：它改的是这一轮的算式，而这一轮本身会照常推进
+     * （_fightRoundTick 已经在推世界时钟），所以再要一个回合就是重复收费。
+     *
+     * @returns {{ok:boolean, reason?:string, name?:string, text?:string}}
+     *   reason: 'nofight' 没在对决里 / 'off' 开关关着 / 'used' 本场已用过 /
+     *           'cd' 还在冷却 / 'none' 这个技能没有对决形态
+     */
+    duelUseSkill(duel) {
+      /* 两种入口都要能用：战斗界面手里有 liveFight，而**无头模拟器没有** ——
+         它刻意不把句柄挂在实例上（给 Game 补字段会触发隐藏类迁移、整局慢 3 倍，
+         见 _fightBegin 末尾那一段），句柄只活在 fight() 的局部变量里。
+         所以规则收在这里认一个**显式的对决句柄**，缺省才回落到 liveFight。
+         第一版只认 liveFight，后果不是报错、也不是崩溃，而是
+         "AI 一整局一次都不放"（对决魂技 0 次）—— 而这条失败只有
+         既有的第 50 节那条断言逮得住，新加的那几条全都绿着。
+         这也是"每场一次"的归属地本来就该在这儿：d.used 长在对决身上。 */
+      const d = duel || (this.liveFight ? this.liveFight.duel : null);
+      if (!d) return { ok: false, reason: 'nofight' };
+      if (!this.duelSkillOn) return { ok: false, reason: 'off' };
+      if (d.used) return { ok: false, reason: 'used' };
+      if (this.skillCd > 0) return { ok: false, reason: 'cd', cd: this.skillCd };
+      const s = this.skill();
+      const fx = D.duelSkillFx(s);
+      if (!fx) return { ok: false, reason: 'none' };
+      if (!d.armRound(fx)) return { ok: false, reason: 'used' };
+      d.used = true;
+      this.skillCd = s.cd;
+      this.skillUses = (this.skillUses || 0) + 1;
+      this.duelSkills = (this.duelSkills || 0) + 1;
+      /* 只写日志、**不推事件**：战斗界面（ui.js playDuel）此刻正在驱动演出，
+         往事件流里插一条"技能"会让它在整场打完之后才播出来（表现层两层
+         的坑，v11.4-l/r 都栽过）。技能的效果在明细里本来就看得见 ——
+         每一击都带 '重击'/'免伤'/'反伤' 这些标记，飘字会跟着跳。 */
+      this._log('【' + s.name + '】' + fx.text + '。', 'good');
+      return { ok: true, name: s.name, text: fx.text };
+    }
+
+    /**
      * 把敌人沿"远离玩家"的方向推开。
      * @returns {boolean} true = 一步都推不动（撞墙 / 被别的怪顶着 / 撞到玩家）→ 改判为眩晕
      *
@@ -3904,7 +4118,13 @@
         // P0（v11.5）：等待与承伤的原始累加值 + 派生的等待占比
         waits: 0, dmgTaken: 0, waitRate: 0,
         // P4（v11.5）：三个 Boss 行为的可读计数
-        bossTide: 0, bossSummon: 0, bossRoar: 0
+        bossTide: 0, bossSummon: 0, bossRoar: 0,
+        /* P3 第二步（v11.5）：一局里在**对决中**放掉的魂技次数。
+           为什么要单独一个数：默认开的总开关会同时改动两件事 ——
+           "对决里多了一个选项"和"地图上冷却走得更快"。
+           有它才能回答"AI 到底用没用上这个新入口"，
+           而不是对着一个变了 1pp 的通关率猜（那 1pp 也可能来自冷却）。 */
+        duelSkills: 0
       };
       for (let i = 0; i < n; i++) {
         const seed = (opts.seedBase || 1) + i * 7919;
@@ -3933,11 +4153,18 @@
           aiWait: opts.aiWait,
           roadW: opts.roadW,
           packAnchor: opts.packAnchor,
-          bossFx: opts.bossFx
+          bossFx: opts.bossFx,
+          /* P3 第二步（v11.5）：
+             `duelSkill` 必须转发 —— 开关漏转发一个，
+             "这个机制的代价是多少"就只能看代码猜，而代价只有对照实验能回答。 */
+          duelSkill: opts.duelSkill,
+          duelCd: opts.duelCd,
+          duelAi: opts.duelAi
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;
         out.waits += g.waits; out.dmgTaken += g.dmgTaken;
+        out.duelSkills += g.duelSkills;
         out.bossTide += g.bossFx.tide;
         out.bossSummon += g.bossFx.summon;
         out.bossRoar += g.bossFx.roar;
@@ -4074,6 +4301,17 @@
       if (!this.skillReady()) return false;
       const me = this;
       const dist = function (e) { return Math.abs(e.x - me.px) + Math.abs(e.y - me.py); };
+      /* v11.5 P3 第二步：贴身时把技能**留给对决**。
+         同一份冷却，两个入口的利息不一样：对决里它作用在**整轮**上
+         （伤害乘区 / 免伤 / 追打都吃到一轮的所有出手），地图上只是打一下。
+         少了这一条守卫，AI 会在地图上先放掉，于是"魂技进对决"这个入口
+         在 900 局里被走到 **0 次**（实测）—— 而 0 次意味着一整份平衡数据
+         里没有它，那正是本项目最忌讳的"数据与真人脱节"。
+         守卫用的是"一格内有敌人"这个**事实**，不是预测：
+         它的含义是"现在放手边，下一手就要打起来了"。 */
+      if (this.duelAiHold) {
+        for (const e of this.enemies) if (dist(e) <= 1) return false;
+      }
       const st = this.stats();
       const lowHp = this.hp / st.hp < 0.55;
 

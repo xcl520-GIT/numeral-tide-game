@@ -168,6 +168,48 @@
   const skillByClass = function (k) { return SKILLS[k] || SKILLS.warlord; };
 
   /* ============================================================
+     魂技在**对决里**的本轮效果（v11.5 P3 第二步）
+
+     为什么单独一张表、而不是往 SKILLS 里加字段：
+     SKILLS 描述的是"这个技能在地图上做什么"（范围、落点、掀开、潮湿……），
+     而对决里只有"我方一个单位、对方至多四个单位"这一个场景，
+     "最近的 4 个敌人""相邻每个敌人"这些概念一个都不成立。
+     两套语义共用一张表，迟早会有一处读到另一处的字段 ——
+     这张表只回答一件事：**这一轮的算式被改成了什么**。
+
+     取值口径（按工作单定稿）：
+       quake   裂地斩   本轮伤害 ×1.6，但本轮自身受伤 ×0.5
+       torrent 潮语洪流 本轮无视姿态，按对方**弱化侧**结算
+       blitz   疾影     本回合额外一次出手（不额外推进回合）
+       bulwark 不退之壁 本轮免伤，并把**本来要挨的**那笔伤害的 40% 反弹回去
+
+     每条都带 text：它是**给玩家看的那一句**，和数值写在同一行 ——
+     文案与代码分家是本项目明令禁止的事（"面板文案必须说代码做的事"）。
+     ============================================================ */
+  const DUEL_SKILL = {
+    quake:   { dmgOut: 1.6, taken: 0.5, short: '伤 ×1.6 / 受伤 ×0.5',
+               text: '本轮伤害 ×1.6，自身受伤 ×0.5' },
+    torrent: { breakStance: true,         short: '无视姿态 · 打弱化侧',
+               text: '本轮无视姿态，按对方弱化侧结算' },
+    blitz:   { extra: 1,                  short: '本回合多打一次',
+               text: '本回合额外出手一次（不额外推进回合）' },
+    bulwark: { taken: 0, thorns: 0.4,     short: '本轮免伤 · 反伤 40%',
+               text: '本轮免伤，并反弹本来要挨的那笔伤害的 40%' }
+  };
+
+  /**
+   * 取某个魂技在对决里的本轮效果。
+   * 认的是 **s.key**（'quake' / 'torrent' / 'blitz' / 'bulwark'）——
+   * 也就是"这个技能本来是哪个职业的技"，它在三选一（v11.4-q）之后
+   * 不随"谁拿着它"改变，所以带着破军技的秘仪拿到的仍是重击那一套。
+   * 返回 null = 这个技能没有对决形态（界面据此把它灰掉，不是藏起来）。
+   */
+  const duelSkillFx = function (s) {
+    if (!s || !s.key) return null;
+    return DUEL_SKILL[s.key] || null;
+  };
+
+  /* ============================================================
      四、品质
      权重随深度平移：浅层几乎只有普通/精良，深层才见得到传说。
      color 同时用于 UI 描边与掉落光柱。
@@ -972,7 +1014,7 @@
     POWER_W: POWER_W, rarRank: rarRank,
     STATS: STATS, CORE_STATS: CORE_STATS, SUB_STATS: SUB_STATS,
     CLASSES: CLASSES, classByKey: classByKey,
-    SKILLS: SKILLS, skillByClass: skillByClass,
+    SKILLS: SKILLS, skillByClass: skillByClass, duelSkillFx: duelSkillFx,
     RARITIES: RARITIES, rarityByKey: rarityByKey,
     EQUIP_SLOTS: EQUIP_SLOTS, BASES: BASES, basesForSlot: basesForSlot,
     AFFIXES: AFFIXES, affixById: affixById,

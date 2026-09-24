@@ -69,6 +69,20 @@
   var packanchor = (q.packanchor === undefined || q.packanchor === '') ? 0 : parseInt(q.packanchor, 10);
   // P4（v11.5）：Boss 行为差异化（默认 0 = 三个 Boss 只有数值差别）。
   var bossfx = (q.bossfx === undefined || q.bossfx === '') ? 0 : parseInt(q.bossfx, 10);
+  // P3 第二步（v11.5）：魂技能不能在**对决里**放一次。默认 **1 = 开** —— 它和
+  // bossfx 的默认相反，理由也是反的：Boss 行为改的是难度（要先证噪声），
+  // 魂技改的是玩家侧的新选项（关掉就等于这一轮没做）。
+  // 传 0 得到"魂技只在地图上放"的旧行为 = 对照组，也是它唯一的代价口径。
+  var duelskill = (q.duelskill === undefined || q.duelskill === '') ? 1 : parseInt(q.duelskill, 10);
+  // 冷却口径：一场对决里的每一轮，冷却也走一格（默认 1）。
+  // 拆出来是因为实测它自己就值 +1.6/+6.6/+4.3pp —— 那笔账必须单独算，
+  // 不能记在"魂技进对决"头上（那个入口当时被用了 0 次）。
+  // ⚠ 默认 **0**：它单独就值 +1.6/+6.6/+4.3pp（一次难度下调），
+  // 而那笔账不该混进"魂技进对决"里 —— 传 1 才打开，用来单独量它。
+  var duelcd = (q.duelcd === undefined || q.duelcd === '') ? 0 : parseInt(q.duelcd, 10);
+  // AI 贴身留手（默认 0 = 旧行为：地图上照放）。
+  // 实测它值 −6.4/−4.4/−9.7pp：地图上的裂地斩是"免战"，收起来就逃不掉了。
+  var duelai = (q.duelai === undefined || q.duelai === '') ? 0 : parseInt(q.duelai, 10);
   lines.push('fumble=' + fumble + '（AI 失误率）  counterBonus=' +
     (counter === undefined ? '(默认)' : counter) + '  战斗内姿态轮换=' + (stance ? '开' : '关') +
     '  群战=' + (squad ? '开' : '关'));
@@ -81,7 +95,10 @@
     '  AI刷回合=' + (aiwait ? '开' : '关（一次都不等 = 旧行为）') +
     '  路宽=' + (roadw === 1 ? '1（旧地图 · 对照）' : '2（当前基线）') +
     '  堆贴门位=' + (packanchor ? '开' : '关（旧布点）') +
-    '  Boss行为=' + (bossfx ? '开' : '关（只有数值差别）'));
+    '  Boss行为=' + (bossfx ? '开' : '关（只有数值差别）') +
+    '  对决魂技=' + (duelskill ? '开（默认）' : '关（只在地图上放 · 对照）') +
+    '  冷却随战斗轮=' + (duelcd ? '走' : '不走（默认 · 旧口径）') +
+    '  AI留手=' + (duelai ? '开' : '关（默认 · 旧行为）'));
 
   function fmt(o) {
     return 'winRate=' + o.winRate + '%  turns=' + o.turns + '  kills=' + o.kills +
@@ -142,6 +159,7 @@
       ' | 群战 野生 ' + pct(byKind.wild) + ' 召唤物 ' + pct(byKind.minion) +
       ' | 等待 ' + o.waitRate + '% | 承伤/局 ' + o.dmgTaken +
       ' | 战斗 ' + avgFr() + ' 轮/场' +
+      ' | 对决魂技 ' + o.duelSkills + ' 次' +
       ' | 第1层死亡 ' + (o.byDepth['1'] || 0);
   }
 
@@ -155,7 +173,8 @@
       aiFumble: fumble, counterBonus: counter, aiStance: !!stance, squad: !!squad,
       slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold,
       cleave: !!cleave, keepPay: !!keeppay, waitCost: waitcost, aiWait: !!aiwait,
-      roadW: roadw, packAnchor: !!packanchor, bossFx: !!bossfx });
+      roadW: roadw, packAnchor: !!packanchor, bossFx: !!bossfx,
+      duelSkill: !!duelskill, duelCd: !!duelcd, duelAi: !!duelai });
     lines.push('[' + d + '] ' + fmt(o));
     lines.push('        群战拆分 野生 ' + pct(byKind.wild) + ' (n=' + byKind.wild.n + ')' +
       '  召唤物 ' + pct(byKind.minion) + ' (n=' + byKind.minion.n + ')' +
@@ -183,7 +202,8 @@
         aiFumble: fumble, counterBonus: counter, aiStance: !!stance, squad: !!squad,
         slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold,
         cleave: !!cleave, keepPay: !!keeppay, waitCost: waitcost, aiWait: !!aiwait,
-        roadW: roadw, packAnchor: !!packanchor, bossFx: !!bossfx
+        roadW: roadw, packAnchor: !!packanchor, bossFx: !!bossfx,
+        duelSkill: !!duelskill, duelCd: !!duelcd, duelAi: !!duelai
       });
       lines.push('[cls:' + c + '] ' + fmt(o));
       lines.push('        ' + resident(o));

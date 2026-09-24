@@ -2056,7 +2056,19 @@
       },
       skip: function () { skipBattle(); },
       end: function () { endNow(); },
-      autoPick: autoPick
+      autoPick: autoPick,
+      /* 魂技：把效果挂到**这一轮**上，然后停在原地等玩家选路。
+         规则一条都不在这里 —— 能不能放、放完扣多少冷却、效果挂哪一轮，
+         全在 core 的 duelUseSkill() 里（界面再来一份判断，
+         迟早会漂成"灰着却能按"或"能按却没反应"，那是本项目最贵的一类 bug）。
+         这里只负责两件事：把结果告诉玩家，以及**重画菜单** ——
+         不重画的话按钮不会变成"已挂"，玩家就不知道这一下生效了没有。 */
+      skill: function () {
+        if (busy) return;
+        const r = game.duelUseSkill ? game.duelUseSkill() : null;
+        if (!r || !r.ok) return;
+        if (game.liveFight) bsMenu('show', game);
+      }
     };
 
     /** 收口：菜单上按下（或键盘敲下）的那个 id → 由注册表决定它做什么。 */
@@ -2166,6 +2178,37 @@
     run: function (ctx, api) { api.skip(); }
   });
 
+  /* 魂技（v11.5 P3 第二步）。它是菜单里第一个**改算式、不单独占一回合**的动作：
+     按下去只是把效果挂到这一轮上，打哪一路仍然由玩家自己选。
+     为什么不"按一下就把这一轮打完"：那样玩家就失去了这一轮的选路权，
+     而裂地斩（×1.6 伤害）打在对方**硬化物理**的那一面还是另一面，
+     恰好是这游戏唯一那道题 —— 技能不该替他把题做掉。
+
+     键位 3：1 / 2 是两条伤害路，空格是"照 HUD 上选好的那一路"，
+     魂技排在它们后面，不与任何一条抢键。 */
+  registerAct({
+    id: 'skill', keys: ['3'], skill: true,
+    label: function (ctx) { return (ctx.sk && ctx.sk.name) || '魂技'; },
+    /* 三种"不能用"的原因必须能从按钮上读出来（灰掉而不是消失）：
+       开关关着 / 本场已经用过 / 还在冷却。 */
+    enabled: function (ctx) {
+      return !!(ctx.fx && ctx.game.duelSkillOn && ctx.duel && !ctx.duel.used &&
+        ctx.game.skillCd <= 0);
+    },
+    /* 已经挂上了：按钮抬起发光，让玩家知道这一轮打出去会带上它。 */
+    isOn: function (ctx) { return !!(ctx.duel && ctx.duel.pendingFx); },
+    info: function (ctx) {
+      if (!ctx.fx) return '本局无对决形态';
+      if (ctx.duel && ctx.duel.pendingFx) return '已挂 · 本轮生效';
+      if (ctx.duel && ctx.duel.used) return '本场已用';
+      if (ctx.game.skillCd > 0) return '冷却 ' + ctx.game.skillCd + ' 回合';
+      /* 未挂之前只给**入参**（这一轮算式被改成什么样），
+         不给结论 —— "该不该现在放"仍然是玩家自己的判断题。 */
+      return ctx.fx.short || ctx.fx.text;
+    },
+    run: function (ctx, api) { api.skill(); }
+  });
+
   /**
    * 注册表要用到的那一份现场。
    * 抽出来是为了让 info() / enabled() / run() 读到**同一份**数值 ——
@@ -2179,8 +2222,14 @@
     // 而菜单存在的全部意义就是"玩家自己算的那个数是对的"。
     const tgt = L.duel.bs[bsSel] || L.duel.b;
     const dv = C.stanceDef(tgt.st, tgt.stance);
+    /* 这一局带着哪个魂技、它在对决里改的是什么算式（v11.5 P3 第二步）。
+       放在现场里而不是让动作自己去 game 上翻：菜单渲染时动作只拿得到 ctx，
+       让它绕过 ctx 去读全局，就又回到"两个地方各读一份现场"的老毛病上。 */
+    const sk = (game.skill ? game.skill() : null);
+    const fx = (sk && D.duelSkillFx) ? D.duelSkillFx(sk) : null;
     return {
       game: game, L: L, duel: L.duel, me: me, tgt: tgt, dv: dv, sel: bsSel,
+      sk: sk, fx: fx,
       r1: function (v) { return Math.round(v * 10) / 10; }
     };
   }
@@ -2195,15 +2244,21 @@
       const en = !ctx ? true : (a.enabled ? !!a.enabled(ctx) : true);
       const note = (ctx && a.info) ? (a.info(ctx) || '') : (a.hint || '');
       const key = (a.keys && a.keys.length) ? a.keys[0] : '';
+      /* 标签与"已经挂上"两样都允许写成函数（v1.5 P3 第二步）。
+         魂技那一行两样都是动态的：名字取决于这一局带着哪个魂技，
+         "挂上了没有"取决于这一轮。静态动作（物理 / 法术 / 托管）
+         读到的仍然是字符串，于是渲染结果与改动前逐字相同。 */
+      const label = (typeof a.label === 'function') ? (ctx ? a.label(ctx) : a.id) : a.label;
+      const on = !!(ctx && a.isOn && a.isOn(ctx));
       // id 与 data-act 都由 id 生成：**既有断言读的 bs-cmd-p / bs-cmd-m /
       // bs-cmd-auto 因此一个都不用改**，而新动作也自动拿到自己的钩子。
       h += '<button class="bs-cmd-btn' + (a.auto ? ' auto' : '') +
-        (en ? '' : ' off') + '"' +
+        (on ? ' on' : '') + (en ? '' : ' off') + '"' +
         (a.atk ? ' data-atk="' + a.id + '"' : '') +
         ' data-act="' + a.id + '"' + (en ? '' : ' disabled') +
         ' id="bs-cmd-' + a.id + '">' +
         (key ? '<span class="k">' + esc(key) + '</span>' : '') +
-        '<span class="t">' + esc(a.label) + '</span>' +
+        '<span class="t">' + esc(label) + '</span>' +
         '<span class="n">' + esc(note) + '</span>' +
         '</button>';
     }
