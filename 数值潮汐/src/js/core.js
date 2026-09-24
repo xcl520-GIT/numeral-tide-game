@@ -2719,7 +2719,10 @@
         return true;
       }
       e.x = cx; e.y = cy;
-      this.events.push({ kind: 'knock', enemy: e, from: { x: ox, y: oy } });
+      // to = 落点。**必须有**：技能会顺带推进一回合，敌人随后就会自己走回来，
+      // 所以"事后读 e.x"读到的是它走回来的位置，不是被掀开的位置 ——
+      // 那条断言会随敌人 AI 的任何改动而失败，而它本来想测的是击退。
+      this.events.push({ kind: 'knock', enemy: e, from: { x: ox, y: oy }, to: { x: cx, y: cy } });
       return false;
     }
 

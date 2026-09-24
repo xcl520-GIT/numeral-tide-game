@@ -1279,12 +1279,25 @@ function run(w, d) {
         eK.hp = eK.maxHp = 9999;
         gK.enemies.push(eK);
         var rK = gK.useSkill();
+        /* 判据必须读 knock **事件**，不能事后读 eK.x。
+           useSkill 会顺带推进一回合（技能消耗回合），期间敌人会自己走动 ——
+           而 v11.4-g 之后被惊动的房间每回合都挪，于是 eK 会精确地走回原位。
+           事后读坐标测到的是【它走回来了】，不是【它被掀开了】：
+           这条断言会随敌人 AI 的任何改动而失败，而它本来想测的是击退。 */
+        var knocked = null;
+        var evsK = gK.drainEvents();
+        for (var ki2 = 0; ki2 < evsK.length; ki2++) {
+          if (evsK[ki2].kind === 'knock' && evsK[ki2].enemy === eK) knocked = evsK[ki2];
+        }
         if (!rK.ok) fail('裂地斩放不出来: ' + rK.reason);
-        else if (eK.x !== put.bx || eK.y !== put.by) {
-          fail('裂地斩没有把敌人掀开：期望 (' + put.bx + ',' + put.by + ')，实际 (' + eK.x + ',' + eK.y + ')');
+        else if (!knocked) fail('裂地斩没有把敌人掀开（事件流里没有 knock）');
+        else if (knocked.from.x !== put.ex || knocked.from.y !== put.ey) {
+          fail('knock 事件的起点不对：(' + knocked.from.x + ',' + knocked.from.y + ')');
+        } else if (knocked.to.x !== put.bx || knocked.to.y !== put.by) {
+          fail('裂地斩没有把敌人掀开：期望 (' + put.bx + ',' + put.by + ')，实际 (' + knocked.to.x + ',' + knocked.to.y + ')');
         } else if (eK.stun > 0) {
           fail('推得动却给了眩晕，两者应该是二选一');
-        } else ok('裂地斩把敌人掀开了一格（' + put.ex + ',' + put.ey + ' → ' + eK.x + ',' + eK.y + '）');
+        } else ok('裂地斩把敌人掀开了一格（' + put.ex + ',' + put.ey + ' → ' + knocked.to.x + ',' + knocked.to.y + '）');
       }
     } catch (e) { fail('裂地斩击退测试异常: ' + (e && e.stack ? e.stack : e)); }
 
