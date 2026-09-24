@@ -2353,7 +2353,14 @@ function run(w, d) {
         fail('第 1 层出现了高难区域（它是教学层，不该开局就劝退）: ' + t1.join('/'));
       } else ok('第 1 层是教学层：只有 ' + t1.join('/') + '，没有精英区 / 危险区');
 
-      for (var sd = 0; sd < 8; sd++) {
+      /* 扫 32 个种子（v11.5 P2 定稿由 8 提到 32）。
+         为什么要提：这条断言是**概率性**的 —— 精英区本身是抽出来的，
+         而 4 个区里只有 3 个能分到怪（守门区固定占一个），所以非守门区
+         本来就有约 40% 是空的（空房间是刻意的节奏呼吸点，见 _spawnEnemies）。
+         8 个种子时"至少要有一个有怪的精英区"大约有 4% 的概率翻红 —— 实测踩过：
+         路宽默认翻成 2 之后恰好抽到 3 个精英区且都是空的。
+         断言本身没问题，**样本太薄**才是问题（也就是"别用随机去赌断言"那条规矩）。 */
+      for (var sd = 0; sd < 32; sd++) {
         var gg = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 70001 + sd });
         gg.depth = 2; gg._buildLevel(2);      // 往下一层看，高难区在那里
         var grs2 = gg.regions || [];
@@ -2388,13 +2395,13 @@ function run(w, d) {
           }
         }
       }
-      if (!eliteSeen) fail('扫了 8 个种子一个精英区都没有 —— 区域类型的分布有问题');
+      if (!eliteSeen) fail('扫了 32 个种子一个精英区都没有 —— 区域类型的分布有问题');
       else if (!eliteWithMob) fail('有 ' + eliteSeen + ' 个精英区，里面却一个怪都没有（这类型等于没有玩法含义）');
       else if (eliteBad) fail('有 ' + eliteBad + ' 个精英区里一只精英怪都没有（区域机制没生效）');
       else ok('精英区真的不一样：' + eliteWithMob + ' 个有怪的精英区里都出现了精英怪（共扫到 ' +
         eliteSeen + ' 个精英区）');
 
-      if (!rewardSeen) fail('扫了 8 个种子一个奖励区都没有');
+      if (!rewardSeen) fail('扫了 32 个种子一个奖励区都没有');
       else if (rewardBad.length) fail('奖励区不满足"≤1 只怪 + 保底宝箱": ' + rewardBad.join(' | '));
       else ok('奖励区真的更安全：' + rewardSeen + ' 个奖励区全部满足「≤1 只怪 + 保底宝箱」');
     } catch (e) { fail('区域画面层测试异常: ' + (e && e.stack ? e.stack : e)); }
@@ -3861,28 +3868,43 @@ try {
   // 把 rng.chance 换成桩、只读它被喂进来的概率，就是确定性断言：
   //   keep 怪必须高于普通怪；关掉 keepPay 时必须**相等**（这条才是真正的护栏，
   //   少了它，一个把 keepPay 读漏的实现照样能让上面那条绿）。
-  var dropP = function (g, isKeep) {
+  /* 只在**同一只敌人**身上比 —— v11.5 P2 定稿修。
+     _makeEnemy 会抽签决定是哪只怪，而抽到精英怪时它自己就带一份 +eliteBonus：
+     两次抽签抽到不同的怪，这条断言比的就不再是"keep 加没加成"。
+     实测踩过：路宽默认翻成 2 之后 pPlain 恰好抽到巨兽(kind=elite)，两边都是 0.66，
+     断言红 —— 而 _rollDrop 的逻辑完全正确（keep 确实加了精英那一份）。
+     现在改成：同一只怪先当普通怪量一次、再盖上 keep 量一次；
+     keepPay=0 的那一档也在它自己的同一只怪上量两次。
+     于是**不管抽到谁、地图怎么变**，这条断言都只在比"keep 这一份加成"。 */
+  var mkDrop = function (g, en) {
     var got = null;
     var rc = g.rng.chance;
     g.rng.chance = function (p) { got = p; return false; };   // 永远不掉，只为读参数
-    var en = g._makeEnemy(g.px + 2, g.py, 1);
-    if (isKeep) en.keep = true;
     g._rollDrop(en);
     g.rng.chance = rc;
     return got;
   };
+  var probeDrop = function (g) {
+    var en = g._makeEnemy(g.px + 2, g.py, 1);
+    var plain = mkDrop(g, en);
+    en.keep = true;
+    var keep = mkDrop(g, en);
+    return { plain: plain, keep: keep, arc: (en.arc && en.arc.id) || '?', kind: en.kind };
+  };
   var gP = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 52001 });
   var gN = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 52001, keepPay: false });
-  var pPlain = dropP(gP, false), pKeep = dropP(gP, true);
-  var pOff = dropP(gN, true);
-  if (pPlain === null || pKeep === null || pOff === null) {
+  var aD = probeDrop(gP), bD = probeDrop(gN);
+  if (aD.plain === null || aD.keep === null || bD.keep === null) {
     fail('守门堆保费：_rollDrop 没有走 rng.chance（掉落路径改了？）');
-  } else if (!(pKeep > pPlain)) {
-    fail('守门堆保费：keep 怪的掉落率没有加成（' + pKeep + ' vs ' + pPlain + '）');
-  } else if (pOff !== pPlain) {
-    fail('守门堆保费：keepPay 关掉后掉落率没有回到普通（' + pOff + ' vs ' + pPlain + '）');
+  } else if (!(aD.keep > aD.plain)) {
+    fail('守门堆保费：keep 怪的掉落率没有加成（同一只 ' + aD.arc + '/' + aD.kind + '：' +
+      aD.keep + ' vs ' + aD.plain + '）');
+  } else if (bD.keep !== bD.plain) {
+    fail('守门堆保费：keepPay 关掉后掉落率没有回到普通（同一只 ' + bD.arc + '：' +
+      bD.keep + ' vs ' + bD.plain + '）');
   } else {
-    ok('守门堆保费：掉落率 ' + pPlain + ' → ' + pKeep + '，关掉 keepPay 回到 ' + pOff);
+    ok('守门堆保费：同一只怪 ' + aD.arc + '/' + aD.kind + ' 掉落率 ' + aD.plain + ' → ' + aD.keep +
+      '；keepPay 关掉后 ' + bD.plain + ' → ' + bD.keep);
   }
 } catch (e) { fail('层尾守门堆测试异常: ' + (e && e.stack ? e.stack : e)); }
 
