@@ -205,6 +205,7 @@
       const rng = new C.RNG(999);
       let guard = 0;
       while (g.status === 'playing' && g.turn < walk && guard++ < walk * 4) {
+        if (g.pendingSkill) { g.chooseSkill(g.pendingSkill[0]); continue; }
         if (g.pendingRelic) { g.chooseRelic(g.pendingRelic[0].id); continue; }
         // 随机挑一个地板格走过去，把地图探开
         let tgt = null;
@@ -234,6 +235,13 @@
     return /[?&]meta=0(&|$)/.test(global.location.search || '');
   }
 
+  /** ?ask=0 → 开局不弹魂技三选一。
+      自动化驱动（冒烟、刷图、录屏）只想要一个能跑的局，而它们要的正是
+      "默认那个选择" —— 与 ?meta=0 同一类开关：让运行环境可复现。 */
+  function askOn() {
+    return !/[?&]ask=0(&|$)/.test(global.location.search || '');
+  }
+
   function start(opts) {
     opts = opts || {};
     const p = UI.pick;
@@ -244,6 +252,11 @@
     state.game = new C.Game({
       classKey: opts.classKey || p.cls,
       difficulty: opts.difficulty || p.diff,
+      /* 魂技三选一（v11.4-q）：默认**问**（真人新局就是要选）。
+         ?ask=0 时不问 —— 自动化路径要的是一个能跑的局，
+         而它拿到的正是"默认那个选择"（本职业技），于是与上线前逐位相同。
+         opts.ask 是单次显式覆盖：冒烟靠它在同一页里验弹窗本身。 */
+      askSkill: (opts.ask !== undefined) ? !!opts.ask : askOn(),
       // 无尽模式**不是**一个新难度：它沿用这一局选的 difficulty，
       // 只是把"到第 N 层结束"这条线拿掉（规则全在 core.js 里）
       endless: opts.mode === 'endless',
@@ -350,6 +363,15 @@
       // 正在选秘藏：方向键移动光标、空格/回车确认。
       // 这一段必须放在"选牌时一切输入都停"之前 —— 选牌本身就是这个状态下
       // 唯一该响应的操作，而它以前只有鼠标入口。
+      // 魂技三选一（v11.4-q）：和选秘藏用的是**同一套键**（← → / 空格 / 回车），
+      // 所以路由也要并排放在同一处 —— 否则会出现"两个弹窗同时开着，
+      // 方向键只对其中一个生效"。开局时 pendingSkill 一定先出现。
+      if (state.game.pendingSkill) {
+        if (ev.key === 'ArrowLeft' || ev.key === 'a' || ev.key === 'A') { UI.skillMove(-1); return; }
+        if (ev.key === 'ArrowRight' || ev.key === 'd' || ev.key === 'D') { UI.skillMove(1); return; }
+        if (ev.key === ' ' || ev.key === 'Enter') { UI.skillConfirm(); return; }
+        return;
+      }
       if (state.game.pendingRelic) {
         if (ev.key === 'ArrowLeft' || ev.key === 'a' || ev.key === 'A') { UI.relicMove(-1); return; }
         if (ev.key === 'ArrowRight' || ev.key === 'd' || ev.key === 'D') { UI.relicMove(1); return; }
@@ -733,6 +755,12 @@
     flush: function () {
       const g = state.game;
       if (g) afterAction(g, { hp: g.hp, kills: g.kills, depth: g.depth });
+    },
+    chooseSkill: function (k) {
+      const g = state.game;
+      if (!g) return;
+      g.chooseSkill(k);
+      afterAction(g, { hp: g.hp, kills: g.kills, depth: g.depth });
     },
     chooseRelic: function (id) {
       const g = state.game;

@@ -8,7 +8,9 @@
 </head>
 <body>
 <pre id="out">booting...</pre>
-<iframe id="fr" src="../src/index.html"></iframe>
+<!-- ask=0：这一页是自动化驱动，开局不弹魂技三选一（它要的是默认那个选择）。
+     弹窗本身由第 50 节用 opts.ask 显式开一局来验。 -->
+<iframe id="fr" src="../src/index.html?ask=0"></iframe>
 <script>
 /* ============================================================
    集成冒烟测试。
@@ -26,7 +28,11 @@ var qp = {};
 location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
   if (!kv) return; var p = kv.split('='); qp[p[0]] = decodeURIComponent(p[1] || '');
 });
-if (qp.page) document.getElementById('fr').src = qp.page;
+if (qp.page) {
+  var frSrc = qp.page;
+  document.getElementById('fr').src =
+    frSrc + (frSrc.indexOf('?') < 0 ? '?' : '&') + 'ask=0';
+}
 var out = [];
 var errors = [];
 var fr = document.getElementById('fr');
@@ -3879,6 +3885,113 @@ try {
     ok('守门堆保费：掉落率 ' + pPlain + ' → ' + pKeep + '，关掉 keepPay 回到 ' + pOff);
   }
 } catch (e) { fail('层尾守门堆测试异常: ' + (e && e.stack ? e.stack : e)); }
+
+/* ---------- 50. 开局魂技三选一 ----------
+   它的失效模式和秘藏那套一模一样，而且都**不会报错**：
+     · 候选偷偷动了主随机流 → 三档基线无声漂移（所以要用两条独立流）；
+     · 界面能选到候选之外的东西 → 技能被改成了不存在的那个；
+     · 无头模式没解开挂起 → 整局卡在第一步，表现为"模拟器突然很慢"。
+
+   最后一条是这一节的重心：`_autoSkillPick` 默认必须**保留本职业技**，
+   否则模拟器跑出来的东西与上线前不再逐位相同，基线失去可比性 ——
+   那才是这个功能真正的风险，不是界面长什么样。 */
+try {
+  var mk50 = function (seed, pick) {
+    return new w.TideCore.Game({
+      classKey: 'warlord', difficulty: 'standard', seed: seed,
+      skillPick: pick, askSkill: true
+    });
+  };
+
+  // ① 开局挂起三张，且第一张必须是本职业技
+  var sA = mk50(61000);
+  var cand = sA.pendingSkill || [];
+  var uniq = {};
+  for (var ci = 0; ci < cand.length; ci++) uniq[cand[ci]] = 1;
+  if (!sA.hasPendingSkill()) fail('魂技三选一：开局没有挂起候选');
+  else if (cand.length !== 3) fail('魂技三选一：候选数 ' + cand.length + '，应当是 3');
+  else if (Object.keys(uniq).length !== 3) fail('魂技三选一：候选里有重复');
+  else if (cand[0] !== sA.cls.key) fail('魂技三选一：第一张不是本职业技（' + cand[0] + ' vs ' + sA.cls.key + '）');
+  else if (!sA.hasPendingSkill()) fail('魂技三选一：挂起状态自相矛盾');
+  else ok('魂技三选一：开局挂起 3 张，第一张是本职业技（' + cand.join(' / ') + '）');
+
+  // ② 技能在挂起期间不该就绪，也不该能放
+  if (sA.skillReady()) fail('魂技三选一：还没选技就已经就绪');
+  else ok('魂技三选一：选技之前技能不就绪（挂起是真的挂起）');
+
+  // ③ 只能从发到手里的那三张里选
+  var badPick = sA.chooseSkill('definitely-not-a-skill');
+  if (badPick) fail('魂技三选一：chooseSkill 接受了候选之外的键');
+  else if (!sA.hasPendingSkill()) fail('魂技三选一：一次无效选择把挂起清掉了');
+  else ok('魂技三选一：候选之外的键被拒绝，挂起保留');
+
+  // ④ 选本职业技 → 与旧的 skillByClass 完全一致
+  sA.chooseSkill(sA.cls.key);
+  if (sA.hasPendingSkill()) fail('魂技三选一：选完还挂着');
+  else if (sA.skill().name !== w.TideData.skillByClass('warlord').name) {
+    fail('魂技三选一：保留本职业技之后拿到的技能不对（' + sA.skill().name + '）');
+  } else ok('魂技三选一：保留本职业技 = 旧行为（' + sA.skill().name + '）');
+
+  // ⑤ 换外职业技能：冷却等字段必须跟着换（证明读的是同一张表）
+  var sB = mk50(61000);
+  var other = null;
+  for (var oi = 1; oi < sB.pendingSkill.length; oi++) other = sB.pendingSkill[oi];
+  sB.chooseSkill(other);
+  var want = w.TideData.SKILLS[other];
+  if (sB.skill().name !== want.name) {
+    fail('魂技三选一：换成外职业技能失败（' + sB.skill().name + ' vs ' + want.name + '）');
+  } else if (sB.skill().cd !== want.cd) {
+    fail('魂技三选一：冷却没有跟着换（' + sB.skill().cd + ' vs ' + want.cd + '）');
+  } else ok('魂技三选一：可换成外职业技能 ' + want.name + '（cd ' + want.cd + ' 一并生效）');
+
+  // ⑥ 无头默认策略：保留本职业技 + 挂起必须被解开
+  var gH50 = mk50(61001, 'class');
+  gH50.playHeadless(400);
+  if (gH50.hasPendingSkill()) fail('魂技三选一：无头跑完还挂着（会卡死整局）');
+  else if (gH50.skillKey !== gH50.cls.key) fail('魂技三选一：无头默认策略没保留本职业技');
+  else ok('魂技三选一：无头默认保留本职业技（基线保持可比）');
+
+  // ⑦ 对照线：'rand' 必须真的会选到外职业技能，而且不是恒定选某一个
+  var diff50 = 0, seen50 = {};
+  for (var ri = 0; ri < 12; ri++) {
+    var gR50 = mk50(62000 + ri, 'rand');
+    gR50.playHeadless(200);
+    seen50[gR50.skillKey] = 1;
+    if (gR50.skillKey !== gR50.cls.key) diff50++;
+  }
+  if (diff50 === 0) fail("魂技三选一：skillPick='rand' 从来没选到外职业技能（对照线是假的）");
+  else if (Object.keys(seen50).length < 2) fail("魂技三选一：skillPick='rand' 的结果是恒定的");
+  else ok("魂技三选一：对照线 'rand' 生效（12 局里 " + diff50 + ' 局换了技能）');
+
+  /* ⑧ 真实链路：从开局流程走一遍，弹窗必须出现，而且空格必须真的能确认。
+     为什么非要这一条：前面 ①~⑦ 全是**直接构造模型**在验规则，
+     它们完全证明不了"界面上有没有这个东西"。而"机制都在、界面没接上"
+     正是这个项目里已经栽过一次的坑（v10.2 的悬停详情：代码写了、没人调）。 */
+  var kq50 = function (key) {
+    w.dispatchEvent(new w.KeyboardEvent('keydown', { key: key, bubbles: true }));
+    w.dispatchEvent(new w.KeyboardEvent('keyup', { key: key, bubbles: true }));
+  };
+  w.TideMain.start({ classKey: 'warlord', difficulty: 'standard',
+    seed: 61002, meta: null, ask: true });
+  var gU50 = w.TideMain.game;
+  var box50 = d.getElementById('skill-modal');
+  if (!gU50.hasPendingSkill()) {
+    fail('魂技三选一：走真实开局流程没有挂起（界面根本拿不到选项）');
+  } else if (!box50 || box50.classList.contains('hidden')) {
+    fail('魂技三选一：模型挂起了，但弹窗没有出现');
+  } else {
+    kq50('ArrowRight');
+    var sel50 = w.TideUI.skillSelectedIndex();
+    var key50 = gU50.pendingSkill[sel50];
+    kq50(' ');
+    if (gU50.hasPendingSkill()) fail('魂技三选一：空格没有确认选技（还挂着）');
+    else if (gU50.skill().name !== w.TideData.SKILLS[key50].name) {
+      fail('魂技三选一：确认了但不是光标那一张（' + gU50.skill().name + '）');
+    } else ok('魂技三选一：真实开局 → 弹窗出现 → 右移一格 → 空格确认（'
+      + gU50.skill().name + '）');
+  }
+  w.TideUI.closeBattle();
+} catch (e) { fail('魂技三选一测试异常: ' + (e && e.stack ? e.stack : e)); }
 
   } catch (e) {
     fail('测试脚本异常: ' + (e && e.stack ? e.stack : e));

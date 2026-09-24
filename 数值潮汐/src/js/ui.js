@@ -272,6 +272,7 @@
     // 它的可见性挂在"上一局还挂着一张牌"上，跨局就会残留。
     relicShown = '';
     if ($('relic-modal')) $('relic-modal').classList.add('hidden');
+    if ($('skill-modal')) $('skill-modal').classList.add('hidden');
     if ($('over-modal')) $('over-modal').classList.add('hidden');
   }
 
@@ -994,6 +995,8 @@
 
     if (game.pendingRelic && game.pendingRelic.length) showRelicModal(game);
     else $('relic-modal').classList.add('hidden');
+    if (game.pendingSkill && game.pendingSkill.length) showSkillModal(game);
+    else $('skill-modal').classList.add('hidden');
 
     if (invOpen) renderInventory(game);
   }
@@ -2391,6 +2394,87 @@
 
   function relicSelectedIndex() { return relicSel; }
 
+  /* ============================================================
+     魂技三选一（v11.4-q）
+     ------------------------------------------------------------
+     和秘藏那套**故意长得一样**：同一套卡片样式、同一套键盘语义、
+     同一个"模型层挂起 → 界面解 → 无头模式自己解"的范式。
+
+     刻意不复用同一段代码：两者的数据形状不同（秘藏是对象、魂技是 D.SKILLS
+     的键 + 一张静态表），硬套一个泛型渲染器会比抄一遍更难读。
+     但**必须复用 .relic-card 那套样式** —— 开局这两个弹窗在玩家眼里
+     是同一件事（"这一局往哪走"），长得不一样只会让人以为是两个系统。
+     ============================================================ */
+  let skillShown = '';
+  let skillSel = 0;
+
+  function showSkillModal(game) {
+    const sig = (game.pendingSkill || []).join(',');
+    const wasHidden = $('skill-modal').classList.contains('hidden');
+    // 和秘藏同一条理由：弹窗已经关着时，即使候选一模一样也要重画，
+    // 否则上一轮留下的键盘光标会被带进新一次选择。
+    if (!wasHidden && skillShown === sig) return;
+    skillShown = sig;
+    skillSel = 0;
+    $('skill-modal').classList.remove('hidden');
+    const mine = game.cls.key;
+    $('skill-cards').innerHTML = game.pendingSkill.map(function (k) {
+      const s = D.SKILLS[k] || {};
+      const isMine = (k === mine);
+      return '<button class="relic-card" data-key="' + k + '" style="--rc:' + (s.tint || '#cbb994') + '">' +
+        '<span class="rc-ico">' + icon(s.icon, 42) + '</span>' +
+        // 把"留 / 换"的不对称写在卡面上：开局玩家还没有任何信息，
+        // 不说清楚的话"换"就变成了一个纯赌的陷阱选项。
+        '<span class="rc-school">' + (isMine ? '本职业 · 保留' : '外来 · 替换') + '</span>' +
+        '<b class="rc-name">' + esc(s.name || '') + '</b>' +
+        '<span class="rc-text">' + esc(s.text || '') + '</span>' +
+        '</button>';
+    }).join('');
+    const cards = $('skill-cards').querySelectorAll('.relic-card');
+    Array.prototype.forEach.call(cards, function (el, i) {
+      el.onclick = function () {
+        global.TideAudio.relic();
+        global.TideMain.chooseSkill(el.dataset.key);
+        skillShown = '';
+      };
+      el.onmouseenter = function () { skillSel = i; applySkillSel(); };
+    });
+    applySkillSel();
+    global.TideAudio.relic();
+  }
+
+  function applySkillSel() {
+    const cards = $('skill-cards') ? $('skill-cards').querySelectorAll('.relic-card') : [];
+    if (!cards.length) return;
+    if (skillSel < 0) skillSel = 0;
+    if (skillSel >= cards.length) skillSel = cards.length - 1;
+    Array.prototype.forEach.call(cards, function (el, i) {
+      el.classList.toggle('on', i === skillSel);
+    });
+  }
+
+  function skillMove(dir) {
+    const cards = $('skill-cards') ? $('skill-cards').querySelectorAll('.relic-card') : [];
+    if (!cards.length) return -1;
+    skillSel = (skillSel + (dir > 0 ? 1 : -1) + cards.length) % cards.length;
+    applySkillSel();
+    global.TideAudio.ui();
+    return skillSel;
+  }
+
+  function skillConfirm() {
+    const cards = $('skill-cards') ? $('skill-cards').querySelectorAll('.relic-card') : [];
+    if (!cards.length) return false;
+    const el = cards[Math.max(0, Math.min(cards.length - 1, skillSel))];
+    if (!el) return false;
+    global.TideAudio.relic();
+    global.TideMain.chooseSkill(el.dataset.key);
+    skillShown = '';
+    return el.dataset.key;
+  }
+
+  function skillSelectedIndex() { return skillSel; }
+
   function showOver(game) {
     const win = game.status === 'win';
     const box = $('over-modal');
@@ -2555,7 +2639,9 @@
   let guideOpen = null;      // null = 还没从存档里读过
 
   function guideScope(game) {
-    if (game && game.hasPendingRelic() ) return 'relic';
+    // 选技时也走同一套键位与同一份指南（scope 'relic' 的文案本来就是
+    // 「← → 移动光标 / 空格·回车 确认」，对两个弹窗都成立）。
+    if (game && (game.hasPendingRelic() || game.hasPendingSkill())) return 'relic';
     if (invOpen) return 'inv';
     return 'game';
   }
@@ -2739,6 +2825,9 @@
     relicMove: relicMove,
     relicConfirm: relicConfirm,
     relicSelectedIndex: relicSelectedIndex,
+    skillMove: skillMove,
+    skillConfirm: skillConfirm,
+    skillSelectedIndex: skillSelectedIndex,
     isMetaOpen: isMetaOpen,
     showPause: showPause,
     closePause: closePause,

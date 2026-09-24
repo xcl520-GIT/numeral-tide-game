@@ -236,6 +236,12 @@
          这两条的可调方向相反 —— 代价在布局身上就该保留保费；
          代价在保费身上就该把保费调小。混在一起看只能凭猜。 */
       this.keepPay = (opts.keepPay === undefined) ? true : !!opts.keepPay;
+      /* 魂技三选一（v11.4-q）的两个开关，必须在构造函数里读 ——
+         reset() 收不到 opts，而候选要在 reset 里就挂起。
+         askSkill：要不要**问**玩家（默认不问，只有真人新局才问）。
+         skillPick：不问的时候按什么策略定（'class' 保留本职业技 = 旧行为）。 */
+      this.askSkill = !!opts.askSkill;
+      this.skillPick = opts.skillPick || 'class';
 
       this.seed = (opts.seed === undefined || opts.seed === null)
         ? ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0)
@@ -282,6 +288,25 @@
       this._doorCache = {};         // 每回合清一次
       this.devourStacks = 0;
       this.skillCd = 0;          // 魂技冷却剩余回合
+      /* 魂技三选一（v11.4-q）。
+         **默认不问** —— "要不要问玩家"是界面层的事，不该决定模型能不能动。
+         这一条不是洁癖：写成"默认挂起"之后，冒烟里 30 处 TideMain.start()
+         当场全部卡死（实测打坏 37 条断言，原因一律是 pending）——
+         那些脚手架只想要一个能跑的局。
+         所以只有真人从标题页开的那一局会问（main.js 的 start 传 askSkill）；
+         无头模拟器、调试路径、冒烟脚手架拿到的都是"已经定下来"的局，
+         默认策略下与三选一上线前逐位相同 —— 三档基线这才保得住可比性。 */
+      this.skillKey = null;
+      this.pendingSkill = this.askSkill ? this._offerSkills() : null;
+      /* 不问的时候按策略立刻定下来。
+         'class'（默认）时 skillKey 保持 null → skill() 走 skillByClass，
+         与旧行为逐位等同；'rand' 是为了量"选择值多少"单开的一条对照线，
+         用独立随机流（见 _offerSkills 里那条注释）。 */
+      if (!this.askSkill && this.skillPick === 'rand') {
+        const cand = this._offerSkills();
+        const r = new RNG((this.seed ^ 0x1f123bb5) >>> 0);
+        this.skillKey = cand[r.int(0, cand.length - 1)];
+      }
       this.skillUses = 0;        // 一局里放过几次魂技（平衡分析用）
       this.freeMoves = 0;        // 免费行动次数（疾影）—— 不推进潮汐，敌人也不动
       this.buffs = [];           // 临时增益（魂技），随回合递减
@@ -3031,7 +3056,8 @@
      * @returns {boolean} 是否消耗了回合
      */
     stepTo(x, y) {
-      if (this.status !== 'playing' || this.hasPendingRelic()) return false;
+      if (this.status !== 'playing' || this.hasPendingRelic() ||
+          this.hasPendingSkill()) return false;
       if (!this.walkable(x, y)) return false;
       const e = this.enemyAt(x, y);
       if (e) {
@@ -3126,9 +3152,62 @@
        把"能不能放"写进界面是踩过的坑 —— 模拟器的 AI 会绕过规则，
        于是平衡数据是假的。规则只有一个归属地。
        ============================================================ */
-    skill() { return D.skillByClass(this.cls.key); }
+    /* 魂技三选一（v11.4-q）
+       ------------------------------------------------------------
+       skillKey 存的是 **D.SKILLS 的键**，也就是"这个魂技原来属于哪个职业" ——
+       表本来就是按职业建的（D.SKILLS[classKey]），沿用它可以一个字都不用改
+       就拿到 cd / cost / kind / text 全套字段。于是这一条的改动面
+       **只有池子构造**：useSkill()、冷却、AI 判据、HUD 按钮全部不动。 */
+    skill() {
+      const k = this.skillKey;
+      if (k && D.SKILLS[k]) return D.SKILLS[k];
+      return D.skillByClass(this.cls.key);
+    }
+    hasPendingSkill() {
+      return Array.isArray(this.pendingSkill) && this.pendingSkill.length > 0;
+    }
+    /** 三张候选 = 本职业技 + 另外两个（顺序：本职业永远在第一位）。 */
+    _offerSkills() {
+      const mine = (this.cls && this.cls.key) ? this.cls.key : 'warlord';
+      const others = [];
+      for (const k in D.SKILLS) if (k !== mine) others.push(k);
+      /* 用一条**独立**的随机流抽另外两个候选。
+         绝不能借用 this.rng：那样一局里的随机数**个数**会变，
+         三档基线当场失去可比性 —— 而"纯结构改动必须逐位相同"
+         正是为拦住这种事立的规矩。 */
+      const r = new RNG((this.seed ^ 0x5bf03635) >>> 0);
+      for (let i = others.length - 1; i > 0; i--) {
+        const j = r.int(0, i);
+        const t = others[i]; others[i] = others[j]; others[j] = t;
+      }
+      return [mine].concat(others.slice(0, 2));
+    }
+    /** 只能从发到手里的那三张里选 —— 界面传错东西不能改技能。 */
+    chooseSkill(k) {
+      if (!this.hasPendingSkill()) return false;
+      if (this.pendingSkill.indexOf(k) < 0) return false;
+      this.skillKey = k;
+      this.pendingSkill = null;
+      return true;
+    }
+    _autoSkillPick() {
+      if (!this.hasPendingSkill()) return;
+      /* AI 的策略（v11.4-q）。
+         默认 'class' = **保留本职业技**，于是无头模拟器跑出来的东西与
+         三选一上线前逐位相同 —— 三档基线保持可比，这是本项目所有平衡
+         结论的前提。
+         'rand' 是一条**独立**的对照线，用来量"选择这件事值多少"，
+         而不是把它混进主基线（混进去就再也归因不到单一变量上了）。 */
+      if (this.skillPick === 'rand') {
+        const r = new RNG((this.seed ^ 0x1f123bb5) >>> 0);
+        this.chooseSkill(this.pendingSkill[r.int(0, this.pendingSkill.length - 1)]);
+      } else {
+        this.chooseSkill(this.cls.key);
+      }
+    }
     skillReady() {
-      return this.status === 'playing' && !this.hasPendingRelic() && this.skillCd <= 0;
+      return this.status === 'playing' && !this.hasPendingRelic() &&
+        !this.hasPendingSkill() && this.skillCd <= 0;
     }
 
     /**
@@ -3142,6 +3221,7 @@
       const s = this.skill();
       if (this.status !== 'playing') return { ok: false, reason: 'over' };
       if (this.hasPendingRelic()) return { ok: false, reason: 'pending' };
+      if (this.hasPendingSkill()) return { ok: false, reason: 'pending' };
       if (this.skillCd > 0) return { ok: false, reason: 'cd', cd: this.skillCd };
 
       let hits = 0, healed = 0, pushed = 0, stunned = 0, wet = 0;
@@ -3538,7 +3618,8 @@
           alert: opts.alert,
           hold: opts.hold,
           cleave: opts.cleave,
-          keepPay: opts.keepPay
+          keepPay: opts.keepPay,
+          skillPick: opts.skillPick
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;
@@ -3585,6 +3666,7 @@
       const trace = [];
       while (this.status === 'playing' && this.turn < limit && stall < 40) {
         if (this.hasPendingRelic()) { this._autoRelic(); continue; }
+        if (this.hasPendingSkill()) { this._autoSkillPick(); continue; }
         const before = this.turn;
         this._autoEquip();
         this._autoFuse();                      // 融合：同样的道理，AI 不会用就等于没做
