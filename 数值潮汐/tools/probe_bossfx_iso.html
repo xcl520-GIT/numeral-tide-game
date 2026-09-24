@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>tide-probe-bossfx-iso</title>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* ============================================================
+   P4 归因探针：三条 Boss 行为**逐条隔离**。
+
+   为什么需要它：`bossfx=1` 跑出 2 例异常终止（1 timeout + 1 stall），
+   而 bossfx=0 是 0。1/900 这个量级要么说不清、要么就是被当成噪声放过去 ——
+   但"P4 引入了卡死"和"P4 只是把一条**早就存在的**AI 盲点撞了出来"
+   是两件完全不同的事，前者要修机制，后者要修 AI。不拆开就只能猜。
+
+   做法：加载同一份 data.js，然后**在内存里**把模板上的 bossBehavior
+   逐条摘掉 —— 不动产品代码、不加开关（那是产品的事，这里是量具）。
+   所以四组配置跑的是同一份 core.js，唯一的差别只有"哪条行为还挂着"。
+
+   参数：?n=900&only=all|tide|summon|roar|none
+   ============================================================ */
+(function () {
+  var q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return;
+    var p = kv.split('=');
+    q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+  var n = parseInt(q.n || '300', 10);
+  var only = q.only || 'all';
+
+  var lines = [];
+  function say(s) { lines.push(s); }
+
+  // —— 在内存里摘标签（data.js 已经加载完，这里改的是运行时的那份对象） ——
+  var before = [];
+  TideData.BOSSES.forEach(function (b) {
+    before.push(b.id + '=' + (b.bossBehavior || '-'));
+    if (only === 'all') return;
+    if (only === 'none') { delete b.bossBehavior; return; }
+    if (b.bossBehavior !== only) delete b.bossBehavior;
+  });
+  say('配置 only=' + only + '  n=' + n);
+  say('模板行为（改后）：' + TideData.BOSSES.map(function (b) {
+    return b.id + '=' + (b.bossBehavior || '-');
+  }).join('  '));
+
+  var t0 = Date.now();
+  try {
+    ['casual', 'standard', 'abyss'].forEach(function (d) {
+      var o = TideCore.Game.simulate(n, {
+        difficulty: d, seedBase: 1000, maxTurns: 2400,
+        aiFumble: 0.2, aiStance: true, squad: true,
+        slots: true, tick: true, alert: false, hold: true,
+        cleave: true, keepPay: true, waitCost: '0', aiWait: false,
+        roadW: 2, packAnchor: false, bossFx: true
+      });
+      say('[' + d + '] winRate=' + o.winRate + '%  turns=' + o.turns +
+        '  outcome=' + JSON.stringify(o.outcome));
+      say('        Boss行为 潮汐节拍 ' + o.bossTide + ' | 督军召出 ' + o.bossSummon +
+        ' | 渊喉吼 ' + o.bossRoar);
+      var st = o.stalls || [];
+      if (!st.length) {
+        say('        异常终止 0 例');
+      } else {
+        say('        异常终止 ' + st.length + ' 例（最多留 4 个现场）：');
+        st.forEach(function (s, i) {
+          say('          ' + (i + 1) + '. ' + s.outcome + ' @depth ' + s.depth +
+            ' pos=' + s.pos + ' exit=' + s.exit +
+            ' bossAlive=' + s.bossAlive + ' hpPct=' + s.hpPct +
+            ' nearestEnemyDist=' + s.nearestEnemyDist +
+            ' kills=' + s.kills + ' standingOn=' + s.standingOn);
+          say('             trace: ' + s.trace);
+        });
+      }
+    });
+    say('');
+    say('elapsed=' + (Date.now() - t0) + 'ms');
+    say('ISODONE');
+  } catch (e) {
+    say('ISOFAIL ' + (e && e.stack ? e.stack : String(e)));
+  }
+  document.getElementById('out').textContent = lines.join('\n');
+})();
+</script>
+</body>
+</html>

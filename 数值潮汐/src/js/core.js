@@ -274,6 +274,11 @@
          换成贴出口之后，三套配置下群战野生率都是 14~17%，一动不动。
          所以默认值就是 0 —— 不是保守，是那条证据还站在 0 这一边。 */
       this.packAnchor = !!opts.packAnchor;
+      /* P4（v11.5）：Boss 行为差异化。默认 0 = 旧行为（三个 Boss 只有数值差别）。
+         为什么是"一个总开关 + 模板上一条 bossBehavior"两层：
+         总开关负责**对照实验**（代价与收益只能靠 A/B 回答），
+         模板字段负责**逐只回滚**（某个行为单独不合适时不必把三个一起关掉）。 */
+      this.bossFxOn = (opts.bossFx === undefined) ? false : !!opts.bossFx;
 
       this.seed = (opts.seed === undefined || opts.seed === null)
         ? ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0)
@@ -329,6 +334,9 @@
       // P1 的 AI 策略用它兜底，防死等（连续等待上限 3）。
       // 和上面两个同理：**必须在 reset 里声明**。
       this.aiWaitStreak = 0;
+      /* P4 的三个可读计数。同样必须在这里声明（同 liveFight 的理由）：
+         一个对象在 reset 里建好，之后只改它的属性，不会触发隐藏类迁移。 */
+      this.bossFx = { tide: 0, summon: 0, roar: 0 };
       this.devourStacks = 0;
       this.skillCd = 0;          // 魂技冷却剩余回合
       /* 魂技三选一（v11.4-q）。
@@ -976,6 +984,13 @@
       const e = {
         id: ++SEQ, x: x, y: y, arc: arc, name: arc.name, kind: 'boss',
         stats: st, hp: st.hp, maxHp: st.hp, cd: 0, hitFlash: 0, isBoss: true,
+        // P4：行为标签。**必须在字面量里声明**（同 keep / hitKb 的理由），
+        // 而且它是三条行为的唯一开关点 —— 模板上不写就没有行为。
+        bossBehavior: arc.bossBehavior || null,
+        /* 「一次逼近只推一次」的闩（P4）。必须在这里声明 ——
+           同 keep / slot / hitKb 的理由：它是热路径字段，
+           等第一次用到再挂上去会触发隐藏类迁移。 */
+        roarLatch: false,
         tags: tagsOf(st, arc),
         stance: canStance(st, arc) ? (this.rng.chance(0.5) ? 'p' : 'm') : null,
         stanceT: D.STANCE.every, stanceFx: 0,
@@ -2936,6 +2951,21 @@
       }
     }
 
+    /**
+     * 这只怪会不会孵化（P4 给 Boss 加了一道闸）。
+     *
+     * 孢子母与骨潮督军共用**同一条** spawn 路径 —— 这是刻意的：
+     * 抄一份孵化逻辑就会有第二个真源，两边的"每几回合一只""在哪几格放"
+     * 迟早会漂开，而这种漂移在数据上只会表现成"召唤物变少了"，极难归因。
+     * 差别只有一道闸：Boss 要先在模板上写 bossBehavior='summon' 才孵，
+     * 而且总开关关掉时谁都不孵。
+     */
+    _canSpawn(e) {
+      if (!e.arc || !e.arc.spawn) return false;
+      if (e.isBoss) return !!(e.bossBehavior === 'summon' && this.bossFxOn);
+      return true;
+    }
+
     _decideEnemy(e) {
       const gated = (e.region !== undefined && e.region >= 0 &&
                      this.regionAt(this.px, this.py) !== e.region);
@@ -2952,7 +2982,7 @@
       // 顺带会发生的事：用和实际执行**同一套判断**推导，不做第二份实现。
       // 孵化在 endTurn 里判的是 this.turn % every === 0，而那一刻 turn 已经 +1，
       // 所以在这里要提前一格判。
-      if (e.arc && e.arc.spawn &&
+      if (this._canSpawn(e) &&
           (this.turn + 1) % e.arc.spawn.every === 0) it.spawn = true;
       // _tickStance 是 "先减、减到 0 才切"，所以剩 1 就是"下一次行动必定切"。
       if (e.stance && e.stanceT === 1) it.shift = stanceFlip(e.stance);
@@ -2990,6 +3020,60 @@
       }
       if (this.hp <= 0) this._die(enemy.name);
       return dmg;
+    }
+
+    /**
+     * P4 · 渊喉的"吼"：每 3 回合一次，把玩家沿主轴推开 1~2 格。
+     *
+     * 为什么**不造成伤害**：它是**空间惩罚**，不是又一个伤害来源。
+     * 这一条正好是裂地斩击退的反面 —— 玩家第一次会发现自己站在哪儿
+     * 也会被规则改，而不只是"血少了"。
+     * 为什么只在感知半径内吼：见下面那道闸的注释 —— 一条"看不见是谁干的"
+     * 位移，在玩家侧和 bug 没有区别。
+     * 为什么只继承 _knockback 的两条纪律而不复用函数：那个推的方向是
+     * "从玩家指向目标"，推的也是**敌人**；这里两样都反过来。
+     * 继承下来的两条是：**只沿主轴推**（四方向）、**推不动就停在原地**。
+     * 不推"斜着跨两格曼哈顿距离"—— 那和画面对不上。
+     */
+    _bossRoar() {
+      if (this.status !== 'playing') return;
+      if (this.turn % 3 !== 0) return;      // 每 3 回合一次
+      const boss = this._bossWith('roar');
+      if (!boss) return;
+      /* 只有玩家在**它的感知半径之内**才吼。
+         少了这一条，它会隔着半张图每 3 回合推你一次 —— 你看不见谁在吼，
+         那个位移在玩家侧读起来就是"游戏坏了"。半径复用 D.PACK.alertR，
+         和 _waitAlert / _updateAwake 同一个常量：全游戏只该有一个
+         "它察觉得到你"的距离，另发明一个，规则就会和画面慢慢漂开。 */
+      const dRoar = Math.abs(boss.x - this.px) + Math.abs(boss.y - this.py);
+      if (dRoar > D.PACK.alertR) return;
+      /* 一次逼近只推一次。为什么必须有这道闩：
+         没有它的时候，吼的周期(3) 可以和"玩家被推回来"的周期**对齐**，
+         于是每一次吼都把玩家 3 回合的推进原样吐回去 —— 玩家与本体之间
+         维持一个死循环（隔离探针在 2700 局里抓到 4 例 timeout，
+         trace 是 8,14 → 8,13 → 8,12 → 8,14 … 的纯周期环）。
+         那不是"难"，那是"永远走不到它面前"，玩家侧读起来就是游戏坏了。
+         闩在"玩家重新逼到近身"时解除，所以贴脸缠斗时它一次都不会生效 ——
+         挡住的**只有**那个病态循环。 */
+      if (dRoar <= 2) boss.roarLatch = false;
+      if (boss.roarLatch) return;
+      const dx = this.px - boss.x, dy = this.py - boss.y;
+      const sx = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) : 0;
+      const sy = sx === 0 ? Math.sign(dy) : 0;
+      const ox = this.px, oy = this.py;
+      let moved = 0;
+      for (let i = 0; i < 2; i++) {
+        const nx = this.px + sx, ny = this.py + sy;
+        if ((sx === 0 && sy === 0) || !this.walkable(nx, ny) || this.enemyAt(nx, ny)) break;
+        this.px = nx; this.py = ny; moved++;
+      }
+      if (moved > 0) boss.roarLatch = true;   // 推不动（前后都堵死）不算数，下次还能再试
+      this.bossFx.roar++;
+      this.events.push({
+        kind: 'roar', boss: boss,
+        from: { x: ox, y: oy }, to: { x: this.px, y: this.py }, moved: moved
+      });
+      if (moved > 0) this._log('渊喉一声闷吼，地板把你推开了 ' + moved + ' 格。', 'warn');
     }
 
     _killEnemy(enemy, byPlayer) {
@@ -3638,8 +3722,8 @@
             this._stepEnemyTowardPlayer(e);
           }
         }
-        // 孢子母：孵化
-        if (e.arc.spawn) {
+        // 孢子母 / 骨潮督军：孵化（P4 之后两者共用这一条路径）
+        if (this._canSpawn(e)) {
           e.cd = (e.cd || 0);
           if (this.turn % e.arc.spawn.every === 0) {
             const spots = [[1, 0], [-1, 0], [0, 1], [0, -1]];
@@ -3659,6 +3743,7 @@
                 c.stance = canStance(c.stats, mini) ? (this.rng.chance(0.5) ? 'p' : 'm') : null;
                 c.stanceT = D.STANCE.every;
                 this.enemies.push(c);
+                if (e.isBoss) this.bossFx.summon++;   // P4 计数：Boss 召出来的幼体
                 this.events.push({ kind: 'spawn', enemy: c });
                 break;
               }
@@ -3666,6 +3751,7 @@
           }
         }
       }
+      this._bossRoar();
       this._recomputeFOV();
       // 意图预告：敌人全部行动完之后，为**下一回合**重算一遍预告。
       // 必须放在敌人行动之后 —— 放在之前，玩家看到的就不是预告而是回放。
@@ -3687,8 +3773,40 @@
      * 压力来自"窗口在关闭"，而不是"血条在漏"。
      */
     _tideTick() {
-      if (this.turn % this.diff.tideEvery !== 0) return;
+      if (this.turn % this._tidePeriod() !== 0) return;
       this._tideAdvance();
+    }
+
+    /**
+     * 当前生效的潮汐节拍长度（P4）。
+     *
+     * 拆成函数是为了让"潮汐之主在场时潮水更快"这件事**可被直接断言**，
+     * 而不是只能靠数一局里涨了几次潮去反推（那种测法会被死亡时机搅乱）。
+     *
+     * "缩短一档"的量化：难度表里 tideEvery 是 16 / 12 / 8，正好差 4 ——
+     * 那 4 就是一个"档"。所以档位直接沿用难度阶梯自己的刻度，不另发明魔数。
+     * 下限 2：再短就不叫节拍了，叫连续涨水。
+     */
+    _tidePeriod() {
+      const base = this.diff.tideEvery;
+      if (!this._bossWith('tide')) return base;
+      return Math.max(2, base - 4);
+    }
+
+    /**
+     * 场上带这种行为的 Boss（活着的那只）；总开关关着时恒为 null。
+     *
+     * 抽出来只有一个理由：三条行为的**开关语义必须完全一致**。
+     * 每条各自写一遍 `if (!this.bossFxOn)` 的话，迟早有一条漏掉 ——
+     * 而那种漏不会报错，只会表现为"这一条一直在偷偷生效"，
+     * 在平衡数据上看起来只是"分布有点怪"，根本归因不到这里。
+     */
+    _bossWith(k) {
+      if (!this.bossFxOn) return null;
+      for (const e of this.enemies) {
+        if (e.isBoss && e.bossBehavior === k) return e;
+      }
+      return null;
     }
 
     /**
@@ -3701,6 +3819,11 @@
      * waitCost='0' 时这条路径只被 _tideTick 调用，逐字等价于改造前。
      */
     _tideAdvance() {
+      /* P4 计数。口径是"**被潮汐之主加速过**的那几次节拍"，
+         不是"一局里潮汐一共推进了几次" —— 后者关着开关也是个四位数，
+         和开着开关摆在一起会被读成"关着也发生了一万次"。
+         可读计数必须是**能对着开关读**的数，否则它只是在制造读数噪声。 */
+      if (this._bossWith('tide')) this.bossFx.tide++;
       const pattern = [0, 1, 2, 3, 3, 2, 1];
       this.tidePhase = (this.tidePhase || 0) + 1;
       const prev = this.tideLevel;
@@ -3779,7 +3902,9 @@
         byDepth: {}, relicPick: {}, fightRounds: 0, lootCount: 0,
         rarity: {}, deathCause: {}, avgRelics: 0, itemPower: 0,
         // P0（v11.5）：等待与承伤的原始累加值 + 派生的等待占比
-        waits: 0, dmgTaken: 0, waitRate: 0
+        waits: 0, dmgTaken: 0, waitRate: 0,
+        // P4（v11.5）：三个 Boss 行为的可读计数
+        bossTide: 0, bossSummon: 0, bossRoar: 0
       };
       for (let i = 0; i < n; i++) {
         const seed = (opts.seedBase || 1) + i * 7919;
@@ -3807,11 +3932,15 @@
           waitCost: opts.waitCost,
           aiWait: opts.aiWait,
           roadW: opts.roadW,
-          packAnchor: opts.packAnchor
+          packAnchor: opts.packAnchor,
+          bossFx: opts.bossFx
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;
         out.waits += g.waits; out.dmgTaken += g.dmgTaken;
+        out.bossTide += g.bossFx.tide;
+        out.bossSummon += g.bossFx.summon;
+        out.bossRoar += g.bossFx.roar;
         out.byDepth[g.depth] = (out.byDepth[g.depth] || 0) + 1;
         out.avgRelics += g.relics.length;
         for (const it of g.bag) out.rarity[it.rarity] = (out.rarity[it.rarity] || 0) + 1;

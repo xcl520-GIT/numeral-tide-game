@@ -67,6 +67,8 @@
   var roadw = (parseInt(q.roadw, 10) === 1) ? 1 : 2;
   // P2（v11.5）：堆贴门位（默认 0 = 旧布点）。第 1 层始终不参与。
   var packanchor = (q.packanchor === undefined || q.packanchor === '') ? 0 : parseInt(q.packanchor, 10);
+  // P4（v11.5）：Boss 行为差异化（默认 0 = 三个 Boss 只有数值差别）。
+  var bossfx = (q.bossfx === undefined || q.bossfx === '') ? 0 : parseInt(q.bossfx, 10);
   lines.push('fumble=' + fumble + '（AI 失误率）  counterBonus=' +
     (counter === undefined ? '(默认)' : counter) + '  战斗内姿态轮换=' + (stance ? '开' : '关') +
     '  群战=' + (squad ? '开' : '关'));
@@ -78,7 +80,8 @@
       : 'b · 累积惊动（已醒的敌人免费挪一步）')) +
     '  AI刷回合=' + (aiwait ? '开' : '关（一次都不等 = 旧行为）') +
     '  路宽=' + (roadw === 1 ? '1（旧地图 · 对照）' : '2（当前基线）') +
-    '  堆贴门位=' + (packanchor ? '开' : '关（旧布点）'));
+    '  堆贴门位=' + (packanchor ? '开' : '关（旧布点）') +
+    '  Boss行为=' + (bossfx ? '开' : '关（只有数值差别）'));
 
   function fmt(o) {
     return 'winRate=' + o.winRate + '%  turns=' + o.turns + '  kills=' + o.kills +
@@ -152,12 +155,14 @@
       aiFumble: fumble, counterBonus: counter, aiStance: !!stance, squad: !!squad,
       slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold,
       cleave: !!cleave, keepPay: !!keeppay, waitCost: waitcost, aiWait: !!aiwait,
-      roadW: roadw, packAnchor: !!packanchor });
+      roadW: roadw, packAnchor: !!packanchor, bossFx: !!bossfx });
     lines.push('[' + d + '] ' + fmt(o));
     lines.push('        群战拆分 野生 ' + pct(byKind.wild) + ' (n=' + byKind.wild.n + ')' +
       '  召唤物 ' + pct(byKind.minion) + ' (n=' + byKind.minion.n + ')' +
       '  ← 达标线看的是**野生**这一列');
     lines.push('        ' + resident(o));
+    lines.push('        Boss行为 潮汐节拍 ' + o.bossTide + ' 次 | 督军召出 ' + o.bossSummon +
+      ' 只 | 渊喉吼 ' + o.bossRoar + ' 次');
     lines.push('        outcome: ' + JSON.stringify(o.outcome));
     if (o.stalls) lines.push('        STALL: ' + JSON.stringify(o.stalls));
     lines.push('        relics: ' + JSON.stringify(o.relicPick));
@@ -178,7 +183,7 @@
         aiFumble: fumble, counterBonus: counter, aiStance: !!stance, squad: !!squad,
         slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold,
         cleave: !!cleave, keepPay: !!keeppay, waitCost: waitcost, aiWait: !!aiwait,
-        roadW: roadw, packAnchor: !!packanchor
+        roadW: roadw, packAnchor: !!packanchor, bossFx: !!bossfx
       });
       lines.push('[cls:' + c + '] ' + fmt(o));
       lines.push('        ' + resident(o));

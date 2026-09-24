@@ -361,6 +361,23 @@
           popText(view.cx(view.game.px), view.cy(view.game.py) - 18,
             '-' + ev.dmg, dmgColor(ev.type, false), 14);
           break;
+        /* 渊喉的吼（P4）。新事件没有演出，玩家只会看到
+           "我莫名其妙被挪了一格" —— 那读起来像 bug，不像机制。
+           演出必须和它的性质对上：它是**空间惩罚**，不是掉血，
+           所以不弹伤害数字、不放命中音，只把"从它身下扩散出去的地板波纹"
+           画出来 —— 玩家要从画面上学到"刚才是一种推力"。 */
+        case 'roar': {
+          const bx = view.cx(ev.boss.x), by = view.cy(ev.boss.y);
+          ring(bx, by + 10, '#a04a7a', 72, 34, 5);
+          ring(bx, by + 10, '#f0a0c8', 46, 24, 3);
+          for (let i = 0; i < 22; i++) {
+            const a = Math.random() * Math.PI * 2;
+            spawn(bx + Math.cos(a) * 8, by + 10 + Math.sin(a) * 8, 1,
+              ['#a04a7a', '#5a1a3a', '#e0b0d0'], { speed: 2.6, grav: 0.06, lift: 0.6 });
+          }
+          shake(6);
+          break;
+        }
         case 'tide':
           if (ev.rising) {
             for (let i = 0; i < 40; i++) {

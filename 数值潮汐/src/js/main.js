@@ -610,6 +610,11 @@
   /** 事件 → 音效 / 粒子。战斗场景开着时，战斗事件不从这里走。 */
   function runEvents(g, before, evs) {
     if (!evs.length) return;
+    /* P4 · 渊喉的吼 = **打断移动意图**。
+       不清掉按住的键，玩家手还握着方向键，下一帧就往回走 ——
+       位移看起来像没发生（"我明明被推开了，怎么还在原地"）。
+       模型层只负责把人挪走，"意图"是界面层的事，所以这一步必须在这里做。 */
+    for (let ri = 0; ri < evs.length; ri++) if (evs[ri].kind === 'roar') state.held = {};
     FX.consume(evs, {
       cx: (x) => x * R.TILE + R.TILE / 2 - R.cam.x,
       cy: (y) => y * R.TILE + R.TILE / 2 - R.cam.y,

@@ -503,15 +503,23 @@
 
   /* Boss：每层深处镇守一只，杀掉才能开启潮汐之门 */
   const BOSSES = [
-    { id: 'tidelord', name: '潮汐之主', tier: 4,
+    /* bossBehavior 是 P4 给每个 Boss 挂的那条专属行为。
+       它同时是**唯一的开关点**：模板上不写，这只 Boss 就只有数值差别（旧行为）。
+       为什么放在数据表而不是写死在代码里：这三个值不是"规则"，
+       是**这两只怪的设定**——它们改起来应该像改血线一样轻。 */
+    { id: 'tidelord', name: '潮汐之主', tier: 4, bossBehavior: 'tide',
       shape: { body: 'ghost', w: 30, h: 30, eye: 3, color: '#4fb8d8', accent: '#1a5a72', spikes: 6, arms: 2, crown: true },
       stats: { hp: 320, atkP: 34, atkM: 30, defP: 24, defM: 24, spd: 16, leech: 0.15 },
       note: '本层的潮水由它驱动。它一死，水位就会退。' },
-    { id: 'bonelord', name: '骨潮督军', tier: 4,
+    { id: 'bonelord', name: '骨潮督军', tier: 4, bossBehavior: 'summon',
       shape: { body: 'brute', w: 30, h: 30, eye: 2, color: '#ded6c0', accent: '#8a7f66', spikes: 8, arms: 2, crown: true },
       stats: { hp: 360, atkP: 42, atkM: 12, defP: 30, defM: 18, spd: 12 },
+      /* 复用孢子母那条孵化的**同一份**机制。为什么要挂到 Boss 上：
+         它的台词本来就是"把死在潮水里的东西都叫了起来"，
+         而在此之前这句话一个字都没实现。每 4 回合一只幼体。 */
+      spawn: { every: 4, count: 1 },
       note: '它把死在潮水里的东西都叫了起来。' },
-    { id: 'deepmaw', name: '渊喉', tier: 4,
+    { id: 'deepmaw', name: '渊喉', tier: 4, bossBehavior: 'roar',
       shape: { body: 'beast', w: 32, h: 26, eye: 6, color: '#a04a7a', accent: '#5a1a3a', spikes: 10, arms: 0, crown: true },
       stats: { hp: 400, atkP: 38, atkM: 24, defP: 20, defM: 26, spd: 20, leech: 0.2 },
       note: '它吃东西的时候，整层地板都在动。' }

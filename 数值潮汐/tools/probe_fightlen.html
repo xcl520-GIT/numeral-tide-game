@@ -20,12 +20,27 @@
   var hist = {}, kind = {}, nFight = 0, nRounds = 0;
   try {
     var o = P.fight;
-    P.fight = function (e) {
+    P.fight = function (foes) {
       var r = o.apply(this, arguments);
       var rounds = (r && r.rounds && r.rounds.length) ? (r.rounds[r.rounds.length - 1].r || 0) : 0;
       hist[rounds] = (hist[rounds] || 0) + 1;
       nFight++; nRounds += rounds;
-      var k = (e && e.kind) || '?';
+      /* 口径修正（v11.5 P4 前置）——这一条以前是坏的：
+         群战落地之后 AI 走 this.fight(sq, ...)，sq 是**数组**，
+         读 (e && e.kind) 拿到的是 undefined，于是所有战斗都落进 '?'，
+         "首领均轮数" 这个数根本复现不出来。
+         另外：玩家撞 Boss 时踩到的往往是 **Boss 旁边的小怪**，
+         所以"打 Boss 的那一场"的判据必须是"这一场里**有** Boss"，
+         而不是"第一只就是 Boss"。 */
+      var list = Array.isArray(foes) ? foes : [foes];
+      var k = 'normal';
+      for (var fi = 0; fi < list.length; fi++) {
+        var f = list[fi];
+        if (!f) continue;
+        if (f.isBoss) { k = 'boss'; break; }
+        if (k === 'normal' && (f.kind === 'elite' || f.kind === 'treasure')) k = f.kind;
+      }
+      if (!list.length) k = '?';
       if (!kind[k]) kind[k] = { n: 0, sum: 0, max: 0, one: 0 };
       kind[k].n++; kind[k].sum += rounds; kind[k].one += (rounds <= 1 ? 1 : 0);
       if (rounds > kind[k].max) kind[k].max = rounds;

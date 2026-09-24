@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>tide-probe-ai-exit</title>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* ============================================================
+   定点探针：无头 AI 在「站在潮汐之门上、本体还活着」时会不会无事可做。
+
+   为什么要单开一条（而且是在 P4 的验收里跑）：P4 的隔离探针在 2700 局里
+   还剩 1 例异常终止，现场是 pos == exit 且 bossAlive == true，
+   40 个回合的 trace 全是 32,10# （# = _autoStep() 返回 false）。
+   要判断它是"P4 的新缺陷"还是"P4 只是把它撞出来了"，必须**直接按一下那个状态**。
+
+   机制（读 _autoStep 得到的）：
+     if (!g && this.layerKills < D.PROGRESSION.leaveLayerAfterKills) { 找最近的敌人 }
+     if (!g) g = { type:'exit', ... };          // 刷够了就直接去门
+     ...
+     if (g.x === this.px && g.y === this.py) { this.aiGoal = null; return false; }
+   于是"刷够了 + 站到门上 + 门因为本体还活着而不开" = AI 永远返回 false。
+   这条路径**和 P4 一个字的关系都没有** —— 所以本探针不传 bossFx，走默认（关）。
+
+   三个状态各按一下：
+     A 新层（没刷够）+ 站在门上 + 本体活着  → 应当有事可做（去找怪打）
+     B 刷够了    + 站在门上 + 本体活着      → 预期无事可做（盲点）
+     C 刷够了    + 站在门上 + 本体已死      → 预期立刻下楼（对照，证明 B 不是"门上不让做事"）
+   ============================================================ */
+(function () {
+  var lines = [];
+  function say(s) { lines.push(s); }
+  function mk(i) {
+    return new TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 500 + i * 7919 });
+  }
+  try {
+    var TH = TideData.PROGRESSION.leaveLayerAfterKills;
+    var aActed = 0, aIdle = 0, bActed = 0, bIdle = 0, cActed = 0, cDesc = 0, n = 0;
+    var bSample = null;
+    for (var i = 0; i < 20; i++) {
+      // ---- A ----
+      var gA = mk(i);
+      gA.bossAlive = true;
+      gA.px = gA.exit.x; gA.py = gA.exit.y; gA._enterTile();
+      if (gA.status !== 'playing' || gA.hasPendingRelic() || gA.hasPendingSkill()) continue;
+      n++;
+      if (gA._autoStep()) aActed++; else aIdle++;
+
+      // ---- B：刷够了 ----
+      var gB = mk(i);
+      gB.bossAlive = true;
+      gB.layerKills = TH;                 // 「本层刷够了」= 直接去门
+      gB.px = gB.exit.x; gB.py = gB.exit.y; gB._enterTile();
+      var bOk = gB._autoStep();
+      if (bOk) bActed++; else bIdle++;
+      if (!bOk && !bSample) {
+        var nd = -1;
+        for (var k = 0; k < gB.enemies.length; k++) {
+          var d = Math.abs(gB.enemies[k].x - gB.px) + Math.abs(gB.enemies[k].y - gB.py);
+          if (nd < 0 || d < nd) nd = d;
+        }
+        bSample = 'depth=' + gB.depth + ' pos=' + gB.px + ',' + gB.py +
+          ' exit=' + gB.exit.x + ',' + gB.exit.y + ' 场上怪=' + gB.enemies.length +
+          ' 最近怪距离=' + nd + ' 目标=' + JSON.stringify(gB.aiGoal);
+      }
+
+      // ---- C：同一个状态，但本体已死 ----
+      var gC = mk(i);
+      gC.bossAlive = false;
+      gC.layerKills = TH;
+      gC.px = gC.exit.x; gC.py = gC.exit.y;
+      var dC = gC.depth;
+      if (gC._autoStep()) cActed++;
+      if (gC.depth > dC) cDesc++;
+    }
+    say('每组 20 局（可用的 ' + n + ' 局）  刷够怪的门槛 leaveLayerAfterKills=' + TH);
+    say('A 新层   + 门上 + 本体活着 → 有动作 ' + aActed + ' / 无动作 ' + aIdle);
+    say('B 刷够了 + 门上 + 本体活着 → 有动作 ' + bActed + ' / 无动作 ' + bIdle);
+    say('C 刷够了 + 门上 + 本体已死 → 有动作 ' + cActed + ' / 真的下楼 ' + cDesc);
+    if (bSample) say('B 的现场样本：' + bSample);
+    if (bIdle > 0 && bActed === 0 && aIdle === 0 && cDesc > 0) {
+      say('结论：盲点确认，且**与 P4 无关** —— 这条断言是在 bossFx 默认关的情况下跑出来的。');
+      say('      机制：「本层刷够怪 → 直接去潮汐之门」这条捷径没有把"本体还活着、门不会开"算进去，');
+      say('      于是 AI 站在门上反复返回 false（playHeadless 记成 stall）。');
+      say('      P4 的作用只是**提高撞见率**：吼把玩家推来推去，本体活到"刷够"之后的概率变大了。');
+    } else {
+      say('结论：与预期不符，需要重读 _autoStep（不要照抄上面的说法）。');
+    }
+    say('EXITDONE');
+  } catch (e) {
+    say('EXITFAIL ' + (e && e.stack ? e.stack : String(e)));
+  }
+  document.getElementById('out').textContent = lines.join('\n');
+})();
+</script>
+</body>
+</html>
