@@ -4889,6 +4889,52 @@ try {
     }
   } catch (e55) { fail('P5 速度碾压阈值测试异常: ' + (e55 && e55.stack ? e55.stack : e55)); }
 
+  /* ---------- 56. v11.9：深层的潮水（第 3 层起每场按最大生命扣血）----------
+     为什么单开一节：这条机制的三个失效方式**全都不可见** ——
+       ① 层数判断写错（第 2 层就开始扣）：深渊整体变难，而"变难"看不出是它干的；
+       ② 忘了"不写字段=旧行为"：休闲/标准跟着一起被扣，三档基线全漂；
+       ③ 扣血量按**当前血**而不是最大血算：残血时扣得少，
+          机制恰好在该起作用的时候失效（"残血反倒更安全"，与设计意图完全相反）。
+     所以两头都要钉：**该扣的扣对数额，不该扣的一分不扣**。 */
+  try {
+    var mkC56 = function (diffKey, depth) {
+      var g = new w.TideCore.Game({
+        classKey: 'warlord', difficulty: diffKey, seed: 5611, meta: null
+      });
+      g.depth = depth;
+      g.hp = 1000;                     // 当前血给足，免得直接被打死（这一节只看扣多少）
+      return g;
+    };
+    // ① 深渊第 3 层：应当按**最大生命**的 6% 扣
+    var gA56 = mkC56('abyss', 3);
+    var mx56 = gA56.stats().hp, before56 = gA56.hp;
+    gA56._deepCorrupt();
+    var expect56 = Math.round(mx56 * 0.06);
+    var got56 = before56 - gA56.hp;
+    // ② 深渊第 2 层：一分不扣
+    var gB56 = mkC56('abyss', 2);
+    var b2before = gB56.hp;
+    gB56._deepCorrupt();
+    // ③ 标准的第 3 层：没有这个字段 → 一分不扣（三档基线不动的前提）
+    var gC56 = mkC56('standard', 3);
+    var c3before = gC56.hp;
+    gC56._deepCorrupt();
+
+    if (got56 !== expect56) {
+      fail('v11.9：深渊第 3 层的深层潮水扣了 ' + got56 + '，应当是按最大生命 ' +
+        mx56 + ' 的 6% = ' + expect56 + '（按当前血扣会让残血反而更安全）');
+    } else if (gB56.hp !== b2before) {
+      fail('v11.9：深渊第 2 层不该扣血（v11.8 已证明前两层不该再动），实际扣了 ' +
+        (b2before - gB56.hp));
+    } else if (gC56.hp !== c3before) {
+      fail('v11.9：标准档不该有深层潮水（它没写 deepCorrupt 字段），实际扣了 ' +
+        (c3before - gC56.hp) + ' —— 那三档基线会整体漂移');
+    } else {
+      ok('v11.9：深层潮水只作用于第 3 层起的深渊 —— 第 3 层扣 ' + got56 +
+        '（最大生命 ' + mx56 + ' 的 6%），第 2 层与标准档各扣 0');
+    }
+  } catch (e56) { fail('v11.9 深层潮水测试异常: ' + (e56 && e56.stack ? e56.stack : e56)); }
+
   finish();
 }
 
