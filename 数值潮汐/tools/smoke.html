@@ -4847,6 +4847,48 @@ try {
   } catch (e) {
     fail('测试脚本异常: ' + (e && e.stack ? e.stack : e));
   }
+  /* ---------- 55. P5（v11.7）：速度碾压阈值按难度走 ----------
+     为什么单开一节：这是本项目**唯一**一处"同一个机制在不同难度取不同阈值"
+     的地方，而它失效时极难看见 —— 阈值没生效游戏照样能打完，
+     只是深渊里"一轮打完"的比例高出一截（实测 39.5% vs 32.8%）。
+     断言必须同时盯两头，少一头就等于没测：
+       ① 深渊：速度差 20（≥18 但 <26）**不再**多打一次；
+       ② 标准：同一个速度差 20 **仍然**多打一次 ——
+          这是"影响面被锁在深渊"的唯一证据（三档逐位比对的冒烟版）。
+     观测口径：只数第 1 轮里玩家打出去的、真掉了血的条目。 */
+  try {
+    var GAP55 = 20;                 // 介于全局 18 与深渊 26 之间
+    var swings55 = function (diffKey) {
+      var g55 = new w.TideCore.Game({
+        classKey: 'warlord', difficulty: diffKey, seed: 5501, meta: null
+      });
+      var e55 = g55._makeEnemy(g55.px + 2, g55.py, 1);
+      e55.maxHp = e55.hp = 99999;   // 打不死：这一节只看"一轮里我出了几次手"
+      e55.stats.leech = 0;
+      e55.stats.spd = g55.stats().spd - GAP55;   // 只把速度差做成 GAP55，其余照旧
+      g55.enemies = [e55];
+      var L55 = g55._fightBegin([e55]);
+      var rl55 = L55.duel.step('p');             // 走真实链路推进一轮
+      var n55 = 0;
+      for (var i55 = 0; i55 < rl55.length; i55++) {
+        if (rl55[i55].from === g55.cls.name && (rl55[i55].dmg || 0) > 0 && !rl55[i55].splash) n55++;
+      }
+      return n55;
+    };
+    var nStd55 = swings55('standard');
+    var nAby55 = swings55('abyss');
+    if (nStd55 < 2) {
+      fail('P5：标准档速度差 ' + GAP55 + ' 应当触发碾压（每轮多打一次），实测 ' + nStd55 +
+        ' 次 —— 那说明阈值没走全局默认 18，"休闲/标准不受影响"这个前提就断了');
+    } else if (nAby55 > 1) {
+      fail('P5：深渊速度差 ' + GAP55 + ' 不该再触发碾压（阈值应为 26），实测 ' + nAby55 +
+        ' 次 —— abyss.speedGap 没生效，深渊的"一轮结束"会停在 39.5%');
+    } else {
+      ok('P5：速度碾压阈值按难度走 —— 速度差 ' + GAP55 + ' 时标准 ' + nStd55 +
+        ' 次 / 深渊 ' + nAby55 + ' 次（深渊阈值 26 生效，其余档走全局 18）');
+    }
+  } catch (e55) { fail('P5 速度碾压阈值测试异常: ' + (e55 && e55.stack ? e55.stack : e55)); }
+
   finish();
 }
 
