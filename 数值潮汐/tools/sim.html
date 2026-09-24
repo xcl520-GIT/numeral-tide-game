@@ -161,16 +161,49 @@
   function pct(g) { return g.n ? Math.round(g.sq / g.n * 100) + '%' : '-'; }
   function pct1() { return round1.n ? Math.round(round1.one / round1.n * 1000) / 10 + '%' : '-'; }
   function avgFr() { return fr.n ? Math.round(fr.rounds / fr.n * 100) / 100 : 0; }
-  /* 四个常驻指标钉成一行 —— 趋势线要能一眼扫过去，而不是每次重新解释。
-     第 4 项按难度各自显示，不只深渊有（休闲 22 / 标准 111 也都是信息）。 */
-  function resident(o) {
+  /* 常驻指标⑤「后半程压力」（v11.10）。
+     口径 = **到过第 3 层的局里，有多少死在第 3、4 层**。
+
+     为什么必须是条件概率，而不是"第 3 层的死亡数"：
+     v11.8 量出深渊的形状是「**前重后空**」——难度全堆在前两层，
+     后半程死者寥寥。绝对数会被"有多少人走到那里"稀释：
+     v11.9 把第 3 层死亡从 4 抬到 18 时，**到过第 3 层的局数一点没动**
+     （89 局），所以分母必须钉死在"到达过"上。
+
+     ⚠ 两个口径坑，都在这里堵住：
+     ① 通关局也写在 byDepth 里 —— core.js 记的是 g.depth，通关时它就是
+        该难度的最大层（休闲 3 / 标准 4 / 深渊 5）。所以必须先按 depth
+        把赢家摘出来，否则"死在第 3-4 层"会凭空多出一整批赢家。
+     ② 分母是 **endDepth>=3** 的局，不是"第 3 层的死亡数 + 赢家"：
+        后者在深渊恰好也是 89（因为第 4 层没人死），但一旦第 4 层死了人
+        就会漏算 —— v11.8 那组 `{3:4, 4:1}` 正是这种形状。
+
+     这里只读 simulate 已返回的聚合，不碰模型 —— 量具留在工具里，
+     理由和上面那两条统计一样：模型一旦开始依赖"谁在看着它"，
+     平衡数据就不干净了。 */
+  function deepPressure(o, depth) {
+    var wins = (o.outcome && o.outcome.win) || 0;
+    var reach3 = 0;
+    for (var k in o.byDepth) if (+k >= 3) reach3 += o.byDepth[k];
+    var dead34 = ((o.byDepth['3'] || 0) - (depth === 3 ? wins : 0)) +
+      ((o.byDepth['4'] || 0) - (depth === 4 ? wins : 0));
+    return { dead34: dead34, reach3: reach3,
+      pct: reach3 ? Math.round(dead34 / reach3 * 1000) / 10 : 0 };
+  }
+  /* 常驻指标钉成一行 —— 趋势线要能一眼扫过去，而不是每次重新解释。
+     第 4 项（第1层死亡）与第 5 项（后半程）按难度各自显示，不只深渊有
+     （休闲 22 / 标准 111 也都是信息）；后半程要配 (死亡/到达) 一起看，
+     否则单看百分比分不清"压力变大"和"分母变小"。 */
+  function resident(o, depth) {
+    var dp = deepPressure(o, depth);
     return '常驻 一轮结束 ' + pct1() + ' (n=' + round1.n + ')' +
       ' | 群战 野生 ' + pct(byKind.wild) + ' 召唤物 ' + pct(byKind.minion) +
       ' | 等待 ' + o.waitRate + '% | 承伤/局 ' + o.dmgTaken +
       ' | 战斗 ' + avgFr() + ' 轮/场' +
       ' | 对决魂技 ' + o.duelSkills + ' 次' +
       ' | 撤离 ' + o.flees + ' 次' +
-      ' | 第1层死亡 ' + (o.byDepth['1'] || 0);
+      ' | 第1层死亡 ' + (o.byDepth['1'] || 0) +
+      ' | 后半程(死3-4/到过3) ' + dp.pct + '% (' + dp.dead34 + '/' + dp.reach3 + ')';
   }
 
   var t0 = Date.now();
@@ -190,7 +223,7 @@
     lines.push('        群战拆分 野生 ' + pct(byKind.wild) + ' (n=' + byKind.wild.n + ')' +
       '  召唤物 ' + pct(byKind.minion) + ' (n=' + byKind.minion.n + ')' +
       '  ← 达标线看的是**野生**这一列');
-    lines.push('        ' + resident(o));
+    lines.push('        ' + resident(o, TideData.DIFFICULTIES[d].depth));
     lines.push('        Boss行为 潮汐节拍 ' + o.bossTide + ' 次 | 督军召出 ' + o.bossSummon +
       ' 只 | 渊喉吼 ' + o.bossRoar + ' 次');
     lines.push('        outcome: ' + JSON.stringify(o.outcome));
@@ -218,7 +251,7 @@
         flee: !!flee, fleeAi: !!fleeai
       });
       lines.push('[cls:' + c + '] ' + fmt(o));
-      lines.push('        ' + resident(o));
+      lines.push('        ' + resident(o, TideData.DIFFICULTIES[diffs[0]].depth));
     });
   }
   lines.push('elapsed=' + (Date.now() - t0) + 'ms  n=' + n);
