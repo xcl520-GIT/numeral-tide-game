@@ -1960,6 +1960,12 @@
      */
     newDuel(A, B, af, bf, aFirst, aInfo, bInfo) {
       const g = this, K = this.K, C = D.COMBAT;
+      /* P5（v11.7）：速度碾压的阈值。**难度可以自己覆盖** —— 见 data.js
+         里 abyss.speedGap 的那段注释（实测：速度差 ≥18 时一轮结束率 76%，
+         <18 时只有 19.8%，差 56.2pp；而"一轮结束"不达标的**只有深渊**）。
+         不写这一档就是全局默认 C.speedGap —— 于是"没有覆盖"与旧行为
+         **逐位相同**，这正是这个写法唯一的对照口径。 */
+      const SG = num(this.diff && this.diff.speedGap) || C.speedGap;
       // 1vN 的入口（v11.4-a）。B / bf / bInfo 允许是单个（旧调用点、
       // 冒烟里的合成对决、以及所有"只应有一只怪"的路径），也允许是等长数组。
       // 单元素必须与旧的单值调用**逐位相同** —— 第 1 步的验收标准就是这个，
@@ -2408,7 +2414,7 @@
             if (dst.hp <= 0 && (allFoesDown() || a.hp <= 0)) break;
             // 速度碾压：快的一方多打一次
             const gap = num(src.st.spd) - num(dst.st.spd);
-            if (gap >= C.speedGap && src.hp > 0 && dst.hp > 0) strike(src, dst, t, fx);
+            if (gap >= SG && src.hp > 0 && dst.hp > 0) strike(src, dst, t, fx);
             // 连击词条：达标就每轮两次
             if (num(src.flags.doubleAtSpd) > 0 && num(src.st.spd) >= num(src.flags.doubleAtSpd) &&
                 src.hp > 0 && dst.hp > 0) strike(src, dst, t, fx);

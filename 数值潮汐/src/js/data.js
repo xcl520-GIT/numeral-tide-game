@@ -587,7 +587,18 @@
       key: 'abyss', name: '深渊', tag: '潮水不留情',
       blurb: '敌人成长极快、精英成群，潮水每 8 回合就涨一次。',
       depth: 5, enemyScale: 0.250, enemyMul: 1.85, healAfterWin: 0.024,
-      tideEvery: 8, healFountain: 0, tierBoost: 1, extraLife: 0
+      tideEvery: 8, healFountain: 0, tierBoost: 1, extraLife: 0,
+      /* P5（v11.7）：速度碾压的阈值 —— 深渊比全局（18）更宽。
+         为什么只有深渊需要：全局 18 的意思是"快的一方每轮多打一次"
+         （core.js 的 step），而游侠基础速度就是 26，对杂兵（速度 4~16）
+         **开局**就踩线。实测速度差 ≥18 的一轮结束率 76%、<18 只有 19.8%
+         （差 56.2pp），而三档里"一轮结束"不达标的只有深渊
+         （休闲 27% / 标准 29.8% / 深渊 39.5%，线是 35%）。
+         抬到 26 之后深渊 39.5% → 32.8%（达标），且**休闲/标准逐位不变**
+         （实测三种阈值下都逐位相同）。
+         代价已记账：深渊通关率 −2.0pp、第 1 层死亡 +9（n=200 口径）。
+         **删掉这一行即回退**（回到全局 18）。 */
+      speedGap: 26
     }
   };
   const DIFF_ORDER = ['casual', 'standard', 'abyss'];
