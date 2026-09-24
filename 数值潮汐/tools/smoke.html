@@ -4439,19 +4439,20 @@ try {
     fail('P3 第二步：重击没有兑现 ×1.6（开着 ' + dmgA53 + ' vs 关着 ' + dmgB53 + '）');
   } else if (used53.ok || used53.reason !== 'used') {
     fail('P3 第二步：同一场对决里放第二次没被挡住（' + JSON.stringify(used53) + '）');
-  } else if (cd53 !== cdFull53) {
-    fail('P3 第二步：默认口径下冷却动了（挂上时 ' + cdFull53 + '，打完一轮成了 ' + cd53 +
-      '）—— 默认必须是"冷却不随战斗轮走"（旧口径）');
+  } else if (cd53 !== cdFull53 - 1) {
+    fail('P3 第二步：冷却没有按战斗轮走（挂上时 ' + cdFull53 + '，打完一轮应为 ' +
+      (cdFull53 - 1) + '，实际 ' + cd53 + '）—— v11.6 起默认口径是"随战斗轮走"');
   } else {
     ok('P3 第二步：裂地斩 → 本轮伤害 ' + dmgA53 + ' vs 关掉开关 ' + dmgB53 + '（×1.6 兑现）' +
-      '；同场第二次被挡（used）；冷却停在 ' + cd53 + '（默认口径 = 旧行为）');
+      '；同场第二次被挡（used）；冷却 ' + cdFull53 + ' → ' + cd53 + '（默认口径：随战斗轮走）');
   }
 
-  /* ---- ③b 口径开关真的接上了：duelCd=true 时，打完一轮冷却少 1 ----
-     少了这一条，上面那句"冷却不动"是**假绿** ——
-     一个把 duelCd 读漏、永远不减的实现照样能让它通过。 */
+  /* ---- ③b 口径的另一半：duelCd=false 时打完一轮冷却**不动** ----
+     少了这一条，上面那句"减了 1"是**假绿** ——
+     一个把 duelCd 读漏、永远都减的实现照样能让它通过。
+     两半都钉住，才说明这个开关真的在起作用。 */
   var gcd53 = new w.TideCore.Game({
-    classKey: 'warlord', difficulty: 'standard', seed: 86601, duelCd: true
+    classKey: 'warlord', difficulty: 'standard', seed: 86601, duelCd: false
   });
   var egc53 = gcd53._makeEnemy(gcd53.px + 2, gcd53.py, 1);
   gcd53.enemies = [egc53];
@@ -4459,12 +4460,11 @@ try {
   var gcFull53 = gcd53.skill().cd;
   gcd53.duelUseSkill();
   gcd53.duelRound('p', 0);
-  if (gcd53.skillCd !== gcFull53 - 1) {
-    fail('P3 第二步：duelCd=true 时冷却没有随战斗轮走（挂上时 ' + gcFull53 +
-      '，打完一轮成了 ' + gcd53.skillCd + '，应为 ' + (gcFull53 - 1) + '）');
+  if (gcd53.skillCd !== gcFull53) {
+    fail('P3 第二步：duelCd=false 时冷却仍然动了（挂上时 ' + gcFull53 +
+      '，打完一轮成了 ' + gcd53.skillCd + '，应停在原值）—— 对照必须干净');
   } else {
-    ok('P3 第二步：口径开关接上了 —— duelCd=true 时冷却 ' + gcFull53 + ' → ' + gcd53.skillCd +
-      '（随战斗轮走一格）');
+    ok('P3 第二步：口径对照干净 —— duelCd=false 时冷却停在 ' + gcd53.skillCd + '（旧口径）');
   }
 
   /* ---- ④ 潮语洪流（破姿）：对方硬化物理时，无视姿态按弱化侧结算 ----
@@ -4791,7 +4791,11 @@ try {
     ok('撤离：flee=false → 按 4 无效、duelFlee 返回 off（开关关掉 = 旧行为）');
   }
 
-  /* ---- ⑤ AI 判据：两个方向都要成立（只验"会撤"等于没验） ---- */
+  /* ---- ⑤ AI 判据：两个方向都要成立（只验"会撤"等于没验） ----
+     判据是"这一轮会被打死就撤"。所以两端的构造是：
+       hp=1         → 任何一只敌人的一击都 ≥ 1 → 必撤
+       hp=100000    → 怎么算都打不死     → 不撤
+     这两条同时成立才说明它读的是**剩余生命**，而不是一个常数。 */
   var E54 = open54(mk54(88013));
   var dFifth = E54.L.duel, keepHp54 = dFifth.a.hp;
   dFifth.a.hp = 1;
@@ -4805,8 +4809,38 @@ try {
   } else if (wontFlee54) {
     fail('撤离：AI 判据单向失灵 —— 十万点血还想着撤');
   } else {
-    ok('撤离：AI 判据双向成立（残血必撤 / 血厚不撤，阈值 ' +
-      Math.round(FL.aiDmgFrac * 100) + '%）');
+    ok('撤离：AI 判据双向成立（会被打死就撤 / 打不死就不撤，阈值 ' +
+      FL.aiFleeAt + '× 剩余生命）');
+  }
+  /* ---- ⑥ 撤离有冷却（v11.6）----
+     这一条钉的是一个**真的发生过**的洞：终检在新默认档的深渊量到 1 例 timeout
+     （这之前连续多轮都是 0 stall / 0 timeout）。现场是玩家 3 点血、身边 1 只怪、
+     trace 两格震荡：每回合都撤，而脱接触每次都让那只怪"这一回合不追" ——
+     于是"每回合都撤"= 每回合都不挨打，一局被拖到回合上限。
+     冷却不是节奏惩罚，是把"应急出口"这个定位钉死。
+
+     ⚠ 冷却的**范围**要说清楚：它按**局**算，不是按场算。
+     所以这里验的是"同一局里换一场对决也撤不了" ——
+     建新的一局来试是错的（那本来就会清零，什么也试不出来）。 */
+  var G54 = open54(mk54(88021));
+  var fr1_54 = G54.g.duelFlee(G54.L.duel, G54.L.enemies);
+  var cdSet54 = G54.g.fleeCd;
+  var e2_54 = G54.g._makeEnemy(G54.g.px + 1, G54.g.py, 1);
+  G54.g.enemies = [e2_54];
+  var L2_54 = G54.g._fightBegin([e2_54]);
+  var fr2_54 = G54.g.duelFlee(L2_54.duel, L2_54.enemies);
+  G54.g.endTurn();
+  var cdAfter54 = G54.g.fleeCd;
+  w.TideUI.closeBattle();
+  if (!fr1_54.ok || cdSet54 !== w.TideData.FLEE.cd) {
+    fail('撤离：撤完没有设上冷却（拿到 ' + cdSet54 + '，应为 ' + w.TideData.FLEE.cd + '）');
+  } else if (fr2_54.reason !== 'cd') {
+    fail('撤离：同一局里换一场对决仍然能撤（' + JSON.stringify(fr2_54) + '）—— ' +
+      '冷却必须是**按局**的，否则"每回合都撤"的免伤循环还在');
+  } else if (cdAfter54 !== w.TideData.FLEE.cd - 1) {
+    fail('撤离：冷却没有按回合递减（' + w.TideData.FLEE.cd + ' → ' + cdAfter54 + '）');
+  } else {
+    ok('撤离：冷却 ' + w.TideData.FLEE.cd + ' 回合（同一局里换一场也挡得住），按回合递减到 ' + cdAfter54);
   }
 } catch (e) { fail('P3 撤离测试异常: ' + (e && e.stack ? e.stack : e)); }
 
