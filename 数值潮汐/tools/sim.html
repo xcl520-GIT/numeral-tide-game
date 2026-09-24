@@ -77,16 +77,18 @@
   // 冷却口径：一场对决里的每一轮，冷却也走一格（默认 1）。
   // 拆出来是因为实测它自己就值 +1.6/+6.6/+4.3pp —— 那笔账必须单独算，
   // 不能记在"魂技进对决"头上（那个入口当时被用了 0 次）。
-  // ⚠ 默认 **0**：它单独就值 +1.6/+6.6/+4.3pp（一次难度下调），
-  // 而那笔账不该混进"魂技进对决"里 —— 传 1 才打开，用来单独量它。
-  var duelcd = (q.duelcd === undefined || q.duelcd === '') ? 0 : parseInt(q.duelcd, 10);
+  // v11.6 起默认 **1**（口径转正，已记账）。传 0 回到旧口径 ——
+  // 那是它唯一的对照，也是"改造前的数还能复现"这件事的入口。
+  var duelcd = (q.duelcd === undefined || q.duelcd === '') ? 1 : parseInt(q.duelcd, 10);
   // AI 贴身留手（默认 0 = 旧行为：地图上照放）。
   // 实测它值 −6.4/−4.4/−9.7pp：地图上的裂地斩是"免战"，收起来就逃不掉了。
   var duelai = (q.duelai === undefined || q.duelai === '') ? 0 : parseInt(q.duelai, 10);
   // P3 第三步（v11.5）：撤离。两个开关，和 P3 第二步同一个形状：
   //   flee=0    关掉**玩家入口**（默认 1）。它只往菜单加一个动作，模拟器不碰界面，
   //             所以默认档的平衡逐位不变 —— 玩法入口和 AI 策略必须分开。
-  //   fleeai=1  无头 AI 也会撤（默认 0 = 死战到底 = 旧行为）。
+  //             v11.6 定稿：**默认 0**（AI 不主动撤 = 死战到底）。
+  //             判据重定 / 撤完脱离 / 撤离冷却三件都做了，但实测 AI 主动撤净亏
+  //             −5.7 / −3.3 / −3.0pp（cd=1 那两格对比）—— 传 1 可复现。
   var flee = (q.flee === undefined || q.flee === '') ? 1 : parseInt(q.flee, 10);
   var fleeai = (q.fleeai === undefined || q.fleeai === '') ? 0 : parseInt(q.fleeai, 10);
   lines.push('fumble=' + fumble + '（AI 失误率）  counterBonus=' +
@@ -103,9 +105,9 @@
     '  堆贴门位=' + (packanchor ? '开' : '关（旧布点）') +
     '  Boss行为=' + (bossfx ? '开' : '关（只有数值差别）') +
     '  对决魂技=' + (duelskill ? '开（默认）' : '关（只在地图上放 · 对照）') +
-    '  冷却随战斗轮=' + (duelcd ? '走' : '不走（默认 · 旧口径）') +
+    '  冷却随战斗轮=' + (duelcd ? '走（默认）' : '不走 · 旧口径（对照）') +
     '  AI留手=' + (duelai ? '开' : '关（默认 · 旧行为）') +
-    '  撤离=' + (flee ? (fleeai ? '开 + AI会撤' : '开（默认 · 仅玩家）') : '关'));
+    '  撤离=' + (flee ? (fleeai ? '开 + AI会撤' : '开 · 仅玩家（默认）') : '关'));
 
   function fmt(o) {
     return 'winRate=' + o.winRate + '%  turns=' + o.turns + '  kills=' + o.kills +

@@ -2231,9 +2231,13 @@
     id: 'flee', keys: ['4'], flee: true,
     label: '撤离',
     enabled: function (ctx) {
-      return !!(ctx.duel && ctx.game.fleeOn && !ctx.duel.fled && !ctx.duel.finished);
+      return !!(ctx.duel && ctx.game.fleeOn && ctx.game.fleeCd <= 0 &&
+        !ctx.duel.fled && !ctx.duel.finished);
     },
     info: function (ctx) {
+      /* 冷却那一格必须说出来：撤离现在有 cd（v11.6），
+         灰着一个不解释的按钮，玩家只会以为界面坏了。 */
+      if (ctx.game.fleeCd > 0) return '冷却 ' + ctx.game.fleeCd + ' 回合';
       return '收益减半 · 潮水 +' + D.FLEE.tideBeat + ' 拍';
     },
     run: function (ctx, api) { api.flee(); }

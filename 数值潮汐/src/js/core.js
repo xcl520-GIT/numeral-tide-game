@@ -307,7 +307,10 @@
          _fightRoundTick 里敌人的行动时钟同一个理由），但"口径对不对"
          和"要不要现在改难度"是两件事 —— 后者归用户拍板，所以开关留着、
          默认按兵不动。 */
-      this.duelCdOn = (opts.duelCd === undefined) ? false : !!opts.duelCd;
+      /* v11.6 起**默认 1**（用户拍板）：口径转正。
+         实测它单独值 +1.6 / +6.6 / +4.3pp —— 那是一次难度下调，已如实记账，
+         并留了 `?duelcd=0` 做对照：改造前的每一个数都还能被复现。 */
+      this.duelCdOn = (opts.duelCd === undefined) ? true : !!opts.duelCd;
       /* AI 会不会"贴身留手"（把技能省下来给对决）。默认 **0** = 旧行为：地图上照放。
          实测（n=300×3，duelSkill=1 & duelCd=0）这只手值 −6.4 / −4.4 / −9.7pp ——
          也就是说它现在是**有害**的，而且原因很具体：地图上的裂地斩同时给了
@@ -325,6 +328,18 @@
            fleeAi AI 会不会自己撤（默认 **0** = 旧行为：死战到底）。
                   它单独值多少只能靠对照量，见 sim.html 的 ?fleeai=1。 */
       this.fleeOn = (opts.flee === undefined) ? true : !!opts.flee;
+      /* ⚠ v11.6 定稿：**默认 0**（AI 不主动撤 = 死战到底）。
+         判据重定、撤完脱离、撤离冷却三件都做了，机制与断言都齐 —— 但实测
+         AI 主动撤是**净亏**：
+             cd=1, fleeai=0  72.7 / 42.3 / 29.3
+             cd=1, fleeai=1  67.0 / 39.0 / 26.3   → −5.7 / −3.3 / −3.0pp
+             cd=0, fleeai=1  56.0 / 32.3 / 24.7
+         之前量到的"接近中性"（−2.0/−0.6/−1.0）是靠**没有冷却**换来的，
+         而那正是免伤循环（终检那 1 例 timeout）的来源 —— 冷却一上，净亏就露出来了。
+         根因还是那条：这里撤离换不到**可靠**的安全（战斗从相邻开始，
+         推开一格 + 一回合不追，而场上有二十几只，下一回合换一只照样贴上来），
+         代价（整场收益 + 一节拍潮水 + 3 回合不能再撤）却是确定的。
+         所以机制全留、默认不启用；打开 `?fleeai=1` 就能复现上面三个数。 */
       this.fleeAiOn = !!opts.fleeAi;
 
       this.seed = (opts.seed === undefined || opts.seed === null)
@@ -413,7 +428,14 @@
       this.duelSkills = 0;
       /* 一局里撤了几次（纯计数、不参与判定，但必须在 reset 里声明 ——
          给定型对象补字段会触发隐藏类迁移，本项目踩过两次）。 */
-      this.flees = 0;        // 一局里放过几次魂技（平衡分析用）
+      this.flees = 0;
+      /* 撤离之后的"脱离期"（v11.6）：还剩几回合要专心跑开。AI 用，玩家用不到。
+         **必须在这里声明** —— 它每回合开头都要读一次，等第一次用到再挂上去
+         会触发隐藏类迁移（本项目踩过两次，整局慢 3 倍）。 */
+      this.retreatTurns = 0;
+      /* 撤离的冷却剩余回合（v11.6）。和 skillCd 同一类：在 endTurn 里递减。
+         **必须在这里声明**（热路径字段，同 retreatTurns 的理由）。 */
+      this.fleeCd = 0;        // 一局里放过几次魂技（平衡分析用）
       this.freeMoves = 0;        // 免费行动次数（疾影）—— 不推进潮汐，敌人也不动
       this.buffs = [];           // 临时增益（魂技），随回合递减
       // 默认出手类型 = 这个职业**基础双攻更高**的那一路。
@@ -2831,7 +2853,13 @@
         /* 撤离优先于放技能：都是 CD/收益尺度的决定，但"这一轮会被打残"
            比"这一轮多打一截"更紧急，而且撤了就轮不到技能了 ——
            顺序反了会先花掉冷却再撤退，那是纯粹的白给。 */
-        if (g.fleeAiOn && g.fleeOn && !d.fled && g._shouldFlee(d)) g.duelFlee(d, list);
+        if (g.fleeAiOn && g.fleeOn && !d.fled && g._shouldFlee(d)) {
+          /* 撤完必须**接着跑**（v11.6）。少了这一句就是"撤离循环"：
+             贴着敌人 → 下一回合又判"下一击会死" → 又撤。
+             实测 casual 25 次/局里的绝大多数都是同一个局面被反复撤 ——
+             那不是"AI 会撤退"，那是 AI 卡住了。 */
+          if (g.duelFlee(d, list).ok) g.retreatTurns = D.FLEE.aiRetreat;
+        }
         else if (g.duelSkillOn && !d.used && g.skillCd <= 0) g.duelUseSkill(d);
         return lastPick;
       };
@@ -3820,6 +3848,10 @@
       if (!this.fleeOn) return { ok: false, reason: 'off' };
       if (d.fled) return { ok: false, reason: 'fled' };
       if (d.finished) return { ok: false, reason: 'over' };
+      /* 冷却（v11.6）。**没有它就是一个免伤循环**：每回合都能撤，
+         而脱接触每次都让那只怪"这一回合不追" —— 于是"每回合都撤"= 不挨打。
+         终检实测：深渊 1 例 timeout，trace 是两格震荡走到回合上限。 */
+      if (this.fleeCd > 0) return { ok: false, reason: 'cd', cd: this.fleeCd };
       if (!d.abandon(D.FLEE.lootMul)) return { ok: false, reason: 'over' };
       /* ---- 脱接触：撤离**买到**的那一下（用户拍板：推开一格 + 敌人本回合不动）----
          没有它，撤离换不到任何东西 —— 战斗从"相邻"开始，撤完敌人还在旁边
@@ -3848,8 +3880,9 @@
       const pushed = this._pushBackFrom(foe, D.FLEE.pushBack);
       if (foe) foe.fleeGrace = true;
       for (let i = 0; i < D.FLEE.tideBeat; i++) this._tideAdvance();
+      this.fleeCd = num(D.FLEE.cd);
       this.flees = (this.flees || 0) + 1;
-      return { ok: true, pushed: pushed, grace: !!foe };
+      return { ok: true, pushed: pushed, grace: !!foe, cd: this.fleeCd };
     }
 
     /**
@@ -3882,18 +3915,25 @@
     /**
      * AI 该不该撤 —— **纯函数，不碰 this.rng**。
      *
-     * 判据（工作单原文）：预期本轮承伤 > 剩余生命的 30%。
+     * 判据：**这一轮会被打死就撤**（预期本轮承伤 ≥ 剩余生命 × `FLEE.aiFleeAt`）。
      * "预期本轮承伤"用每只活着的敌人**一次**最强攻击的确定性部分相加：
-     * 不含暴击/闪避的随机，和意图预告同一个口径 —— 两边一旦用了不同的
-     * 算法，玩家读到的预告和 AI 做的决定就会开始各说各话。
+     * 不含暴击/闪避的随机，和意图预告同一个口径 —— 两边一旦用了不同的算法，
+     * 玩家读到的预告和 AI 做的决定就会开始各说各话。
      *
-     * ⚠ 它只看**一轮**。所以它撤的是"这一轮就要把我打残"的场，
-     * 而不是"再打三轮我会输"的场 —— 后者需要的东西（还要几轮、
-     * 我还能打多少）每一个都是新的估计量，而每个估计量都会变成
-     * 一个新的可调参数。先只做这一条，量出来再谈要不要加。
+     * 为什么是"会被打死"而不是"会被打疼"：撤离的代价是**整场的收益**
+     * （击杀 / 掉落 / 升级）＋ 一节拍潮水，而"这一轮疼"下一轮照样能打。
+     * 老判据（> 剩余血 30%）就是错在这里：它把撤离当成了战术偏好，
+     * 于是实测 22 次/局 ≈ 逢战必撤、通关率 −19.6/−15.0/−13.7pp、
+     * 每局击杀 24.9 → 16.0（详见 FLEE 表里的那段注释）。
+     *
+     * 为什么不做"再打三轮会输"那种更聪明的估计：那需要"我还要几轮打死它"
+     * 这个估计量，而它依赖每轮伤害、敌人残血、增伤词条……每一个都会变成
+     * 一个新的可调参数。地图层的 `_pickTarget` 已经用"打这一场值不值"筛过一次，
+     * 所以对决里的撤离只需要当那个**判断错了之后的应急出口**。
+     * 新判据天然自限：一局里被逼到"下一击致死"的次数本来就少。
      */
     _shouldFlee(d) {
-      if (!d || d.finished) return false;
+      if (!d || d.finished || d.a.hp <= 0) return false;
       const st = this.stats();
       let inc = 0;
       for (let i = 0; i < d.bs.length; i++) {
@@ -3901,7 +3941,7 @@
         if (u.hp <= 0) continue;
         inc += Math.max(1, Math.round(bestAttack(u.st, st, this.K).base));
       }
-      return inc > d.a.hp * D.FLEE.aiDmgFrac;
+      return inc >= d.a.hp * num(D.FLEE.aiFleeAt);
     }
 
     /**
@@ -4043,6 +4083,8 @@
       this.turn++;
       // 冷却与临时增益按"回合"结算，放在最前面：它们在这一回合里已经生效过了
       if (this.skillCd > 0) this.skillCd--;
+      // 撤离冷却（v11.6）与技能冷却同一套语义：按回合递减、在"下一次想用"那一刻结算。
+      if (this.fleeCd > 0) this.fleeCd--;
       // 「出生那一回合不倒计时」：潮语洪流的潮湿、不退之壁的双防，都是玩家
       // 这一手刚打出来的状态，而这一手本身已经消耗掉一个回合了。少了这条，
       // 面板写 3 回合的不退之壁实际只护 2 回合、写 2 回合的潮湿实际只留 1 回合
@@ -4765,6 +4807,17 @@
         if (dead) { this.aiGoal = null; g = null; }
       }
 
+      /* —— 脱离期：先跑，别恋战（v11.6）——
+         放在选目标**之前**：脱离期里"最近的可打目标"就是刚把你打残的那只，
+         让它进去挑目标只会立刻回到撤离循环里。 */
+      if (this.retreatTurns > 0) {
+        this.retreatTurns--;
+        this.aiGoal = null;
+        if (this._retreatStep()) return true;
+        /* 走不出去（角落 / 被围）就落回原逻辑 ——
+           下面那段"被堵住就先把贴脸的解决掉"的兜底仍然管用。 */
+      }
+
       // —— 选目标（只有没有目标时才选）——
       if (!g) {
         if (hpPct < 0.45) {
@@ -4854,6 +4907,47 @@
         }
       }
       return false;
+    }
+
+    /**
+     * 脱离期的一步：往**远离最近那只敌人**的方向走一格（v11.6）。
+     *
+     * 只在真的把距离拉开时才走 —— 否则"撤退"会退成原地打转
+     * （被墙挡住、或往侧面走反而更近）。三个候选方向按"最像背对它的那一个"
+     * 排序：主轴反方向 → 垂直的两个。都走不通就返回 false，交给调用方落回常规逻辑。
+     *
+     * @returns {boolean} 是否消耗了回合
+     */
+    _retreatStep() {
+      /* "离所有敌人有多远"的势能：越远分越高。
+         第一版只看**最近那只**并往它反方向走 —— 身边一多，"最近的那只"会在
+         两侧之间换人，于是方向来回翻，玩家在两格之间横跳直到回合上限
+         （实测 trace：`12,32 → 11,32 → 12,32 → 11,32 …`）。
+         那正是本项目在 _autoStep 里用"目标承诺"防过的那类**两格横跳**。 */
+      const R = 9;
+      const pot = function (x, y) {
+        let s = 0;
+        for (let i = 0; i < this.enemies.length; i++) {
+          const e = this.enemies[i];
+          const d = Math.abs(e.x - x) + Math.abs(e.y - y);
+          if (d < R) s += (R - d);
+        }
+        return s;
+      }.bind(this);
+      const cur = pot(this.px, this.py);
+      const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      let bx = -1, by = -1, bs = cur;
+      for (let i = 0; i < dirs.length; i++) {
+        const nx = this.px + dirs[i][0], ny = this.py + dirs[i][1];
+        if (!this.walkable(nx, ny) || this.enemyAt(nx, ny)) continue;
+        const s = pot(nx, ny);
+        /* **必须严格变好**。这一条同时解决两件事：
+           ① 不再横跳 —— 势能严格递增就不可能出现"来回"（来回要求先增后减）；
+           ② 被堵在墙角时它不再假装在撤（原地不动比"走一步又回来"诚实）。 */
+        if (s > bs) { bs = s; bx = nx; by = ny; }
+      }
+      if (bx < 0) return false;
+      return this.stepTo(bx, by);
     }
 
     /**
