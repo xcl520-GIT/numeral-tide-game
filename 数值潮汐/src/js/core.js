@@ -212,6 +212,19 @@
       // "群战造成的"和"数值改造成的"两份，否则改完什么都归因不了。
       // 同理**必须在这里声明**，不能等第一场战斗再挂上去（隐藏类迁移的教训）。
       this.squad = (opts.squad === undefined) ? true : !!opts.squad;
+      // 槽位指派（v11.4-h）：玩家身旁的那几格**由外层分配**给不同的怪，
+      // 而不是让每只怪各自寻路到玩家。关掉它就是"各自寻路"的对照组 ——
+      // 这是本轮要证明的那件事，对照组必须真实存在。
+      this.slots = (opts.slots === undefined) ? true : !!opts.slots;
+      // 战斗中的世界时钟（v11.4-h）：一场仗的每一**轮**推进一次敌人的行动时钟，
+      // 而不是整场只推进一次。关掉它 = 回到"战斗期间地图冻结"（对照组）。
+      this.tick = (opts.tick === undefined) ? true : !!opts.tick;
+      // 被惊动的房间每回合都挪（v11.4-h）。
+      // 这一步必须放在**分格之后** —— 外部参考里的顺序是"先分格，再加速"，
+      // 而 v11.4-g 的实测正是这条的反证：目标格没分掉时，加速只是
+      // 让它们更快地排进同一条队，四邻 1.04 → 1.05，纹丝不动。
+      // 区域门禁已经保证了"此刻玩家就在这个房间里"，所以这里不需要额外的惊动标记。
+      this.alert = (opts.alert === undefined) ? true : !!opts.alert;
 
       this.seed = (opts.seed === undefined || opts.seed === null)
         ? ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0)
@@ -620,21 +633,18 @@
         if (getT(this.px + dx, this.py + dy) === T.WATER) setT(this.px + dx, this.py + dy, T.FLOOR);
       }
 
-      /* —— 10. 敌人：只在离起点足够远的位置放 —— */
-      const count = Math.round(M.enemiesBase * (1 + (depth - 1) * 0.16) * num(this.diff.enemyMul));
-      const occ = new Set([this.px + ',' + this.py]);
-      for (let i = 0; i < count; i++) {
-        const p = this._randomFloor(occ, start, 5);
-        if (!p) break;
-        occ.add(p.x + ',' + p.y);
-        const e = this._makeEnemy(p.x, p.y, depth);
-        this.enemies.push(e);
-      }
-      /* —— 10b. 连通性兜底 —— */
-      this._ensureConnectivity();
+      /* —— 10. 连通性兜底 —— */
       // 分区必须放在连通性兜底**之后**：兜底会凿开墙、增加可走格，
       // 在那之前算出来的区域会因为新增的通道而失准。
+      this._ensureConnectivity();
+      /* —— 10b. 分区（房间） —— */
       this._buildRegions(depth);
+      /* —— 10c. 敌人：**一堆 = 一个房间** ——
+         顺序必须是"先分区、再布点"。反过来的话，堆是围着随机点长的，
+         一半的堆会跨在两个区的边界上 —— 而区域门禁只放行玩家所在那一区，
+         于是"一个房间里的四只"进场时只剩两只，群战从源头上就不可能。 */
+      this._spawnEnemies(depth);
+      this._applyRegionFlavor();   // 依赖 e.region，必须在敌人落位之后
 
       /* —— 11. Boss：守在下一层入口边上 —— */
       this.boss = null;
@@ -836,7 +846,11 @@
         //  memorize 一个常数不等于读懂一个机制。
         stance: canStance(st, arc) ? (this.rng.chance(0.5) ? 'p' : 'm') : null,
         stanceT: D.STANCE.every, stanceFx: 0,
-        region: this.regionAt(x, y)
+        region: this.regionAt(x, y),
+        // 槽位：由 _assignSlots 每回合重新分配。**必须在这里声明**，
+        // 不能等第一次分配再挂上去 —— 给成型对象新增字段会让它发生隐藏类迁移，
+        // 而这个字段每回合都要读一次（这个坑在本项目里踩过，整局慢 3 倍）。
+        slot: null
       };
       this._decideEnemy(e);          // 出生即带意图，否则第 1 回合看不见预告
       return e;
@@ -1029,14 +1043,115 @@
         }
       }
 
-      // 6) 敌人绑区域
-      this._tagEnemyRegions();
+      // 6) 玩家所在的区域。
+      // **敌人不在这里绑**：本函数现在跑在敌人布点之前（见 _buildLevel 的顺序），
+      // 绑区域与 _applyRegionFlavor 都挪到 _spawnEnemies 之后。
       this.playerRegion = this.regionAt(this.px, this.py);
       // 出生点所在的区域开局就算"认得"，否则标签会以"未知"的样子
       // 出现在玩家脚底下，而玩家明明就站在里面
       if (!this.regionVisited) this.regionVisited = {};
       if (this.playerRegion >= 0) this.regionVisited[this.playerRegion] = 1;
-      this._applyRegionFlavor();
+    }
+
+    /**
+     * 敌人布点：**一堆 = 一个房间**。
+     *
+     * 为什么必须这样放（这是 v11.4-g 整轮取证的最后一块拼图）：
+     * 实测"玩家所在区域里、距离 >1 的怪"平均只有 **1.68 只** ——
+     * 因为每层 13 只怪被 5 个区域摊开，玩家每次进房只碰上 2~3 只。
+     * 四邻要站满得先**有**第四只：没有第四只，任何"让它们更快/更会站位"的
+     * 改动都是在优化一个不存在的东西 —— v11.4-g 的三条机制全部无功而返，
+     * 根因就在这里（同侧排队假说已被数据否掉：目标格冲突率只有 1.7%）。
+     *
+     * 三条边界：
+     *   · 堆**不许跨区**（regionAt 校验）。跨区的那部分会被区域门禁关在门外，
+     *     "一个房间四只"会缩水成两只；
+     *   · 堆内部只走**正交**邻格（含斜角不行）：群战的判据是主角的上下左右，
+     *     斜着贴住的在结算里根本不算"围在一起"；
+     *   · 一堆 2~4 只。参战上限就是 4，第 5 只只会站在圈外挨打。
+     */
+    _spawnEnemies(depth) {
+      const M = D.MAP;
+      const count = Math.round(M.enemiesBase * (1 + (depth - 1) * 0.16) * num(this.diff.enemyMul));
+      const occ = new Set([this.px + ',' + this.py]);
+      const NB4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      let placed = 0;
+
+      /* 找锚点：本区的一块空地，且**离出生点 >=4**。
+         贴脸刷怪不是"围攻"，是伏击 —— 玩家会被开局第一回合的遭遇
+         直接教坏（"这游戏只能硬碰硬"）。 */
+      const anchorIn = (reg) => {
+        for (let t = 0; t < 10; t++) {
+          const p = this._regionFreeTile(reg.id);
+          if (!p) return null;
+          if (occ.has(p.x + ',' + p.y)) continue;
+          if (Math.abs(p.x - this.px) + Math.abs(p.y - this.py) < 4) continue;
+          return p;
+        }
+        return null;
+      };
+
+      if (this.regions && this.regions.length) {
+        /* 堆的规模与堆的数量（v11.4-h 修正）
+           ------------------------------------------------
+           第一版是"每个房间都放 round(count / 房间数) 只"，实测每间只有 **2 只**——
+           而 2 只永远凑不出 1v3、1v4：四邻要站满得先**有**第四只。
+           实测证据：玩家所在区里"想动的怪"平均只有 1.02 只。
+           改成"每堆 3~5 只、只占一部分房间、其余房间空着"：
+             · 堆够大，进房才可能被围；
+             · 空房间是**刻意的** —— 每间房都有怪会让走廊变成排队送死，
+               而"这间是空的"正好是节奏里的呼吸点，也让"进房"这个动作有悬念。
+           总只数不变（count），所以这一条不动经济、不动总量，只改分布。 */
+        const PACK = 4;
+        const numPacks = Math.max(1, Math.min(this.regions.length, Math.round(count / PACK)));
+        const packSizes = [];
+        for (let i = 0; i < numPacks; i++) packSizes.push(0);
+        for (let i = 0; i < count; i++) packSizes[i % numPacks]++;
+        packSizes.sort(function (a, b) { return b - a; });
+        const order = this.regions.slice();
+        for (let i = order.length - 1; i > 0; i--) {
+          const j = this.rng.int(0, i);
+          const t = order[i]; order[i] = order[j]; order[j] = t;
+        }
+        for (let pi = 0; pi < numPacks && pi < order.length; pi++) {
+          const reg = order[pi];
+          const per = packSizes[pi];
+          if (placed >= count) break;
+          const a = anchorIn(reg);
+          if (!a) continue;
+          occ.add(a.x + ',' + a.y);
+          this.enemies.push(this._makeEnemy(a.x, a.y, depth));
+          placed++;
+          const blob = [{ x: a.x, y: a.y }];
+          const want = Math.min(per - 1, count - placed);
+          for (let i = 0; i < want; i++) {
+            const cands = [];
+            for (const b of blob) for (const d of NB4) {
+              const nx = b.x + d[0], ny = b.y + d[1];
+              if (this.regionAt(nx, ny) !== reg.id) continue;   // 不许跨区
+              if (occ.has(nx + ',' + ny) || !this.walkable(nx, ny)) continue;
+              cands.push({ x: nx, y: ny });
+            }
+            if (!cands.length) break;
+            const p = this.rng.pick(cands);
+            occ.add(p.x + ',' + p.y);
+            this.enemies.push(this._makeEnemy(p.x, p.y, depth));
+            blob.push(p);
+            placed++;
+          }
+        }
+      }
+
+      // 兜底：区域太少 / 堆放不下时的余数，回到"离起点远"的均匀撒
+      let guard = 0;
+      while (placed < count && guard++ < count * 4) {
+        const p = this._randomFloor(occ, { x: this.px, y: this.py }, 5);
+        if (!p) break;
+        occ.add(p.x + ',' + p.y);
+        this.enemies.push(this._makeEnemy(p.x, p.y, depth));
+        placed++;
+      }
+      this._tagEnemyRegions();
     }
 
     _tagEnemyRegions() {
@@ -2051,12 +2166,17 @@
      */
     fight(foes, atkType, picker) {
       const L = this._fightBegin(foes, atkType);
-      if (picker) {
-        L.duel.runAuto(function (d) { return picker(d); });
-      } else {
-        const fixed = L.atkType;
-        L.duel.runAuto(function () { return fixed; });
-      }
+      const list = L.enemies;
+      const fixed = L.atkType;
+      const me = this;
+      /* 每一轮开打前先推进一次世界（见 _fightRoundTick）。
+         放在 runAuto 的 pick 里而不是对决内部：对决不认识地图，
+         而这件事需要地图（区域、寻路、槽位、谁还站着）。 */
+      const tick = function (d) {
+        me._fightRoundTick(list);
+        return picker ? picker(d) : fixed;
+      };
+      L.duel.runAuto(tick);
       return this._fightSettle(L);
     }
 
@@ -2081,6 +2201,10 @@
       if (!L) return null;
       const d = L.duel;
       const from = d.log.length;
+      // 逐回合路径也要推进 —— 玩家在战斗画面里停多久，
+      // 房间里的其他怪就该走多远。少了这一句，人工打的仗和模拟器跑的仗
+      // 会是两种不同的游戏，而那是本项目最忌讳的分叉。
+      this._fightRoundTick(L.enemies);
       d.step(playerType, target);
       return {
         rounds: d.log.slice(from),
@@ -2272,6 +2396,154 @@
      *
      * 道具型 / 姿态型是**位置无关**的，所以那两条是精确预告，不是估计。
      */
+    /* 槽位指派（v11.4-h）——**围而不堵**
+       ------------------------------------------------------------
+       外部参考（L4D 的 attack slots、阿卡姆的攻击令牌、Unity 社区的 Surround AI）
+       在这一点上高度一致：**让每只怪各自寻路到玩家是行不通的**，
+       要有一个外层把"玩家身旁的那几格"分配给它们。
+
+       原因是数学上的：目标集只有玩家四邻那 4 格，从同一侧来的怪对这 4 格的
+       路径长度排序高度一致，于是每只怪都"理性地"选同一个最优格 ——
+       那不是 bug，是各自寻路到同一目标的必然均衡。
+       实测把这条钉死了：目标格冲突率只有 1.7%（**没有排队**），
+       但它们走得动却落不到玩家四邻的比例是 86% —— 不是堵住了，
+       是排在同一条线上、从同一个方向来。
+
+       做法（参考里最省的版本，不需要匈牙利算法）：
+         · 取玩家四邻里可走的格作为槽位；
+         · 把本区最近的 ≤4 只怪与槽位做一次全排列匹配（最多 4! = 24 次比较），
+           取"总曼哈顿距离最小"的那个排列；
+         · 每只怪寻路到**自己的槽位**，不再寻路到玩家。
+       用曼哈顿距离而不是真路径：这里只需要一个**分配**，
+       真路径交给各自的 A*，代价小一个数量级。
+       玩家挪一格就重算（24 次比较，可以忽略）——
+       这也顺带解决了"玩家一动手，所有怪又挤回同一格"。 */
+    _assignSlots() {
+      if (!this.slots) { for (const e of this.enemies) e.slot = null; return; }
+      // 注意：**不能在这里先把所有人的槽位清空**。
+      // 粘性要读的就是"上一回合分到的那一格"，先清掉等于把粘性关掉 ——
+      // 而这个 bug 的症状是"什么都没变"（数值与不加粘性时逐位相同），
+      // 比崩溃难查得多。清理放在最后：既没粘住、也没分到的才作废。
+      const NB = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+      const open = [];
+      for (const d of NB) {
+        const x = this.px + d[0], y = this.py + d[1];
+        if (this.walkable(x, y)) open.push({ x: x, y: y });
+      }
+      if (!open.length) return;
+      const r = this.regionAt(this.px, this.py);
+      /* 粘性：上一回合已经拿到槽位、槽位仍然开放、且自己离它 <=3 的，直接续用。
+         ------------------------------------------------------------
+         不这么做会出现**抢椅子**：玩家每挪一格就重分一次，而"最近的 4 只"
+         与"4 个槽位"的最小指派两次可能给出不同的配对 —— 两只怪于是每回合
+         互换槽位，两个都走不到，却在数据上表现为"它们一直在动"，
+         从别的指标完全看不出来。这是这一整套里最隐蔽的一种失败。 */
+      const taken = {}, stuck = new Set();
+      for (const e of this.enemies) {
+        if (e.region !== r || e.hp <= 0 || e.stun > 0 || !e.slot) continue;
+        if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) <= 1) continue;
+        let si = -1;
+        for (let s = 0; s < open.length; s++) {
+          if (open[s].x === e.slot.x && open[s].y === e.slot.y) { si = s; break; }
+        }
+        if (si < 0 || taken[si]) continue;
+        if (Math.abs(e.x - e.slot.x) + Math.abs(e.y - e.slot.y) > 3) continue;
+        taken[si] = 1;
+        stuck.add(e);
+      }
+      const cand = [];
+      for (const e of this.enemies) {
+        if (e.region !== r || e.hp <= 0 || e.stun > 0) continue;
+        const d2 = Math.abs(e.x - this.px) + Math.abs(e.y - this.py);
+        if (d2 <= 1) continue;        // 贴身了：它这一步是出手，不是移动
+        if (stuck.has(e)) continue;   // 已经粘住的：不参与重分
+        cand.push({ e: e, d: d2 });
+      }
+      if (!cand.length) return;
+      cand.sort(function (a, b) { return a.d - b.d; });
+      const freeCount = open.length - Object.keys(taken).length;
+      const head = cand.slice(0, Math.max(0, freeCount));
+      if (!head.length) return;
+      let best = null, bestCost = Infinity;
+      const used = [], perm = [];
+      for (const s in taken) used[s] = 1;   // 被粘住的槽位不参与重分
+      const walk = function (i, cost) {
+        if (cost >= bestCost) return;
+        if (i === head.length) { bestCost = cost; best = perm.slice(); return; }
+        for (let s = 0; s < open.length; s++) {
+          if (used[s]) continue;
+          used[s] = 1; perm[i] = s;
+          walk(i + 1, cost + Math.abs(head[i].e.x - open[s].x) + Math.abs(head[i].e.y - open[s].y));
+          used[s] = 0;
+        }
+      };
+      walk(0, 0);
+      if (!best) return;
+      for (let i = 0; i < head.length; i++) head[i].e.slot = open[best[i]];
+      // 没粘住也没分到槽位的：槽位作废。
+      // 留着过期槽位比没有更糟 —— 它会朝一个玩家早就不在的格子走。
+      for (const e of this.enemies) {
+        if (!e.slot || stuck.has(e)) continue;
+        let kept = false;
+        for (let i = 0; i < head.length; i++) if (head[i].e === e) { kept = true; break; }
+        if (!kept) e.slot = null;
+      }
+    }
+
+    /**
+     * 让一只怪朝目标挪一步。**只挪，不打** —— 出手是 enemyHit 的事，
+     * 它只在回合推进里结算。这条边界不能糊：让"挪动的那个函数"顺手打一下，
+     * 玩家就会在战斗画面里被画面外的怪打死，而那条伤害没有任何演出能解释。
+     * @returns {boolean} 真的挪动了吗
+     */
+    _stepEnemyTowardPlayer(e) {
+      // 贴身了就该出手，不该挪
+      if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) <= 1) return false;
+      let tx = this.px, ty = this.py;
+      if (e.slot) {
+        // 已经站在自己的槽位上就**停下**。少了这一条，它会继续朝玩家挤，
+        // 把刚分好的四邻又挤成一个方向 —— 那就白分了。
+        if (e.x === e.slot.x && e.y === e.slot.y) return false;
+        tx = e.slot.x; ty = e.slot.y;
+      }
+      const path = this.findPath(e.x, e.y, tx, ty, 260, 0, e.region);
+      if (!path || path.length < 2) return false;
+      const n = path[1];
+      if (this.enemyAt(n.x, n.y) || (n.x === this.px && n.y === this.py)) return false;
+      e.x = n.x; e.y = n.y;
+      return true;
+    }
+
+    /* 战斗中的世界时钟（v11.4-h）——治"冻结税"
+       ------------------------------------------------------------
+       两条时间轴对不上：一场仗打 2~3 **轮**，而整局只推进 1 个**回合**
+       （_afterAction 在整场对决收尾时才走一次）。于是整个战斗期间地图是冻结的，
+       旁边那只怪一步也没挪 —— 实测被冻结的世界回合占整局的 **9.4%**，
+       也就是"玩家对全体怪物享有约 1.1 倍额外相对速度"，而且战斗越频繁越高。
+
+       改前的 A1 看不到这件事：那时一场仗就是 1 轮，1 仗 ≈ 1 回合，两条轴一致。
+       是 A1 把战斗拉长之后，这个税才第一次出现。
+
+       注意它**不是**"让敌人变快"：这里推进的是它们本来就有的时钟（cd），
+       只是把"一轮 = 一个世界回合"这条对齐。整场仗里它们能挪的次数
+       仍然是 轮数/2 —— 与在战斗外跑同样多的世界回合完全一致。
+
+       参与者排除在外：它们正在对决里挨打，模型坐标不该被另一个循环再改一次。
+       潮汐**不**跟着走 —— 潮水按回合涨，那是它自己的时钟。 */
+    _fightRoundTick(participants) {
+      if (!this.tick) return;
+      const r = this.regionAt(this.px, this.py);
+      this._assignSlots();
+      for (const e of this.enemies) {
+        if (participants && participants.indexOf(e) >= 0) continue;
+        if (e.region !== r || e.stun > 0) continue;
+        e.cd++;
+        if (this.alert || e.cd % 2 === 0 || e.kind === 'elite' || e.kind === 'boss') {
+          this._stepEnemyTowardPlayer(e);
+        }
+      }
+    }
+
     _decideEnemy(e) {
       const gated = (e.region !== undefined && e.region >= 0 &&
                      this.regionAt(this.px, this.py) !== e.region);
@@ -2810,6 +3082,10 @@
       }
 
       // 敌人行动
+      // 每回合先把"玩家身旁那几格"分给不同的怪。
+      // 放在敌人循环**之前**，因为分配是这一回合整体的事，
+      // 边打边分会让先行动的怪占便宜、后行动的白跑一步。
+      this._assignSlots();
       const list = this.enemies.slice();
       for (const e of list) {
         if (this.status !== 'playing') break;
@@ -2835,16 +3111,13 @@
         if (dist <= 1) {
           this.enemyHit(e);
         } else {
-          // 每 2 回合逼近一步：所有怪每回合都动会让"绕开"变成不可能
+          // 逼近节奏：默认每 2 回合挪一步 —— 所有怪每回合都动会让"绕开"变成不可能。
+          // 但**玩家所在的那个房间**（区域门禁已经筛过）是惊动的：每回合都挪。
+          // 没有这一步，它们在 1 格/回合的玩家面前永远追不上 ——
+          // 玩家会在空地上把甲虫一只只点名，而"围上来"始终只是文案。
           e.cd++;
-          if (e.cd % 2 === 0 || e.kind === 'elite' || e.kind === 'boss') {
-            const path = this.findPath(e.x, e.y, this.px, this.py, 260, 0, e.region);
-            if (path && path.length > 1) {
-              const n = path[1];
-              if (!this.enemyAt(n.x, n.y) && (n.x !== this.px || n.y !== this.py)) {
-                e.x = n.x; e.y = n.y;
-              }
-            }
+          if (this.alert || e.cd % 2 === 0 || e.kind === 'elite' || e.kind === 'boss') {
+            this._stepEnemyTowardPlayer(e);
           }
         }
         // 孢子母：孵化
@@ -2987,7 +3260,10 @@
           // 开着跑出来的通关率和关着跑出来的差多少，就是这条机制的全部代价，
           // 而"代价"这件事只能靠对照实验回答，不能靠看代码猜。
           aiStance: opts.aiStance,
-          squad: opts.squad
+          squad: opts.squad,
+          slots: opts.slots,
+          tick: opts.tick,
+          alert: opts.alert
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;

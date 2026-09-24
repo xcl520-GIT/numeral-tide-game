@@ -39,7 +39,14 @@
   function reset() {
     st = { total: 0, adj: 0, waited: 0, moved: 0, movedAdj: 0, blockedFoe: 0,
            noPath: 0, playerTile: 0, stunned: 0, other: 0, dead: 0, turns: 0,
-           adjHist: {}, approachTurns: 0, approachN: 0 };
+           adjHist: {}, approachTurns: 0, approachN: 0,
+           // 目标格冲突（外部参考建议的第 2 列打点）：
+           // 这一步有几只怪想走**同一格**。它是"同侧排队"假说的直接判据 ——
+           // 冲突率高 = 每只怪都在理性地选同一个最优格，那不是 bug，是均衡。
+           want: 0, conflictExtra: 0, conflictTurns: 0,
+           // 冻结税（外部参考的第 4 节）：一场仗打 R 轮，世界只推进 1 回合，
+           // 于是玩家的相对速度被放大 (R-1) 个回合。累计它，才知道这条值不值得治。
+           frozenTurns: 0, fights: 0 };
   }
 
   var P = TideCore.Game.prototype;
@@ -55,6 +62,31 @@
     var r = oe.apply(this, arguments);
     st.turns++;
     if (me.status !== 'playing') { st.dead += snap.length; return r; }
+
+    /* —— 目标格冲突：它们在"该动"的那一步各自想走哪一格 ——
+       用曼哈顿贪心近似 A* 的首步（主轴优先）：精确解要给每只怪跑一次 A*，
+       60 只 × 400 回合 × 30 局 = 72 万次，量具会把自己变成瓶颈
+       （这个坑在 v11.4-g 已经踩过一次）。贪心足以回答"是不是挤在同一格门口"。 */
+    var want = {};
+    for (var w = 0; w < me.enemies.length; w++) {
+      var we = me.enemies[w];
+      if (we.region !== undefined && we.region >= 0 && we.region !== myR) continue;
+      var ddx = px - we.x, ddy = py - we.y;
+      if (Math.abs(ddx) + Math.abs(ddy) <= 1) continue;      // 已经贴上了，它这一步是出手
+      var sx = 0, sy = 0;
+      if (Math.abs(ddx) >= Math.abs(ddy)) sx = ddx > 0 ? 1 : -1;
+      else sy = ddy > 0 ? 1 : -1;
+      var kk = (we.x + sx) + ',' + (we.y + sy);
+      want[kk] = (want[kk] || 0) + 1;
+    }
+    var cExtra = 0, cMax = 0;
+    for (var kk2 in want) {
+      if (want[kk2] > 1) { cExtra += want[kk2] - 1; if (want[kk2] > cMax) cMax = want[kk2]; }
+    }
+    st.want += Object.keys(want).length;
+    st.conflictExtra += cExtra;
+    if (cExtra > 0) st.conflictTurns++;
+
     var alive = new Set(me.enemies);
     for (var j = 0; j < snap.length; j++) {
       var b = snap[j], g = b.e;
@@ -96,6 +128,16 @@
     return out;
   };
 
+  /* 冻结税：一场仗打 R 轮，世界只推进 1 个回合 —— 被"冻结"的世界回合数 = R-1。
+     这不是 bug，是两条时间轴的定义不同；但它的**代价**必须量出来才知道值不值得治：
+     累计的 R-1 占整局回合数的比例，就是"玩家相对怪物多跑了的距离"。 */
+  var os2 = P._fightSettle;
+  P._fightSettle = function (L, played) {
+    var out = os2.apply(this, arguments);
+    if (L && L.duel) { st.fights++; st.frozenTurns += Math.max(0, L.duel.round - 1); }
+    return out;
+  };
+
   for (var di = 0; di < DIFFS.length; di++) {
     reset(); adjAtFight = [];
     try {
@@ -118,6 +160,15 @@
     L.push('  接战时四邻怪物数分布  ' + ks.map(function (x) {
       return x + '只:' + Math.round(h[x] / adjAtFight.length * 100) + '%';
     }).join('  '));
+    L.push('  ── 目标格冲突（"同侧排队"假说的直接判据）');
+    L.push('  想动的怪 / 回合 ' + (Math.round(st.want / st.turns * 100) / 100) +
+      '   挤在同一格门口的多余只数 / 回合 ' + (Math.round(st.conflictExtra / st.turns * 100) / 100) +
+      '   有冲突的回合占比 ' + pct(st.conflictTurns, st.turns));
+    L.push('  冲突率（多余只数 / 想动的怪）= ' + pct(st.conflictExtra, st.want));
+    L.push('  ── 冻结税（一场仗 R 轮，世界只推进 1 回合）');
+    L.push('  战斗 ' + st.fights + ' 场 / 世界回合 ' + st.turns +
+      '   被冻结的世界回合 ' + st.frozenTurns +
+      '   占整局 ' + pct(st.frozenTurns, st.turns));
   }
   P.endTurn = oe; P._fightBegin = ob;
   document.getElementById('out').textContent = 'PROBEAPPROACHDONE\n' + L.join('\n');
