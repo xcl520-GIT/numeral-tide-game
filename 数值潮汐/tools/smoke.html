@@ -4905,11 +4905,15 @@ try {
       g.hp = 1000;                     // 当前血给足，免得直接被打死（这一节只看扣多少）
       return g;
     };
-    // ① 深渊第 3 层：应当按**最大生命**的 6% 扣
+    // ① 深渊第 3 层：应当按**最大生命**的 deepCorrupt 比例扣
+    // ⚠ 比例必须从数据表读，不能写死 —— v11.10 把 0.06 调成 0.105 时，
+    //   这条断言当场 FAIL，而它报的样子（"扣多了"）和"机制坏了"**一模一样**。
+    //   断言替数据说话，数据一动就得改断言，那是把一把尺子焊死在旧尺寸上。
+    var rate56 = w.TideData.DIFFICULTIES.abyss.deepCorrupt;
     var gA56 = mkC56('abyss', 3);
     var mx56 = gA56.stats().hp, before56 = gA56.hp;
     gA56._deepCorrupt();
-    var expect56 = Math.round(mx56 * 0.06);
+    var expect56 = Math.round(mx56 * rate56);
     var got56 = before56 - gA56.hp;
     // ② 深渊第 2 层：一分不扣
     var gB56 = mkC56('abyss', 2);
@@ -4922,7 +4926,8 @@ try {
 
     if (got56 !== expect56) {
       fail('v11.9：深渊第 3 层的深层潮水扣了 ' + got56 + '，应当是按最大生命 ' +
-        mx56 + ' 的 6% = ' + expect56 + '（按当前血扣会让残血反而更安全）');
+        mx56 + ' 的 ' + Math.round(rate56 * 1000) / 10 + '% = ' + expect56 +
+        '（按当前血扣会让残血反而更安全）');
     } else if (gB56.hp !== b2before) {
       fail('v11.9：深渊第 2 层不该扣血（v11.8 已证明前两层不该再动），实际扣了 ' +
         (b2before - gB56.hp));
@@ -4931,7 +4936,8 @@ try {
         (c3before - gC56.hp) + ' —— 那三档基线会整体漂移');
     } else {
       ok('v11.9：深层潮水只作用于第 3 层起的深渊 —— 第 3 层扣 ' + got56 +
-        '（最大生命 ' + mx56 + ' 的 6%），第 2 层与标准档各扣 0');
+        '（最大生命 ' + mx56 + ' 的 ' + Math.round(rate56 * 1000) / 10 +
+        '%），第 2 层与标准档各扣 0');
     }
   } catch (e56) { fail('v11.9 深层潮水测试异常: ' + (e56 && e56.stack ? e56.stack : e56)); }
 
