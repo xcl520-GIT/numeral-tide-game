@@ -563,7 +563,10 @@
     const g = state.game;
     if (!g || g.status !== 'playing' || g.pendingRelic) return;
     const before = { hp: g.hp, kills: g.kills, depth: g.depth };
-    g.endTurn();
+    // 走 wait() 而不是 endTurn()：行为**逐字等价**（wait 只是多一个计数），
+    // 但"等待"这个动作从此收口到模型层唯一的入口上 —— P1 的代价只能挂在那里，
+    // 散着写就一定会留下"某条路径的等待仍然免费"。
+    g.wait();
     afterAction(g, before);
   }
 

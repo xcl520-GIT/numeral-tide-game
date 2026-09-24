@@ -286,6 +286,14 @@
       // 给成型对象临时挂新字段会触发隐藏类迁移（本项目踩过，整局慢 3 倍）。
       this._doorsByRegion = null;   // 每层算一次
       this._doorCache = {};         // 每回合清一次
+      /* P0（v11.5）纯计数器。**必须在这里声明**（和 liveFight /
+         _doorsByRegion 同一个理由）：给已经定型的对象补字段会触发隐藏类迁移，
+         整局慢 3 倍 —— 而症状出现在离改动最远的地方，极难归因。
+         两个都只记账、不参与任何判定，所以三档基线必须逐位相同。
+           waits    玩家原地等待的回合数（P1 的等待占比拿它当分子）
+           dmgTaken 玩家累计承伤。三个来源：对决结算 / 贴身挨打 / 踩水腐蚀 */
+      this.waits = 0;
+      this.dmgTaken = 0;
       this.devourStacks = 0;
       this.skillCd = 0;          // 魂技冷却剩余回合
       /* 魂技三选一（v11.4-q）。
@@ -2229,6 +2237,11 @@
       const list = L.enemies || [L.enemy];
       const enemy = list[0];
       const res = L.duel.result();
+      /* P0 计数器：这一场从玩家身上掉掉的血，一次性记上。
+         用 L.hp0（开战那一刻的血量）减去收场血量，而**不是**逐轮累加 ——
+         对决内部还有吸血 / 反伤 / 免伤，逐轮累加会把"被打回来又回满"
+         算成两次承伤，那个数字会和"实际掉的血"悄悄漂开。 */
+      this.dmgTaken += Math.max(0, L.hp0 - res.aHp);
       this.hp = res.aHp;
       // 逐只写回。res.bsHp 与 list 一一对应（newDuel 是按同一个顺序建的）。
       // i === 0 时它逐位等于旧的 res.bHp，所以单敌路径没有任何变化。
@@ -2862,6 +2875,7 @@
       if (num(enemy.stats.crit) > 0 && this.rng.chance(enemy.stats.crit)) { dmg *= D.COMBAT.critMul; crit = true; }
       dmg = Math.max(1, Math.round(dmg));
       this.hp -= dmg;
+      this.dmgTaken += dmg;      // P0 计数器：贴身挨的那一下
       const round = [{ from: enemy.name, to: this.cls.name, dmg: dmg, type: atk.type, crit: crit }];
       this.events.push({ kind: 'hit', enemy: enemy, rounds: round, dmg: dmg, crit: crit });
       let heal = 0;
@@ -3387,6 +3401,26 @@
     /* ============================================================
        回合推进：潮汐 + 敌人行动
        ============================================================ */
+    /**
+     * 原地等待一个回合（v11.5 P0）。
+     *
+     * 现在它**只是 endTurn() 加一个计数** —— 行为与改造前逐字等价，
+     * 所以这一轮的三档基线必须逐位相同。这一层存在的唯一理由，是给 P1
+     * 一个**唯一的落点**：等待该有代价，而代价挂在第几步、挂几次，
+     * 只能在一个收口上回答。
+     *
+     * 为什么不让调用方各自调 endTurn()：等待有三个入口（键盘空格、模拟器 AI、
+     * 调试走位器的兜底），散着写迟早会漏掉一处 —— 而漏掉的那一处就是
+     * "免费等待"的后门。它在数据上的表现是"某个职业怎么调都不弱"，极难查。
+     *
+     * 注意它**刻意不走 _afterAction()**：那条路会被"免费行动"（疾影）吞掉。
+     * 这正是"等待零代价"的机制根源 —— 也正是 P1 要动的那一条。
+     */
+    wait() {
+      this.waits++;
+      this.endTurn();
+    }
+
     endTurn() {
       this.turn++;
       // 冷却与临时增益按"回合"结算，放在最前面：它们在这一回合里已经生效过了
@@ -3418,6 +3452,7 @@
         const st = this.stats();
         const dmg = Math.max(1, Math.round(st.hp * (0.006 + this.tideLevel * 0.005)));
         this.hp -= dmg;
+        this.dmgTaken += dmg;      // P0 计数器：踩水那份也算承伤
         // 踩水是真实伤害：它不走 rawDamage，无视一切防御。
         // 标出来是为了让画面能给出正确的颜色 —— 玩家看到冷白色的数字，
         // 就会明白"这不是它能防住的东西"，而不必读任何说明。
@@ -3598,7 +3633,9 @@
       const out = {
         n: n, wins: 0, deaths: 0, turns: 0, kills: 0, depth: 0,
         byDepth: {}, relicPick: {}, fightRounds: 0, lootCount: 0,
-        rarity: {}, deathCause: {}, avgRelics: 0, itemPower: 0
+        rarity: {}, deathCause: {}, avgRelics: 0, itemPower: 0,
+        // P0（v11.5）：等待与承伤的原始累加值 + 派生的等待占比
+        waits: 0, dmgTaken: 0, waitRate: 0
       };
       for (let i = 0; i < n; i++) {
         const seed = (opts.seedBase || 1) + i * 7919;
@@ -3623,6 +3660,7 @@
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;
+        out.waits += g.waits; out.dmgTaken += g.dmgTaken;
         out.byDepth[g.depth] = (out.byDepth[g.depth] || 0) + 1;
         out.avgRelics += g.relics.length;
         for (const it of g.bag) out.rarity[it.rarity] = (out.rarity[it.rarity] || 0) + 1;
@@ -3643,9 +3681,16 @@
         }
         for (const id of g.relics) out.relicPick[id] = (out.relicPick[id] || 0) + 1;
       }
+      /* 等待占比用**汇总相除**，不是"每局占比再平均"。后者会让回合数少的
+         短局和长局等权，而短局恰恰更容易是"全程在等"的那一种 ——
+         它会把占比整体抬高，且抬得很难解释。必须在 out.turns 被改写成
+         "平均值"之前算。 */
+      out.waitRate = out.turns ? Math.round(out.waits / out.turns * 1000) / 10 : 0;
       out.turns = Math.round(out.turns / n * 10) / 10;
       out.kills = Math.round(out.kills / n * 10) / 10;
       out.avgRelics = Math.round(out.avgRelics / n * 10) / 10;
+      out.waits = Math.round(out.waits / n * 10) / 10;
+      out.dmgTaken = Math.round(out.dmgTaken / n * 10) / 10;
       out.winRate = Math.round(out.wins / n * 1000) / 10;
       out.avgRarity = out.rarity;
       return out;

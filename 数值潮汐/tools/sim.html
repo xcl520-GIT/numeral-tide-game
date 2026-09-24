@@ -74,6 +74,16 @@
      量具包在 prototype 上，不改游戏 —— 这类统计一旦混进模型，
      平衡数据就会开始依赖"谁在看着它"。 */
   var byKind = { wild: { n: 0, sq: 0 }, minion: { n: 0, sq: 0 } };
+  /* 常驻指标①「一轮结束占比」（v11.5 P0）。
+     口径沿用 A1 探针：**1v1 + tier<=1 + kind normal + 野生**。
+     为什么卡这么窄：把精英 / 首领 / 群战 / 召唤物混进来，这个数会被几头
+     完全不同的分布夹住 —— 看起来一直在动，却说不清是谁在动。
+     tier 只在**模板**上（arc.tier），实例上有的只是 stats。 */
+  var round1 = { n: 0, one: 0 };
+  /* 常驻指标②「战斗轮数」。顺带说一句：out.fightRounds 从 v11.4-k 起就是
+     个死字段（声明了从来没写过）。真值在这里补 —— 量具放工具里，
+     不往模型里塞统计：模型一旦开始依赖"谁在看着它"，平衡数据就不干净了。 */
+  var fr = { n: 0, rounds: 0 };
   var PP = TideCore.Game.prototype;
   if (!PP.__splitWrapped) {
     PP.__splitWrapped = true;
@@ -85,9 +95,35 @@
         var isWild = (!u.src || u.name === u.src.arc.name);
         var g = isWild ? byKind.wild : byKind.minion;
         g.n++; if (L.duel.bs.length > 1) g.sq++;
+        fr.n++; fr.rounds += L.duel.round;
+        var e0 = L.enemies && L.enemies[0];
+        if (isWild && L.duel.bs.length === 1 && e0 && e0.kind === 'normal' &&
+            e0.arc && e0.arc.tier <= 1) {
+          round1.n++;
+          if (L.duel.round <= 1) round1.one++;
+        }
       }
       return r;
     };
+  }
+
+  function resetStats() {
+    byKind.wild.n = 0; byKind.wild.sq = 0;
+    byKind.minion.n = 0; byKind.minion.sq = 0;
+    round1.n = 0; round1.one = 0;
+    fr.n = 0; fr.rounds = 0;
+  }
+  function pct(g) { return g.n ? Math.round(g.sq / g.n * 100) + '%' : '-'; }
+  function pct1() { return round1.n ? Math.round(round1.one / round1.n * 1000) / 10 + '%' : '-'; }
+  function avgFr() { return fr.n ? Math.round(fr.rounds / fr.n * 100) / 100 : 0; }
+  /* 四个常驻指标钉成一行 —— 趋势线要能一眼扫过去，而不是每次重新解释。
+     第 4 项按难度各自显示，不只深渊有（休闲 22 / 标准 111 也都是信息）。 */
+  function resident(o) {
+    return '常驻 一轮结束 ' + pct1() + ' (n=' + round1.n + ')' +
+      ' | 群战 野生 ' + pct(byKind.wild) + ' 召唤物 ' + pct(byKind.minion) +
+      ' | 等待 ' + o.waitRate + '% | 承伤/局 ' + o.dmgTaken +
+      ' | 战斗 ' + avgFr() + ' 轮/场' +
+      ' | 第1层死亡 ' + (o.byDepth['1'] || 0);
   }
 
   var t0 = Date.now();
@@ -95,16 +131,16 @@
   var diffs = diff === 'all' ? ['casual', 'standard', 'abyss'] : [diff];
   for (var i = 0; i < diffs.length; i++) {
     var d = diffs[i];
-    byKind.wild.n = 0; byKind.wild.sq = 0;
-    byKind.minion.n = 0; byKind.minion.sq = 0;
+    resetStats();
     var o = TideCore.Game.simulate(n, { difficulty: d, seedBase: 1000, maxTurns: 2400,
       aiFumble: fumble, counterBonus: counter, aiStance: !!stance, squad: !!squad,
       slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold,
       cleave: !!cleave, keepPay: !!keeppay });
     lines.push('[' + d + '] ' + fmt(o));
-    var pctK = function (g) { return g.n ? Math.round(g.sq / g.n * 100) + "%" : "-"; };
-    lines.push('        群战拆分 野生 ' + pctK(byKind.wild) + ' (n=' + byKind.wild.n + ')' + '  召唤物 ' + pctK(byKind.minion) + ' (n=' + byKind.minion.n + ')'
- + '  ← 达标线看的是**野生**这一列');
+    lines.push('        群战拆分 野生 ' + pct(byKind.wild) + ' (n=' + byKind.wild.n + ')' +
+      '  召唤物 ' + pct(byKind.minion) + ' (n=' + byKind.minion.n + ')' +
+      '  ← 达标线看的是**野生**这一列');
+    lines.push('        ' + resident(o));
     lines.push('        outcome: ' + JSON.stringify(o.outcome));
     if (o.stalls) lines.push('        STALL: ' + JSON.stringify(o.stalls));
     lines.push('        relics: ' + JSON.stringify(o.relicPick));
@@ -114,8 +150,20 @@
   // 分职业跑标准难度，检查职业之间是否失衡
   if (q.cls !== '0' && diff !== 'all') {
     ['warlord', 'arcanist', 'ranger', 'warden'].forEach(function (c) {
-      var o = TideCore.Game.simulate(n, { difficulty: diffs[0], classKey: c, seedBase: 1000, maxTurns: 2400 });
+      /* 分职业行必须**和大盘行走同一组开关**（v11.5 P0 修正）。
+         原来这里只传 difficulty / classKey，于是 aiFumble 落到
+         num(undefined) = 0 —— 那是"完美玩法的上限"，而大盘行跑的是
+         fumble=0.2 的玩家均值。两张表摆在一起会被当成同一把尺子读，
+         实际上中间差着一整个失误率。 */
+      resetStats();
+      var o = TideCore.Game.simulate(n, {
+        difficulty: diffs[0], classKey: c, seedBase: 1000, maxTurns: 2400,
+        aiFumble: fumble, counterBonus: counter, aiStance: !!stance, squad: !!squad,
+        slots: !!slots, tick: !!tick, alert: !!alert, hold: !!hold,
+        cleave: !!cleave, keepPay: !!keeppay
+      });
       lines.push('[cls:' + c + '] ' + fmt(o));
+      lines.push('        ' + resident(o));
     });
   }
   lines.push('elapsed=' + (Date.now() - t0) + 'ms  n=' + n);
