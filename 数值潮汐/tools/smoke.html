@@ -4660,14 +4660,26 @@ try {
       continue;
     }
     var dTough54 = cand.L.duel.bs[1].hp, dMe54 = cand.L.duel.a.hp, hp0_54 = cand.L.hp0;
-    var fleeRes54 = cand.g.duelFlee(cand.L.duel);
+    var gx0_54 = cand.tough.x, gy0_54 = cand.tough.y;
+    /* 打到你身上的次数要**按谁干的**数：endTurn 里还有踩水腐蚀，
+       被推一格正好落进水里也不是不可能 —— 拿血量差当判据会把它当成"敌人打了你"。 */
+    var hits54 = 0, realHit54 = cand.g.enemyHit;
+    cand.g.enemyHit = function () { hits54++; return realHit54.apply(this, arguments); };
+    var fleeRes54 = cand.g.duelFlee(cand.L.duel, cand.L.enemies);
     var fled54 = cand.L.duel.fled, fin54 = cand.L.duel.finished;
-    cand.g.finishDuel();
+    var grace0_54 = cand.tough.fleeGrace;                 // "脱"挂上了没有
+    var dist0_54 = Math.abs(cand.tough.x - cand.g.px) + Math.abs(cand.tough.y - cand.g.py);
+    cand.g.finishDuel();                                  // 收场 → 走一次 endTurn
+    cand.g.enemyHit = realHit54;
+    var grace1_54 = cand.tough.fleeGrace;                 // 消费掉了没有
+    var foeMoved54 = (cand.tough.x !== gx0_54 || cand.tough.y !== gy0_54);
     cand.g._rollDrop = realDrop54;
     cand.g._tideAdvance = realTide54;
     T54 = {
       g: cand.g, L: cand.L, fled: fled54, fin: fin54, tide: tide54, drops: drops54,
       res: fleeRes54,
+      grace0: grace0_54, grace1: grace1_54, foeMoved: foeMoved54, hits: hits54,
+      dist0: dist0_54,
       gold: cand.g.gold - gold0_54,
       full: goldOf54(cand.g, cand.weak),
       tough: cand.tough.hp, dTough: dTough54,
@@ -4692,17 +4704,36 @@ try {
     fail('撤离：潮水没有推 ' + FL.tideBeat + ' 节拍（实际 ' + T54.tide + ' 次）');
   } else if (T54.tough !== T54.dTough) {
     fail('撤离：还活着的那只血没保留（模型 ' + T54.tough + ' vs 对决里 ' + T54.dTough + '）');
-  } else if (T54.me > T54.dMe) {
-    fail('撤离：玩家的血比撤的那一刻还多（' + T54.me + ' > ' + T54.dMe + '）—— 撤不是回档');
   } else if (!(T54.me < T54.hp0)) {
+    /* "撤不是回档"盯的是**进战前**那一条线（hp0），不是"撤那一刻"。
+       为什么不能盯后者：收场会给已倒下的那只结算击杀，而"击杀回血"
+       是难度表本来就有的（diff.healAfterWin，实测标准档 105 → 110）——
+       拿它当判据会把一条正常机制判成回档。 */
     fail('撤离：挨过的打被抹平了（开战 ' + T54.hp0 + ' → 撤后 ' + T54.me + '）—— 撤不是回档');
-  } else if (T54.px !== T54.px0 || T54.py !== T54.py0) {
-    fail('撤离：玩家被挪动了（' + T54.px0 + ',' + T54.py0 + ' → ' + T54.px + ',' + T54.py +
-      '）—— 他本来就没离开过原格');
+  } else if (!T54.grace0) {
+    fail('撤离：脱接触的"脱"没挂上 —— 那只敌人这一回合还会追你');
+  } else if (T54.grace1) {
+    fail('撤离：fleeGrace 没有被消费（一次性的闩必须在 endTurn 里清掉）');
+  } else if (T54.foeMoved) {
+    fail('撤离：被你甩开的那只这一回合**动了** —— 脱接触没生效');
+  } else if (T54.hits !== 0) {
+    fail('撤离：它这一回合还是打了你 ' + T54.hits + ' 次 —— 脱接触只挡住了移动');
+  } else if (T54.res.pushed !== 0 && T54.res.pushed !== FL.pushBack) {
+    fail('撤离：推开的格数既不是 0 也不是 ' + FL.pushBack + '（' + T54.res.pushed + '）');
+  } else if (T54.res.pushed > 0 &&
+             (Math.abs(T54.px - T54.px0) + Math.abs(T54.py - T54.py0)) !== T54.res.pushed) {
+    /* 比的是**推完之后**的坐标（T54.px/py，收场之后取的），不是 px1 ——
+       px1 是在 duelFlee 之前取的，和 px0 是同一个值，相减恒为 0（第一版就这么错的）。 */
+    fail('撤离：返回值说推开了 ' + T54.res.pushed + ' 格，玩家实际只挪了 ' +
+      (Math.abs(T54.px - T54.px0) + Math.abs(T54.py - T54.py0)) + ' 格');
+  } else if (T54.res.pushed > 0 && T54.dist0 <= 1) {
+    fail('撤离：推开了却是原地打转（推开后与那只敌人的距离仍是 ' + T54.dist0 + '）');
   } else {
-    ok('撤离：按 4 → 这一场结束；收益 ' + T54.full + ' → ' + T54.gold + '（掷骰倍率 ' +
-      T54.drops[0] + '）、潮水推 ' + T54.tide + ' 拍、活着的敌人保留残血 ' + T54.dTough +
-      '、玩家留在原地且挨过的打不算白挨' + (skipped54 ? '（跳过被闪的种子 ' + skipped54 + '）' : ''));
+    ok('撤离：收益 ' + T54.full + ' → ' + T54.gold + '（掷骰倍率 ' + T54.drops[0] +
+      '）、潮水推 ' + T54.tide + ' 拍、活着的敌人保留残血 ' + T54.dTough +
+      '；脱接触：推开 ' + T54.res.pushed + ' 格（推完与它的距离 ' + T54.dist0 +
+      '），那一只这一回合既没动也没打到你，挨过的打不算白挨' +
+      (skipped54 ? '（跳过被闪的种子 ' + skipped54 + '）' : ''));
   }
 
   /* ---- ③ 同一场里撤第二次必须被挡住 ----
