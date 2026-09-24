@@ -1,0 +1,127 @@
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>probe-approach</title>
+<style>body{background:#0a0e18;color:#ccd6e6;font:13px Consolas,monospace}pre{padding:12px;white-space:pre-wrap}</style>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* 敌人为什么到不了你身边？
+ *
+ * v11.4-g 的取证把问题钉在一句话上：接战那一刻，主角四邻里平均只有 1.04 只怪。
+ * 但"为什么"还没答。三条机制（更快 / 成群布点 / 每轮推进）都没动这个数，
+ * 说明我猜的方向是错的 —— 所以这一步**不加任何机制**，只做归因。
+ *
+ * 做法：包一层 endTurn，在它前后各拍一张快照，然后对**每一只本该行动的怪**
+ * 逐一判定它这一回合到底发生了什么。判据必须复刻 core 里那段分支的顺序
+ * （眩晕 → 区域门禁 → 邻身出手 → cd 节奏 → 寻路 → 目标格占用），
+ * 否则归因表就是我自己编的一个故事。
+ *
+ * 表里最要紧的一行是【被同类挡住】：
+ *   四连通的一堆怪目标格是**同一个**（玩家旁边那 4 格），
+ *   后面的必须先绕过前面的，很可能在原地互相堵 ——
+ *   这一条同时解释了"堆是存在的"和"接战时只剩 1 只"。
+ */
+(function () {
+  var L = ['PROBEAPPROACH'];
+  var Q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return; var p = kv.split('='); Q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+  var N = parseInt(Q.n || '60', 10);
+  var DIFFS = (Q.diff && Q.diff !== 'all') ? [Q.diff] : ['casual', 'standard', 'abyss'];
+
+  function pad(s, w) { s = String(s); while (s.length < w) s += ' '; return s; }
+  function pct(a, b) { return b ? (Math.round(a / b * 1000) / 10) + '%' : '0%'; }
+
+  var st = {};
+  function reset() {
+    st = { total: 0, adj: 0, waited: 0, moved: 0, movedAdj: 0, blockedFoe: 0,
+           noPath: 0, playerTile: 0, stunned: 0, other: 0, dead: 0, turns: 0,
+           adjHist: {}, approachTurns: 0, approachN: 0 };
+  }
+
+  var P = TideCore.Game.prototype;
+  var oe = P.endTurn;
+  P.endTurn = function () {
+    var me = this;
+    var px = me.px, py = me.py, myR = me.regionAt(px, py);
+    var snap = [];
+    for (var i = 0; i < me.enemies.length; i++) {
+      var e = me.enemies[i];
+      snap.push({ e: e, x: e.x, y: e.y, cd: e.cd || 0, stun: e.stun || 0, region: e.region });
+    }
+    var r = oe.apply(this, arguments);
+    st.turns++;
+    if (me.status !== 'playing') { st.dead += snap.length; return r; }
+    var alive = new Set(me.enemies);
+    for (var j = 0; j < snap.length; j++) {
+      var b = snap[j], g = b.e;
+      if (!alive.has(g)) continue;                       // 这一回合里死了
+      if (b.region !== undefined && b.region >= 0 && myR !== b.region) continue;  // 区域门禁
+      st.total++;
+      var moved = (g.x !== b.x || g.y !== b.y);
+      if (moved) {
+        st.moved++;
+        if (Math.abs(g.x - px) + Math.abs(g.y - py) === 1) st.movedAdj++;
+        continue;
+      }
+      if (Math.abs(b.x - px) + Math.abs(b.y - py) <= 1) { st.adj++; continue; }
+      if (b.stun > 0) { st.stunned++; continue; }
+      var fast = (g.kind === 'elite' || g.kind === 'boss');
+      if (!(fast || (b.cd + 1) % 2 === 0)) { st.waited++; continue; }
+      // 该动却没动 —— 查明原因（复刻 core 里那段分支）
+      var path = me.findPath(b.x, b.y, px, py, 260, 0, b.region);
+      if (!path || path.length < 2) { st.noPath++; continue; }
+      var n2 = path[1];
+      if (n2.x === px && n2.y === py) { st.playerTile++; continue; }
+      if (me.enemyAt(n2.x, n2.y)) { st.blockedFoe++; continue; }
+      st.other++;
+    }
+    return r;
+  };
+
+  // 接战那一刻，玩家四邻有几只（与 probe_hpcurve 同一口径，方便对齐）
+  var ob = P._fightBegin;
+  var adjAtFight = [];
+  P._fightBegin = function (foes, atkType) {
+    var out = ob.apply(this, arguments);
+    var d1 = 0;
+    for (var i = 0; i < this.enemies.length; i++) {
+      var e = this.enemies[i];
+      if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) === 1) d1++;
+    }
+    adjAtFight.push(d1);
+    return out;
+  };
+
+  for (var di = 0; di < DIFFS.length; di++) {
+    reset(); adjAtFight = [];
+    try {
+      TideCore.Game.simulate(N, { difficulty: DIFFS[di], seedBase: 1000, maxTurns: 2400, aiFumble: 0.2 });
+    } catch (e) { L.push('ERR ' + DIFFS[di] + ' ' + e); continue; }
+    L.push('');
+    L.push('=== ' + DIFFS[di] + '  n=' + N + '  回合 ' + st.turns +
+      '  敌人行动判定 ' + st.total + ' 次 ===');
+    L.push('  邻身出手(距离<=1)   ' + pad(pct(st.adj, st.total), 7) + '  ' + st.adj);
+    L.push('  等到自己回合(cd)    ' + pad(pct(st.waited, st.total), 7) + '  ' + st.waited);
+    L.push('  **走了**            ' + pad(pct(st.moved, st.total), 7) + '  ' + st.moved +
+      '   （其中落在玩家四邻 ' + pct(st.movedAdj, st.moved) + '）');
+    L.push('  走不动:被同类挡住   ' + pad(pct(st.blockedFoe, st.total), 7) + '  ' + st.blockedFoe);
+    L.push('  走不动:寻路失败     ' + pad(pct(st.noPath, st.total), 7) + '  ' + st.noPath);
+    L.push('  走不动:目标是玩家格 ' + pad(pct(st.playerTile, st.total), 7) + '  ' + st.playerTile);
+    L.push('  被震晕 / 其他       ' + pad(pct(st.stunned, st.total), 7) + ' / ' + st.other);
+    L.push('  死亡回合的残留      ' + st.dead);
+    var h = {}; for (var k = 0; k < adjAtFight.length; k++) h[adjAtFight[k]] = (h[adjAtFight[k]] || 0) + 1;
+    var ks = Object.keys(h).sort(function (a, b) { return a - b; });
+    L.push('  接战时四邻怪物数分布  ' + ks.map(function (x) {
+      return x + '只:' + Math.round(h[x] / adjAtFight.length * 100) + '%';
+    }).join('  '));
+  }
+  P.endTurn = oe; P._fightBegin = ob;
+  document.getElementById('out').textContent = 'PROBEAPPROACHDONE\n' + L.join('\n');
+})();
+</script>
+</body>
+</html>
