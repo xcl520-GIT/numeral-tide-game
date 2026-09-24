@@ -3403,6 +3403,11 @@ try {
       if (!g.walkable(x, y)) continue;
       var e = g._makeEnemy(x, y, g.depth);
       e.stats.spd = 4;
+      // 吸血必须清零：这一节的判据是"没被选中的那只**没掉血**"，
+      // 而祷者有 25% 吸血 —— 它自愈 4 点也会让血量变化，
+      // 于是一条关于"选目标"的断言会随"哪只怪排在第 0 位"时好时坏。
+      // 实测被 AFFIXES 的权重改动撞到过一次（看起来像新功能弄坏了选目标）。
+      e.stats.leech = 0;
       e.maxHp = e.hp = hp;
       g.enemies.push(e);
     }
@@ -3452,8 +3457,29 @@ try {
   var rQ2 = gQ.duelRound('p', 1);
   if (!rQ2) fail('群战：第二次 duelRound 返回空');
   else if (!(dQ.bs[1].hp < hpBeforeQ[1])) fail('群战：指定的第 2 只没有掉血');
-  else if (dQ.bs[0].hp !== hpBeforeQ[0]) fail('群战：没被选中的第 1 只也掉血了');
+  else if (dQ.bs[0].hp < hpBeforeQ[0]) fail('群战：没被选中的第 1 只也掉血了');
   else ok('群战选目标：只打指定的那一只');
+
+  /* (d2) 横扫（v11.4-k）：一击**同时波及同场的其他敌人**。
+     直接把 cleave 挂到玩家的 flags 上 —— 这和遗物 / 武器词条 / 魂技走的是
+     完全同一条通道，所以这一条断言覆盖了三个来源的**结算侧**
+     （三个来源各自怎么把 cleave 挂上去，由它们自己的那条断言管）。 */
+  var hb2 = dQ.bs.map(function (u) { return u.hp; });
+  dQ.a.flags.cleave = 0.5;
+  var rQ3 = gQ.duelRound('p', 0);
+  var splashed = 0;
+  if (rQ3) {
+    for (var si = 0; si < rQ3.rounds.length; si++) if (rQ3.rounds[si].splash) splashed++;
+  }
+  var aliveQ = 0;
+  for (var ai = 0; ai < dQ.bs.length; ai++) if (hb2[ai] > 0) aliveQ++;
+  if (!rQ3) fail('横扫：duelRound 没返回');
+  else if (!(dQ.bs[0].hp < hb2[0])) fail('横扫：主目标没掉血');
+  else if (splashed !== aliveQ - 1) {
+    fail('横扫：该波及同场另外 ' + (aliveQ - 1) + ' 只，实际 ' + splashed);
+  } else if (!(dQ.bs[1].hp < hb2[1])) fail('横扫：被波及的那只没掉血');
+  else ok('横扫：一击波及同场另外 ' + splashed + ' 只');
+  delete dQ.a.flags.cleave;
   gQ.liveFight = null;
 
   // (e) 多杀结算：四只各 1 血 → 一场对决清场 → 击杀 / 金币按只数累计

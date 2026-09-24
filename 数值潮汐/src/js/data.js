@@ -122,6 +122,12 @@
        疾影      换掉回合压力（额外行动，且不推进潮汐）
        不退之壁  换掉血量压力（残血时的保命符）
 
+       群攻（v11.4-k）：被围住时"一次只打一个"本身就成了一种压力。
+       裂地斩本来就打满四邻、潮语洪流打 4 个、疾影这一轮横扫 ——
+       三个输出职业各有一条"被围住反而不亏"的路。铁壁不参与：
+       它的答案是"硬"，把反伤与双防当群战的解法；
+       给四个职业各塞一个横扫，反而把职业差异抹平了。
+
      规则全部在模型层（core.js 的 useSkill），界面只负责把它画出来 ——
      否则模拟器的 AI 学不会用它，平衡数据就会虚高。
      ============================================================ */
@@ -138,16 +144,19 @@
     },
     arcanist: {
       key: 'torrent', name: '潮语洪流', icon: 'waves', cd: 9, cost: 1,
-      kind: 'ray', count: 3, range: 7, dmgPct: 0.85, tint: '#8fdff0',
+      /* count 3 → 4（v11.4-k）：群战的名单上限就是 4（主角四邻），
+         打 3 个永远差一个 —— 而"差一个"在一场 1v4 里是致命的：
+         留下的那只下一轮照样打你。4 是让这条技能在群战里成立的**最小**值。 */
+      kind: 'ray', count: 4, range: 7, dmgPct: 0.85, tint: '#8fdff0',
       dtype: 'm',
       wet: 2,
-      text: '对视野内最近的 3 个敌人各造成一次法术伤害，并让它们「潮湿」2 回合 —— ' +
+      text: '对视野内最近的 4 个敌人各造成一次法术伤害，并让它们「潮湿」2 回合 —— ' +
         '潮湿期间受到的法术伤害 +25%'
     },
     ranger: {
       key: 'blitz', name: '疾影', icon: 'running-shoe', cd: 8, cost: 0,
-      kind: 'free', moves: 2, dmgOut: 0.35, tint: '#7ee0d6',
-      text: '获得 2 次免费行动（不推进潮汐、敌人也不会动），期间你的攻击 +35%'
+      kind: 'free', moves: 2, dmgOut: 0.35, cleave: 0.5, tint: '#7ee0d6',
+      text: '获得 2 次免费行动（不推进潮汐、敌人也不会动），期间你的攻击 +35%、普攻横扫一圈'
     },
     warden: {
       key: 'bulwark', name: '不退之壁', icon: 'stone-wall', cd: 12, cost: 1,
@@ -301,7 +310,18 @@
     { id: 'bulwark', name: '壁垒',     icon: 'stone-wall',    flags: { lastStand: 0.55 }, weight: 2, rare: true,
       text: '生命低于 40% 时，双防 +55%' },
     { id: 'double',  name: '连击',     icon: 'crossed-swords',flags: { doubleAtSpd: 26 }, weight: 2, rare: true,
-      text: '速度达到 26 时，每轮攻击两次' }
+      text: '速度达到 26 时，每轮攻击两次' },
+
+    /* 横扫（v11.4-k）—— 全项目第一条**限定部位**的词条。
+       为什么要能限定部位：它不是数值，是"你怎么打"。挂在鞋子上
+       （"疾风踏：普攻横扫一圈"）读起来就不对，而玩家遇到想不通的规则时
+       第一反应是怀疑显示错了，不是怀疑设计。所以加一个 slot 字段，
+       让"武器词条"成为一种真实约束。
+       45% 是量出来的起点：它要够到"1v4 比 1v1 打四次划算"，
+       又不能高到把单挑也变成横扫 —— 那时"踩进多只"这个取舍就没了。 */
+    { id: 'cleave',  name: '横扫',     icon: 'cut-palm',      flags: { cleave: 0.45 },  weight: 6, rare: true,
+      slot: 'weapon',
+      text: '普攻同时波及同场的其他敌人，各造成 45% 伤害' }
   ];
   const affixById = function (k) {
     for (const a of AFFIXES) if (a.id === k) return a;
@@ -320,6 +340,10 @@
       text: '物理攻击 +16，物理防御 −6',  mods: { atkP: 16, defP: -6 } },
     { id: 'sunder',    name: '破甲',     icon: 'armor-punch',   school: 'physical',
       text: '物穿 +14',                  mods: { penP: 14 } },
+    { id: 'sweep',     name: '潮汐横扫', icon: 'cut-palm',      school: 'physical',
+      text: '普攻同时波及同场的其他敌人，各造成 35% 伤害', flags: { cleave: 0.35 } },
+    { id: 'ripple',    name: '涟漪',     icon: 'waves',         school: 'arcane',
+      text: '普攻同时波及同场的其他敌人，各造成 30% 伤害', flags: { cleave: 0.30 } },
 
     { id: 'echoRune',  name: '奥术回响', icon: 'sound-waves',   school: 'arcane',
       text: '法术伤害有 28% 概率翻倍',   flags: { echo: 0.28 } },

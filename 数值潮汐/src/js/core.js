@@ -228,6 +228,9 @@
       /* 守位 + 惊动半径（v11.4-i）—— 本轮的主角。
          关掉它就是旧的"区域门禁"（玩家进区才动）—— 对照组。 */
       this.hold = (opts.hold === undefined) ? true : !!opts.hold;
+      /* 横扫（群攻）的总开关。它有三个来源（遗物/秘藏词条、武器词条、职业魂技），
+         一个总开关才能回答"群攻这一整套值多少"，而不是三个来源各管各的。 */
+      this.cleaveOn = (opts.cleave === undefined) ? true : !!opts.cleave;
 
       this.seed = (opts.seed === undefined || opts.seed === null)
         ? ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0)
@@ -1397,6 +1400,10 @@
       const n = rarity.affixes;
       const used = {};
       const pool2 = D.AFFIXES.filter(function (a) {
+        // 带 slot 的词条只出现在那个部位上。"武器词条"是一条真实的设计约束，
+        // 不是一句文案：横扫这种东西挂在鞋子上读起来就不对，
+        // 而玩家遇到想不通的规则时，第一反应是怀疑显示错了。
+        if (a.slot && a.slot !== item.slot) return false;
         return !a.rare || rarity.key === 'epic' || rarity.key === 'legendary' || rng.chance(0.34);
       });
       for (let i = 0; i < n; i++) {
@@ -1811,6 +1818,31 @@
           dst.hp -= counter;
           extra.push('克制' + counter);
         }
+        /* 群攻（v11.4-k）：这一击**同时波及同场的其他敌人**。
+
+           为什么它不需要"距离"参数：群战的参战名单本身就是**围在主角身边的
+           那一圈**（_squadAt 只取四邻），所以"同场的其他敌人"精确等于
+           "同一圈里的其他敌人"。少一个坐标，就少一处会和玩家看到的画面对不上的地方。
+
+           走的是和 vsMul / thorns 完全同一套 flags 通道 —— 结算不必知道这份
+           45% 是遗物给的、武器给的还是魂技给的。三个来源因此共用一条实现，
+           也就不会出现"遗物生效了、武器没生效"这种只有玩家能发现的偏差。
+
+           放在吸血**之前**：吸血按主伤害算一次，不能因为敲到了别人就多回血。 */
+        if (src.isPlayer && g.cleaveOn && bs.length > 1 && num(src.flags.cleave) > 0) {
+          const splash = Math.max(1, Math.round(dmg * num(src.flags.cleave)));
+          for (let i = 0; i < bs.length; i++) {
+            const u = bs[i];
+            if (u === dst || u.hp <= 0) continue;
+            u.hp -= splash;
+            roundLog.push({
+              r: round, from: src.name, to: u.name, dmg: splash,
+              type: atk.type, crit: false, heal: 0, extra: '横扫',
+              reflect: 0, counter: 0, splash: true
+            });
+          }
+        }
+
         // 吸血
         let heal = 0;
         let leech = num(src.st.leech) + num(src.flags.leech || 0);
@@ -3082,7 +3114,11 @@
         this.freeMoves += s.moves;
         this._pushBuff({
           key: s.key, name: s.name, icon: s.icon, turns: 1,
-          flags: { dmgOut: s.dmgOut }, hint: '本轮攻击 +' + Math.round(s.dmgOut * 100) + '%'
+          // cleave 走同一个 flags 包。"这一轮能横扫一圈"和"+35% 伤害"
+          // 在结算里是两件独立的事，但都只需要在这里挂上去一次。
+          flags: { dmgOut: s.dmgOut, cleave: s.cleave || 0 },
+          hint: '本轮攻击 +' + Math.round(s.dmgOut * 100) + '%'
+            + (s.cleave ? '，普攻横扫一圈' : '')
         });
       } else if (s.kind === 'buff') {
         const max = this.stats().hp;
@@ -3426,7 +3462,8 @@
           slots: opts.slots,
           tick: opts.tick,
           alert: opts.alert,
-          hold: opts.hold
+          hold: opts.hold,
+          cleave: opts.cleave
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;
