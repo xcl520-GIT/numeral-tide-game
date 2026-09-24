@@ -329,7 +329,13 @@
         const r = this._relicById(id);
         if (r) add(r.mods);
       }
-      if (this.devourStacks) s.atkP = num(s.atkP) + this.devourStacks * 2;
+      // 吞噬：每层 +2 物攻，**读的时候也夹一次**。
+      // 写的时候夹只让那个数字本身干净；读的时候夹才是给玩家的保证 ——
+      // 面板上的物攻永远不会超过上限，不管层数是哪条路径加上去的。
+      if (this.devourStacks) {
+        const dvs = Math.min(this.devourStacks, D.COMBAT.devourMaxStacks);
+        s.atkP = num(s.atkP) + dvs * D.COMBAT.devourAtkPerStack;
+      }
       // 临时增益（魂技的不退之壁）：用**乘法**乘在最后。
       // 写成加法会和装备/遗物的加防叠在一起，越到后期越接近无敌 ——
       // 而乘法让它在任何装备水平下的相对收益都是恒定的。
@@ -2315,7 +2321,12 @@
       if (enemy.kind === 'boss') this.bossKills++;
       this.events.push({ kind: 'kill', enemy: enemy });
       const fl = this.flags();
-      if (num(fl.devour) > 0) this.devourStacks += num(fl.devour);
+      // 叠层也夹住。不夹的话 devourStacks 会一路涨到几百：面板虽然被夹住了，
+      // 但这个数字会被别处读到（平衡统计、调试输出、将来的界面）。
+      if (num(fl.devour) > 0) {
+        this.devourStacks = Math.min(D.COMBAT.devourMaxStacks,
+          this.devourStacks + num(fl.devour));
+      }
 
       // 掉落
       let gold = D.LOOT.goldPerKill + this.depth * D.LOOT.goldPerDepth;

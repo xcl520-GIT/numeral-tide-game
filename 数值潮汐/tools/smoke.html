@@ -3497,6 +3497,50 @@ try {
   w.TideUI.closeBattle();
 } catch (e) { fail('群战测试异常: ' + (e && e.stack ? e.stack : e)); }
 
+
+/* ---------- 43. 吞噬的成长上限 ----------
+   为什么必须有这条断言：上限是一条"防无限滚雪球"的护栏，
+   而护栏的特征是 —— **拆掉它游戏照样能跑**，只是几局之后数值失控。
+   没有断言盯着，下次谁把那个 Math.min 删掉都不会有人发现。 */
+try {
+  var CD = w.TideData.COMBAT;
+  var capAtk = CD.devourMaxStacks * CD.devourAtkPerStack;
+  var gD = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 4242 });
+  var baseAtk = gD.stats().atkP;
+
+  // (a) 读时封顶：直接塞 200 层，面板也不许超过上限
+  gD.devourStacks = 200;
+  var gotAtk = gD.stats().atkP;
+  if (Math.round(gotAtk) !== Math.round(baseAtk + capAtk)) {
+    fail('吞噬读时未封顶：atkP=' + Math.round(gotAtk) + ' 期望 ' + Math.round(baseAtk + capAtk));
+  } else ok('吞噬读时封顶：塞 200 层也只算 ' + CD.devourMaxStacks + ' 层（+' + capAtk + ' 物攻）');
+
+  // (b) 叠层封顶：真杀 20 只，层数必须停在上限
+  // 用 freshG + relics.push + 假敌人：这套写法本套件已经用过
+  //（见「⑥ 文案 ↔ 实现：吞噬系」那一段），不要再发明第二种。
+  // 注意用 devourR（吞噬者，秘藏）：`吞噬` 那一条是**装备词条**，
+  // 住在 data.js 的 AFFIXES 里，靠穿戴生效，塞进 relics 当然没反应。
+  // 两者都往 devourStacks 上叠，所以上限只要测其中一条就够。
+  var gD2 = freshG(5156);
+  gD2.enemies.length = 0;
+  gD2.relics.push('devourR');
+  if (!(gD2.flags().devour > 0)) {
+    fail('吞噬者没有生效（flags.devour=0）—— 这条断言失去意义');
+  }
+  for (var dk = 0; dk < 20; dk++) {
+    gD2._killEnemy({ kind: 'normal', name: '测试' + dk, x: gD2.px, y: gD2.py,
+      hp: 1, maxHp: 1, stats: { hp: 1 } }, true);
+  }
+  if (gD2.devourStacks !== CD.devourMaxStacks) {
+    fail('吞噬叠层未封顶：20 杀之后 = ' + gD2.devourStacks + ' 层，期望 ' + CD.devourMaxStacks);
+  } else ok('吞噬叠层封顶：20 杀之后仍是 ' + gD2.devourStacks + ' 层');
+
+  // (c) 上限不能把这条遗物变成废物：满层仍然要明显强于基础
+  if (!(capAtk >= 10)) {
+    fail('吞噬上限太低（+' + capAtk + ' 物攻），这条遗物会变成废牌');
+  } else ok('吞噬上限仍然是一条真收益：+' + capAtk + ' 物攻（基础 ' + Math.round(baseAtk) + '）');
+} catch (e) { fail('吞噬上限测试异常: ' + (e && e.stack ? e.stack : e)); }
+
   w.TideUI.closeBattle();
   w.TideMeta.reset();
 } catch (e) { fail('规则层测试异常: ' + (e && e.stack ? e.stack : e)); }

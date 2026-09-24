@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>probe-squad</title>
+<style>body{background:#0a0e18;color:#ccd6e6;font:13px Consolas,monospace}pre{padding:12px;white-space:pre-wrap}</style>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* 群战到底有几成、平均几只、代价多大？
+
+   为什么必须量这个：
+   "踩上敌人格 → 四邻一起参战"这条规则看起来一定更难（一轮 1 打 N，
+   整场要吃 N(N+1)/2 次攻击），但 n=300 的通关率只动了 ±3pp ——
+   两种情况都能解释它：① 机制真的没多大杠杆（群战很少发生）；
+   ② 那 3pp 根本是噪声（项目自己的口径：n=300 对随机流敏感约 ±2pp）。
+
+   这两个可能必须分开，否则后面所有关于"要不要加群攻"的讨论都是空谈。
+   所以这里把**每一场对决**都记下来，按参战只数分桶：
+     桶内：场数占比 / 均轮数 / 玩家均掉血 / 均击杀 / 该桶内的胜率
+
+   期望看到的东西：
+     · 如果 1v1 占了 90%+，那"群战改变难度"这个话题本身就没有基础，
+       该先解决"为什么打不起来群战"（敌人太稀疏 / AI 不会引怪）；
+     · 如果均掉血随只数近似线性增长，说明 1:N 的代价确实兑现在模型里；
+     · 如果 4v1 的场次很少但掉血极高，说明它有杠杆但被低发生率盖住了。 */
+(function () {
+  var qp = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return; var p = kv.split('='); qp[p[0]] = decodeURIComponent(p[1] || '');
+  });
+  var n = parseInt(qp.n || '300', 10);
+  var diff = qp.diff || 'abyss';
+  var squad = (qp.squad === undefined || qp.squad === '') ? 1 : parseInt(qp.squad, 10);
+
+  var lines = ['SQUADPROBE'];
+  var P = TideCore.Game.prototype;
+  var buckets = {};
+  function slot(s) {
+    if (!buckets[s]) {
+      buckets[s] = { n: 0, rounds: 0, taken: 0, dealt: 0, kills: 0, win: 0, foeHp: 0, first: 0 };
+    }
+    return buckets[s];
+  }
+
+  var oBegin = P._fightBegin;
+  P._fightBegin = function (foes) {
+    var L = oBegin.apply(this, arguments);
+    var list = (L && L.enemies) ? L.enemies : [];
+    // 起点血量、敌方总血、以及"这一场是第几场"（用来看前期/后期）
+    L.__sq = {
+      hp0: this.hp,
+      size: list.length,
+      foeHp: 0,
+      oneShot: 0
+    };
+    for (var i = 0; i < list.length; i++) {
+      L.__sq.foeHp += list[i].maxHp;
+      // 一只怪是否会被玩家一击打死 —— "一击一只"是 1vN 能不能成立的关键
+      if (list[i].maxHp <= 1) L.__sq.oneShot++;
+    }
+    return L;
+  };
+
+  var oSettle = P._fightSettle;
+  P._fightSettle = function (L, played) {
+    var info = (L && L.__sq) ? L.__sq : null;
+    var r = oSettle.apply(this, arguments);
+    if (!info) return r;
+    var v = slot(info.size);
+    v.n++;
+    var rounds = (r && r.rounds && r.rounds.length) ? (r.rounds[r.rounds.length - 1].r || 0) : 0;
+    v.rounds += rounds;
+    v.foeHp += info.foeHp;
+    v.taken += Math.max(0, info.hp0 - this.hp);
+    if (r && r.killed) v.kills += r.killed;
+    if (r && r.win) v.win++;
+    // 玩家这一段打出去的总伤害（直接从明细里加，不另算一遍公式）
+    if (r && r.rounds) {
+      for (var i = 0; i < r.rounds.length; i++) {
+        var e = r.rounds[i];
+        if (e.from === this.cls.name) v.dealt += (e.dmg || 0) + (e.counter || 0);
+      }
+    }
+    return r;
+  };
+
+  var t0 = Date.now();
+  var out = TideCore.Game.simulate(n, {
+    difficulty: diff, seedBase: 1000, maxTurns: 2400,
+    aiFumble: 0.2, aiStance: true, squad: !!squad
+  });
+  var el = Date.now() - t0;
+
+  lines.push('diff=' + diff + '  n=' + n + '  群战=' + (squad ? '开' : '关') +
+    '  win=' + out.winRate + '%  elapsed=' + el + 'ms');
+
+  var ks = Object.keys(buckets).map(Number).sort(function (a, b) { return a - b; });
+  var total = 0;
+  for (var a = 0; a < ks.length; a++) total += buckets[ks[a]].n;
+  lines.push('总场数 = ' + total);
+  lines.push('参战  场数    占比     均轮数  均掉血   均输出   均击杀  该桶胜率');
+  for (var b = 0; b < ks.length; b++) {
+    var k = ks[b], v = buckets[k];
+    lines.push('  ' + k + '  ' +
+      String(v.n).padStart(6) + '  ' +
+      (Math.round(v.n / total * 1000) / 10 + '%').padStart(7) + '  ' +
+      (Math.round(v.rounds / v.n * 100) / 100).toFixed(2).padStart(6) + '  ' +
+      (Math.round(v.taken / v.n * 10) / 10).toFixed(1).padStart(7) + '  ' +
+      (Math.round(v.dealt / v.n * 10) / 10).toFixed(1).padStart(7) + '  ' +
+      (Math.round(v.kills / v.n * 100) / 100).toFixed(2).padStart(6) + '  ' +
+      (Math.round(v.win / v.n * 1000) / 10 + '%').padStart(8));
+  }
+  lines.push('SQUADDONE');
+  document.getElementById('out').textContent = lines.join('\n');
+})();
+</script>
+</body>
+</html>

@@ -31,7 +31,17 @@
        它的作用不是"补偿难度"，而是把「读懂敌人」变成**正收益**：
        只惩罚选错、不奖励选对，玩家学到的会是"别乱选"，而不是"要去看"。
        默认 0 —— 先让重构本身可验证（逐位对照），再单独打开它量影响。 */
-    counterBonus: 0.25
+    counterBonus: 0.25,
+
+    /* 吞噬（遗物）的成长：每层 +2 物攻，但**有上限**。
+       为什么必须封顶：它每击杀永久叠层、原实现无上限。实测深渊一局 70 杀
+       就是 +280~420 物攻，而破军基础物攻只有 44 —— 6~10 倍。
+       后果直接量得到：1v1 场次里玩家平均要打出 957 点伤害才杀得掉一只怪，
+       敌人一辈子没机会出手（均掉血 1.4），"每轮选一次"这类决策全部退化。
+       上限取 10 层 = +20 物攻（对基础 44 是 +45%）：仍是爽点，但不再无限。
+       放在这里而不是散在 core.js 里，是为了让"它有多强"只有一个出处。 */
+    devourAtkPerStack: 2,
+    devourMaxStacks: 10
   };
 
   /* ============================================================
@@ -282,8 +292,10 @@
     // 所以 flags.devour 2 / 3 对应的实际收益是 +4 / +6 物攻 ——
     // 文案原来写的是 +2 / +3，少算了一半。改文案而不是改数值：
     // 数值一动就会移动三档平衡基线，那该是单独的一次决定。
+    // —— v11.4-c：那个"单独的一次决定"到了。见 COMBAT.devourMaxStacks
+    //    上面的实测数据。上限 +20 物攻，文案同步写明。
     { id: 'devour',  name: '吞噬',     icon: 'tooth',         flags: { devour: 2 },     weight: 2, rare: true,
-      text: '每击杀一名敌人，物理攻击 +4' },
+      text: '每击杀一名敌人，物理攻击 +4（最多 +20）' },
     { id: 'vampiric',name: '血契',     icon: 'vampire-dracula', flags: { leechBonusIfBleed: 0.5 }, weight: 2, rare: true,
       text: '生命低于一半时，吸血效果 +50%' },
     { id: 'bulwark', name: '壁垒',     icon: 'stone-wall',    flags: { lastStand: 0.55 }, weight: 2, rare: true,
@@ -338,7 +350,7 @@
       text: '生命上限 +90，法攻 +6',     mods: { hp: 90, atkM: 6 } },
     { id: 'devourR',   name: '吞噬者',   icon: 'tooth',         school: 'vitality',
       // 同「吞噬」：devour 是层数，每层 ×2 物攻 → 实际 +6 物攻/击杀
-      text: '每击杀一名敌人永久 +6 物攻', flags: { devour: 3 } },
+      text: '每击杀一名敌人永久 +6 物攻（最多 +20）', flags: { devour: 3 } },
 
     { id: 'allround',  name: '全能之印', icon: 'shining-heart', school: 'universal',
       text: '全部核心属性 +5',           mods: { hp: 25, atkP: 5, atkM: 5, penP: 5, penM: 5, defP: 5, defM: 5, spd: 5 } },
