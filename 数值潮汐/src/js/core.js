@@ -1015,6 +1015,10 @@
         // 守门堆成员（A-lite）。它是**绕不开**的那一场，掉落要对得起它。
         // 和 slot / hitKb 一样必须在字面量里声明：每回合都会被读到。
         keep: false,
+        /* 撤离的"脱接触"（v11.5 P3 第三步）：被你甩开的那只这一回合不追。
+           **必须在字面量里声明** —— 同 keep / slot / hitKb 的理由：
+           它是热路径字段，等第一次用到再挂上去会触发隐藏类迁移。 */
+        fleeGrace: false,
         // 守位/惊动状态（v11.4-i）。home 是巢位 —— 回位纪律要求它**真的走回原格**，
         // 不然玩家反复拉打几轮之后，堆形会永久散掉，数据比不做还难看。
         homeX: x, homeY: y,
@@ -1046,6 +1050,8 @@
            同 keep / slot / hitKb 的理由：它是热路径字段，
            等第一次用到再挂上去会触发隐藏类迁移。 */
         roarLatch: false,
+        // 撤离的脱接触（同上）：Boss 也要能被"甩开一回合"。
+        fleeGrace: false,
         tags: tagsOf(st, arc),
         stance: canStance(st, arc) ? (this.rng.chance(0.5) ? 'p' : 'm') : null,
         stanceT: D.STANCE.every, stanceFx: 0,
@@ -2647,7 +2653,10 @@
          而这件事需要地图（区域、寻路、槽位、谁还站着）。 */
       const tick = function (d) {
         me._fightRoundTick(list);
-        return picker ? picker(d) : fixed;
+        /* 名单也交给 picker：撤离需要知道"场上有哪些怪"才能把玩家推开
+           （无头路径没有 liveFight 可查，见 duelUseSkill 那段注释）。
+           多传一个参数不影响旧 picker —— 它们只是不读它。 */
+        return picker ? picker(d, list) : fixed;
       };
       L.duel.runAuto(tick);
       return this._fightSettle(L);
@@ -2797,7 +2806,7 @@
       if (!this.aiStance) return null;
       const g = this;
       let lastSig = null, lastPick = null;
-      return function (d) {
+      return function (d, list) {
         // "题目"= 场上敌人的姿态组合（谁还活着、各自哪一面硬化）。
         // 只有它变了才重新读 —— 理由见上面那段长注释：面板一个字没变时重掷
         // 骰子，等于假设玩家每轮都重新怀疑自己一次（实测白拿 +11.4pp）。
@@ -2822,7 +2831,7 @@
         /* 撤离优先于放技能：都是 CD/收益尺度的决定，但"这一轮会被打残"
            比"这一轮多打一截"更紧急，而且撤了就轮不到技能了 ——
            顺序反了会先花掉冷却再撤退，那是纯粹的白给。 */
-        if (g.fleeAiOn && g.fleeOn && !d.fled && g._shouldFlee(d)) g.duelFlee(d);
+        if (g.fleeAiOn && g.fleeOn && !d.fled && g._shouldFlee(d)) g.duelFlee(d, list);
         else if (g.duelSkillOn && !d.used && g.skillCd <= 0) g.duelUseSkill(d);
         return lastPick;
       };
@@ -3805,16 +3814,69 @@
      * @returns {{ok:boolean, reason?:string}}
      *   reason: 'nofight' / 'off'（开关关着） / 'fled'（已经撤过） / 'over'（已收场）
      */
-    duelFlee(duel) {
+    duelFlee(duel, foes) {
       const d = duel || (this.liveFight ? this.liveFight.duel : null);
       if (!d) return { ok: false, reason: 'nofight' };
       if (!this.fleeOn) return { ok: false, reason: 'off' };
       if (d.fled) return { ok: false, reason: 'fled' };
       if (d.finished) return { ok: false, reason: 'over' };
       if (!d.abandon(D.FLEE.lootMul)) return { ok: false, reason: 'over' };
+      /* ---- 脱接触：撤离**买到**的那一下（用户拍板：推开一格 + 敌人本回合不动）----
+         没有它，撤离换不到任何东西 —— 战斗从"相邻"开始，撤完敌人还在旁边
+         还醒着，下一回合照样打你。实测（n=300×3）只带代价的撤离让 AI 的通关率
+         掉 26.0 / 17.0 / 14.7pp，根因就在这一处。
+         顺序不能反：**先推再挂 grace**。反了的话"它这一回合不追"会花在
+         那一格还贴着你的敌人身上，玩家看不出任何区别（它本来就能打到你）。
+         目标取"最近的那只活敌人"：撤离是整场退出，脱的是一圈，
+         而玩家眼里挡住他的就是最近的那一侧。 */
+      const list = foes || (this.liveFight ? this.liveFight.enemies : null) || [];
+      let foe = null, foeD = 1e9;
+      for (let i = 0; i < list.length; i++) {
+        const en = list[i];
+        if (!en) continue;
+        /* 活着与否必须认**对决**那一份（d.bs[i].hp），不能读模型：
+           模型的血只在收场那一刻才写回（刻意的单一写回点），所以撤的那一刻，
+           对决里已经被打死的那只在模型里还活着 —— 读模型会把"脱"挂到尸体上，
+           而真正贴着玩家的那一只照常追（实测就是这么错的）。
+           两者按下标对齐：_fightBegin 按同一个顺序建名单，
+           _fightSettle 那段注释本来就写着"res.bsHp 与 list 一一对应"。 */
+        const u = d.bs[i];
+        if (u && u.hp <= 0) continue;
+        const dd = Math.abs(en.x - this.px) + Math.abs(en.y - this.py);
+        if (dd < foeD) { foeD = dd; foe = en; }
+      }
+      const pushed = this._pushBackFrom(foe, D.FLEE.pushBack);
+      if (foe) foe.fleeGrace = true;
       for (let i = 0; i < D.FLEE.tideBeat; i++) this._tideAdvance();
       this.flees = (this.flees || 0) + 1;
-      return { ok: true };
+      return { ok: true, pushed: pushed, grace: !!foe };
+    }
+
+    /**
+     * 把**玩家**沿"远离某只敌人"的主轴推开若干格（v11.5 P3 第三步）。
+     *
+     * 它和 _knockback 是一对镜像：那个推敌人，这个推玩家。
+     * 为什么也"只沿主轴四方向"：这个游戏的移动是四方向的，
+     * 斜推会把玩家放到一个他自己根本走不进来的格子上 —— 画面与规则当场对不上。
+     *
+     * **尽力而为**：撞墙 / 被别的怪占住就停下，返回**实际**推开的格数。
+     * 撤离的收益不该因为"身后正好是墙"变成负的 —— 那只是这一格不存在，
+     * 不是"应该推开却没推开"。
+     */
+    _pushBackFrom(e, dist) {
+      if (!e || !(num(dist) > 0)) return 0;
+      const ddx = this.px - e.x, ddy = this.py - e.y;
+      if (ddx === 0 && ddy === 0) return 0;
+      const sx = Math.abs(ddx) >= Math.abs(ddy) ? Math.sign(ddx) : 0;
+      const sy = sx === 0 ? Math.sign(ddy) : 0;
+      let moved = 0;
+      for (let i = 0; i < num(dist); i++) {
+        const nx = this.px + sx, ny = this.py + sy;
+        if (!this.walkable(nx, ny) || this.enemyAt(nx, ny)) break;
+        this.px = nx; this.py = ny; moved++;
+      }
+      if (moved > 0) this._checkRegion();
+      return moved;
     }
 
     /**
@@ -4033,6 +4095,12 @@
           this.events.push({ kind: 'stunned', enemy: e });
           continue;
         }
+        /* 撤离的"脱接触"（v5.5 P3 第三步）：被你甩开的那只**这一回合不追**。
+           一次性：消费掉就清零，所以下一回合它照常动。
+           为什么不复用 stun：眩晕会在怪身上挂出"被震晕"的徽章与飘字，
+           而玩家并没有震晕它 —— 那是界面在替机制撒谎，而且是最难查的一种
+           （徽章本身显示正确，错的只是原因）。 */
+        if (e.fleeGrace) { e.fleeGrace = false; continue; }
         /* 守位 / 惊动（v11.4-i）：是否行动由**距离与状态**决定，不再由区域门禁决定。
            为什么必须换掉区域门禁：门禁的判据是"玩家已经踏进这个房间"，
            也就是它们比玩家晚出发整整一个房间的距离 —— 等玩家走到第一只面前，
