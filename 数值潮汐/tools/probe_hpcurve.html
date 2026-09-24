@@ -56,6 +56,9 @@
   var FUMBLE = (Q.fumble === undefined) ? 0.2 : parseFloat(Q.fumble);
   var COUNTER = (Q.counter === undefined) ? undefined : parseFloat(Q.counter);
   var SQUAD = (Q.squad === undefined) ? 1 : parseInt(Q.squad, 10);
+  // 惊动房间每回合都挪（v11.4-g 的旧机制，默认关）。
+  // 分格到位之后再单独量它 —— "先分格、再加速"这个顺序从没验过。
+  var ALERT = (Q.alert === undefined) ? 0 : parseInt(Q.alert, 10);
 
   /* 一个扫描点 = 血量倍率 + 攻击倍率。
      为什么两个必须一起扫：只抬血量，敌人就多出手几轮，
@@ -80,7 +83,7 @@
 
   function measure(diff) {
     var s = { n1: 0, r1: 0, one1: 0, nAll: 0, rAll: 0, oneAll: 0, nAll1v1: 0, rAll1v1: 0, oneAll1v1: 0, squad: 0,
-              nW: 0, rW: 0, oneW: 0, d1: 0, d2: 0 };
+              nW: 0, rW: 0, oneW: 0, d1: 0, d2: 0, byKind: {} };
     // 逐场明细：只记 1v1 杂兵。用来回答"血量已经够厚了，为什么还是一轮结束"。
     // 判据是 ehp 与**实测每击**的关系，而不是面板单击 ——
     // 面板单击在遗物多了之后会低估 1.5~3.5 倍（见 probe_curve）。
@@ -110,6 +113,18 @@
         if (k > 1) s.squad++;
         s.nAll++; s.rAll += rd; s.oneAll += one;
         if (k === 1) { s.nAll1v1++; s.rAll1v1 += rd; s.oneAll1v1 += one; }
+        /* 按"这一只从哪来"劈开。
+           野生的怪是**布点**放上去的，成群；召唤物是**逐个生成**在空地格上的，
+           天生没有同伴。把两者混在一起算，群战占比会被后者稀释，
+           而"再调一个站位机制"对它们完全无效 —— 它们根本没有堆。
+           判据沿用下面那条：名字和模板同名 = 野生，被改过名 = 召唤物
+           （不把"幼体"两个字写死在探针里）。 */
+        var u1 = L.duel.bs[0];
+        var wild1 = (!u1.src || u1.name === u1.src.arc.name);
+        var kk1 = wild1 ? 'wild' : 'minion';
+        var g4 = s.byKind[kk1] || (s.byKind[kk1] = { n: 0, sq: 0, d1: 0, d2: 0 });
+        g4.n++; g4.d1 += (L.__d1 || 0); g4.d2 += (L.__d2 || 0);
+        if (k > 1) g4.sq++;
         // 「单怪」= 一只、且是杂兵（tier 1、kind normal）。A1 的达标线看的就是它。
         if (k === 1 && L.__t <= 1 && L.__k === 'normal') {
           s.n1++; s.r1 += rd; s.one1 += one;
@@ -135,7 +150,8 @@
     };
     var o = TideCore.Game.simulate(N, {
       difficulty: diff, seedBase: 1000, maxTurns: 2400, classKey: CLS,
-      aiFumble: FUMBLE, counterBonus: COUNTER, aiStance: true, squad: !!SQUAD
+      aiFumble: FUMBLE, counterBonus: COUNTER, aiStance: true, squad: !!SQUAD,
+      alert: !!ALERT
     });
     P._fightBegin = ob; P._fightSettle = os;
     s.win = o.winRate; s.turns = o.turns; s.kills = o.kills;
@@ -172,6 +188,13 @@
           ' | 开战四邻 ' + pad(a(s.d1, s.nAll), 5) + ' 距离2 ' + pad(a(s.d2, s.nAll), 5) +
           ' | 回合 ' + pad(s.turns, 6) + ' 杀 ' + pad(s.kills, 5) +
           ' TO ' + s.timeout + ' ST ' + s.stall);
+        ['wild', 'minion'].forEach(function (kk2) {
+          var g5 = s.byKind[kk2];
+          if (!g5 || !g5.n) return;
+          lines.push('        ' + (kk2 === 'wild' ? '野生  ' : '召唤物') + ' n=' + pad(g5.n, 6) +
+            '  群战 ' + pad(pc(g5.sq, g5.n) + '%', 5) +
+            '  开战四邻 ' + pad(a(g5.d1, g5.n), 5) + '  距离2 ' + pad(a(g5.d2, g5.n), 5));
+        });
         if (Q.detail && s.detail && s.detail.length) {
           var ds = s.detail.slice().sort(function (x, y) { return x.ehp / Math.max(1, x.ph) - y.ehp / Math.max(1, y.ph); });
           var rq = [0.1, 0.25, 0.5, 0.75, 0.9].map(function (q) {
