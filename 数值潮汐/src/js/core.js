@@ -300,7 +300,14 @@
       for (const k in g) s[k] = num(s[k]) + g[k] * lv;
       return s;
     }
-    level() { return 1 + Math.floor(this.kills / D.PROGRESSION.levelEvery); }
+    level() {
+      // 等级封顶，见 PROGRESSION.maxLevel 那段注释。
+      // 在这里夹而不是在别处：level() 是等级的唯一读法 —— 面板、HUD、
+      // 升级提示全都走它，夹一处就等于全都夹住了。
+      const raw = 1 + Math.floor(this.kills / D.PROGRESSION.levelEvery);
+      const cap = D.PROGRESSION.maxLevel || raw;
+      return Math.min(cap, raw);
+    }
 
     /**
      * 背包容量。**只有这一处能回答"能装几件"。**
@@ -451,6 +458,10 @@
       this.tideTurn = 0;
       this.aiGoal = null;          // 换层必须清空目标，否则会朝上一层的坐标走
       this.aiBad = {};             // 本层的"走不到"黑名单
+      // 本层已击杀数：给"这一层刷够了就走"用（见 PROGRESSION.leaveLayerAfterKills）。
+      // 与 aiGoal/aiBad 同一处声明 + 重置：换层必须归零，否则第二层一开局
+      // 就以为"刷够了"、直接冲出口。
+      this.layerKills = 0;
 
       const idx = (x, y) => y * this.W + x;
       const setT = (x, y, v) => { if (x > 0 && y > 0 && x < this.W - 1 && y < this.H - 1) this.tiles[idx(x, y)] = v; };
@@ -2317,6 +2328,7 @@
       const i = this.enemies.indexOf(enemy);
       if (i >= 0) this.enemies.splice(i, 1);
       this.kills++;
+      this.layerKills++;
       if (enemy.kind === 'elite') this.eliteKills++;
       if (enemy.kind === 'boss') this.bossKills++;
       this.events.push({ kind: 'kill', enemy: enemy });
@@ -3298,7 +3310,12 @@
           const c = this._nearestTile(T.CHEST, 'chest');
           if (c && c.d <= 12) g = { type: 'chest', x: c.x, y: c.y };
         }
-        if (!g) {
+        // ★ v11.4-e：本层刷够了就不主动找架打，直接往下走。
+        //   潮汐会无限补充敌人，而"打最近的敌人"这条策略加上它，
+        //   会让 AI 永远在打、永远不离开（实测第 4 层 700 杀、满血、
+        //   2400 回合撞上限）。见 PROGRESSION.leaveLayerAfterKills。
+        //   被堵住时仍然会打 —— 下面那段"贴脸兜底"没动。
+        if (!g && this.layerKills < D.PROGRESSION.leaveLayerAfterKills) {
           const t = this._pickTarget();
           if (t) g = { type: 'enemy', ref: t, x: t.x, y: t.y };
         }

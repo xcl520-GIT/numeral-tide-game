@@ -3541,6 +3541,31 @@ try {
   } else ok('吞噬上限仍然是一条真收益：+' + capAtk + ' 物攻（基础 ' + Math.round(baseAtk) + '）');
 } catch (e) { fail('吞噬上限测试异常: ' + (e && e.stack ? e.stack : e)); }
 
+
+/* ---------- 44. 等级成长上限 ----------
+   和吞噬上限同一个道理：护栏的特征是**拆掉它游戏照样能跑**，
+   只是几局之后数值失控。没有断言盯着，下次谁把那个 Math.min 删掉都不会有人发现。 */
+try {
+  var PL = w.TideData.PROGRESSION;
+  var gL = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 4242 });
+  if (!(PL.maxLevel > 1)) fail('PROGRESSION.maxLevel 不合法：' + PL.maxLevel);
+  else if (gL.level() !== 1) fail('开局等级不是 1：' + gL.level());
+  else {
+    gL.kills = PL.maxLevel * PL.levelEvery * 20;      // 远超上限
+    if (gL.level() !== PL.maxLevel) {
+      fail('等级未封顶：' + gL.kills + ' 杀之后 = Lv' + gL.level() + '，期望 Lv' + PL.maxLevel);
+    } else {
+      var atkOver = gL.stats().atkP;
+      gL.kills = PL.maxLevel * PL.levelEvery;         // 刚好满级
+      var atkAtCap = gL.stats().atkP;
+      if (Math.round(atkOver) !== Math.round(atkAtCap)) {
+        fail('满级之后再杀，物攻还在涨：' + Math.round(atkAtCap) + ' → ' + Math.round(atkOver));
+      } else ok('等级封顶：' + (PL.maxLevel * PL.levelEvery * 20) +
+        ' 杀仍是 Lv' + gL.level() + '，物攻停在 ' + Math.round(atkAtCap));
+    }
+  }
+} catch (e) { fail('等级上限测试异常: ' + (e && e.stack ? e.stack : e)); }
+
   w.TideUI.closeBattle();
   w.TideMeta.reset();
 } catch (e) { fail('规则层测试异常: ' + (e && e.stack ? e.stack : e)); }

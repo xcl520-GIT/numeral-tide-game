@@ -10,14 +10,15 @@
 <script>
 /* 卡住的那几局，AI 到底每轮在追什么？
 
-   为什么要专用探针：症状是"A 前进两格 → 后退两格"的周期，出口可达、
-   每轮都成功走了一步。已经证伪的假设是"A* 每轮重算导致第一步翻转"
-   （加了路径记忆，timeout 仍在）。剩下的可能全都需要**每轮的目标与落步**
-   才能分辨：
-     · 目标在换（两个目标方向相反，交替选中）
-     · 目标没换但路径在换（水位）
-     · 目标就是这个坐标、但永远走不到（被挡/被水隔开）
-   所以这里把 _aiStep 的决策逐轮记下来，只打印**失败局**的最后 60 轮。 */
+   v1 的教训（已写进历史）：只录最后 60 轮，抓到的是"清完怪之后走向出口"那一段 ——
+   看起来一切正常，真正的抖动发生在更早。所以这一版改成
+   **自动定位抖动窗口**：在整条轨迹里找"最近 12 步只落在 ≤3 个格子上"的时段，
+   把窗口的起点前后各打印一段。
+
+   要分辨的三种可能（都需要"每轮目标"才能分开）：
+     · 目标在两个敌人之间来回换（承诺失效 / 阈值边界）
+     · 目标没换，但它在追一个自己也在来回走的敌人（互相抖）
+     · 目标是一个永远走不到的坐标 */
 (function () {
   var qp = {};
   location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
@@ -26,54 +27,90 @@
   var n = parseInt(qp.n || '300', 10);
   var diff = qp.diff || 'abyss';
   var seedBase = parseInt(qp.seedBase || '1000', 10);
+  var WANT = parseInt(qp.want || '1', 10);
   var CLASSES = ['warlord', 'arcanist', 'ranger', 'warden'];
 
   var P = TideCore.Game.prototype;
-  var REC = [];
-  var recording = false;
+  var REC = [], rec = false;
 
   var oStep = P._autoStep;
   P._autoStep = function () {
     var g = this.aiGoal;
-    var goalTxt = g ? (g.type + '@' + (g.x !== undefined ? (g.x + ',' + g.y) : '?')) : 'none';
-    var beforeX = this.px, beforeY = this.py;
+    var goalTxt = g ? (g.type + (g.x !== undefined ? ('@' + g.x + ',' + g.y) : '')) : 'none';
+    var bx = this.px, by = this.py;
     var r = oStep.apply(this, arguments);
-    if (recording) {
-      REC.push(this.turn + ' pos=' + beforeX + ',' + beforeY +
-        ' -> ' + this.px + ',' + this.py +
-        ' goal=' + goalTxt + ' ret=' + r +
-        ' enemies=' + this.enemies.length +
-        ' hp=' + Math.round(this.hp));
+    if (rec) {
+      REC.push({
+        t: this.turn, x: bx, y: by, ax: this.px, ay: this.py,
+        goal: goalTxt, ret: r, en: this.enemies.length, hp: Math.round(this.hp)
+      });
     }
     return r;
   };
 
+  // 在轨迹里找最长的"抖动段"：滑动窗口内不同格子数 ≤3
+  function findJitter(recs) {
+    var best = null;
+    for (var s = 0; s + 12 <= recs.length; s++) {
+      var set = {}, u = 0;
+      for (var k = s; k < s + 12; k++) {
+        var key = recs[k].ax * 1000 + recs[k].ay;
+        if (!set[key]) { set[key] = 1; u++; }
+      }
+      if (u <= 3) {
+        var e = s;
+        while (e + 12 <= recs.length) {
+          var s2 = {}, u2 = 0;
+          for (var k2 = e; k2 < e + 12; k2++) {
+            var kk = recs[k2].ax * 1000 + recs[k2].ay;
+            if (!s2[kk]) { s2[kk] = 1; u2++; }
+          }
+          if (u2 > 3) break;
+          e += 12;
+        }
+        if (!best || (e - s) > (best.e - best.s)) best = { s: s, e: Math.min(e + 12, recs.length) };
+        s = e;
+      }
+    }
+    return best;
+  }
+
   var lines = ['AISTUCK'];
   var found = 0;
-  for (var i = 0; i < n && found < 2; i++) {
+  for (var i = 0; i < n && found < WANT; i++) {
     var seed = seedBase + i * 7919;
     var g = new TideCore.Game({
       classKey: CLASSES[i % 4], difficulty: diff, seed: seed,
       aiFumble: 0.2, aiStance: true, squad: true
     });
-    REC = [];
-    recording = false;
-    // 跑一段之后才开始录（只关心尾部）
+    REC = []; rec = true;
     var out = null;
-    try {
-      recording = true;
-      out = g.playHeadless(2400);
-    } catch (e) {
-      lines.push('seed=' + seed + ' 异常: ' + (e && e.message));
-      continue;
-    }
-    if (out === 'timeout' || out === 'stall') {
-      found++;
-      lines.push('');
-      lines.push('=== 失败局 seed=' + seed + ' class=' + CLASSES[i % 4] +
-        ' depth=' + g.depth + ' end=' + out + ' kills=' + g.kills);
-      var tail = REC.slice(Math.max(0, REC.length - 60));
-      for (var t = 0; t < tail.length; t++) lines.push('  ' + tail[t]);
+    try { out = g.playHeadless(2400); }
+    catch (e) { lines.push('seed=' + seed + ' 异常: ' + (e && e.message)); continue; }
+    rec = false;
+    if (out !== 'timeout' && out !== 'stall') continue;
+    found++;
+    var j = findJitter(REC);
+    lines.push('');
+    lines.push('=== seed=' + seed + ' class=' + CLASSES[i % 4] + ' depth=' + g.depth +
+      ' end=' + out + ' kills=' + g.kills + ' turns=' + g.turn +
+      ' jitter=' + (j ? (j.s + '..' + j.e) : 'none'));
+    if (j) {
+      var lo = Math.max(0, j.s - 6), hi = Math.min(REC.length, j.s + 34);
+      for (var t = lo; t < hi; t++) {
+        var r = REC[t];
+        lines.push('  ' + (t === j.s ? '>' : ' ') + r.t + ' ' + r.x + ',' + r.y +
+          ' -> ' + r.ax + ',' + r.ay + ' goal=' + r.goal + ' ret=' + r.ret +
+          ' en=' + r.en + ' hp=' + r.hp);
+      }
+    } else {
+      lines.push('  （没找到 ≤3 格的抖动段 —— 那不是走位环，另找原因）');
+      for (var t2 = REC.length - 20; t2 < REC.length; t2++) {
+        if (t2 < 0) continue;
+        var r2 = REC[t2];
+        lines.push('  ' + r2.t + ' ' + r2.x + ',' + r2.y + ' -> ' + r2.ax + ',' + r2.ay +
+          ' goal=' + r2.goal + ' ret=' + r2.ret + ' en=' + r2.en);
+      }
     }
   }
   if (!found) lines.push('本次 n=' + n + ' 没有失败局');
