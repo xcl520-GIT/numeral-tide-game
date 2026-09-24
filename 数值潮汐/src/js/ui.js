@@ -767,6 +767,18 @@
     // 指令菜单（逐回合战斗）。点击统一走 bsCmdCb 这一个收口 ——
     // 键盘的 1 / 2 也走它。两条路各自直接调 doRound 一定会漂移，
     // 而漂移的症状是"用鼠标点能触发克制奖励、用键盘点不能"。
+    // 敌群列表：点某一只 == 方向键选它，**走同一个收口**（bsPickFn）。
+    // 两条路各自改 bsSel 一定会漂移，症状是"鼠标点过的目标和键盘选的不一致"。
+    const foeBox = $('bs-foes');
+    if (foeBox) {
+      foeBox.addEventListener('click', function (evt) {
+        const t = evt.target;
+        if (!t || !t.closest) return;
+        const row = t.closest('[data-foe]');
+        if (row && bsPickFn) bsPickFn(parseInt(row.dataset.foe, 10));
+      });
+    }
+
     const cmdBox = $('bs-cmd');
     if (cmdBox) {
       cmdBox.addEventListener('click', function (evt) {
@@ -1425,6 +1437,10 @@
      属于模型层改动，不和表现层混在一个提交里。
      ============================================================ */
   let bsTimer = null, bsSkip = false, bsDone = null, bsCmdCb = null;
+  // 群战：当前选中的目标下标，以及"改选之后谁负责重画"。
+  // 选择是**一场对决的状态**，所以挂在模块上而不是 playDuel 的闭包里 ——
+  // 键盘（battleKey）与鼠标（列表点击）两条入口都要能改它。
+  let bsSel = 0, bsSelFn = null, bsPickFn = null;
 
   function isBattleOpen() {
     const el = $('battle-screen');
@@ -1877,11 +1893,15 @@
   /** 菜单当前等待的回调（收到 'p' / 'm'）。null = 没在等人。 */
   function playDuel(game, ev, done) {
     const el = $('battle-screen');
-    const foe = ev.enemy;
+    // 参战的可能不止一只（v11.4-b 群战）。ev.enemies 是权威名单；
+    // 旧事件（合成对决、回放）只有 ev.enemy，那时退回单敌。
+    const foes = (ev.enemies && ev.enemies.length) ? ev.enemies : [ev.enemy];
+    const foe = foes[0];
     const S = bsSetup(game, foe);
     let aHp = (ev.aHp0 === undefined) ? S.aHp : ev.aHp0;
     let bHp = (ev.bHp0 === undefined) ? S.bHp : ev.bHp0;
     bsSkip = false; bsDone = done || null; bsCmdCb = null;
+    bsSel = 0; bsSelFn = null; bsPickFn = null;
     bsBars(aHp, S.aMax, bHp, S.bMax);
     $('bs-round').textContent = '交锋 0 轮';
     el.classList.remove('hidden');
@@ -1889,6 +1909,91 @@
 
     let busy = false;
     const sync = function (na, nb) { aHp = na; bHp = nb; };
+
+    /* ---- 群战的取数口（v11.4-b）--------------------------------------
+       一块列表 + 一块大面板，两处都从**同一个** liveFight 读，
+       所以不存在"列表显示 A 还活着、大面板显示 B"这种自相矛盾的画面。 */
+
+    /** 把右侧大面板切到某一只：名字 / 立绘 / 徽章 / 反光。 */
+    function bsFoeShow(unit, model) {
+      if (!unit || !model) return;
+      $('bs-foe-name').textContent = model.name;
+      // 徽章读**模型**：姿态时钟推的是模型那一份（b.stance 每轮同步过来），
+      // 读模型和读对决单位结果相同，但模型还带 tags，少一次拼装。
+      bsBadges('bs-foe-badges', model);
+      const fArt = $('bs-foe-art');
+      const key = model.arc ? model.arc.id : '';
+      if (fArt && fArt.dataset.key !== key) {
+        try { fArt.src = A.paintMonsterBig(model.arc.shape, 2).toCanvas(1).toDataURL(); }
+        catch (err) {
+          try { fArt.src = A.monsterSprite(model.arc.shape, model.arc.id, 0).toDataURL(); }
+          catch (e2) { fArt.src = ''; }
+        }
+        fArt.dataset.key = key;
+      }
+      const fr = $('bs-foe-refl');
+      if (fr) fr.style.backgroundImage = (fArt && fArt.src) ? ('url(' + fArt.src + ')') : '';
+    }
+
+    /** 把界面同步到"当前选中的那一只"：敌群列表 + 大面板 + 血条。 */
+    function bsSync() {
+      const L = game.liveFight;
+      if (!L) return;
+      const d = L.duel;
+      const list = L.enemies || [foe];
+      const rail = $('bs-foes');
+      // 只有一只时整块隐藏：一对一的构图与 v11.3-c 一模一样。
+      if (!rail || list.length < 2) {
+        if (rail) rail.classList.add('hidden');
+      } else {
+        rail.classList.remove('hidden');
+        let h = '<div class="bs-foes-head">目标 · ← → 切换</div>';
+        for (let i = 0; i < list.length; i++) {
+          const u = d.bs[i], m = list[i];
+          const dead = u.hp <= 0;
+          const pc = Math.max(0, Math.min(100, u.hp / Math.max(1, u.maxHp) * 100));
+          h += '<button class="bs-foe-row' + (i === bsSel ? ' on' : '') +
+            (dead ? ' dead' : '') + '" data-foe="' + i + '">' +
+            '<span class="idx">' + (i + 1) + '</span>' +
+            '<span class="nm">' + esc(m.name) + '</span>' +
+            '<i class="hp"><i class="fill" style="width:' + pc.toFixed(1) + '%"></i></i>' +
+            '<span class="st">' + (u.stance ? (u.stance === 'p' ? '硬物' : '硬法') : '') + '</span>' +
+            '</button>';
+        }
+        rail.innerHTML = h;
+      }
+      // 大面板与血条都跟随选中目标
+      const u = d.bs[bsSel], m = list[bsSel];
+      if (u && m) {
+        bsFoeShow(u, m);
+        bHp = Math.max(0, u.hp);
+        bsBars(aHp, S.aMax, Math.max(1, Math.round(u.maxHp)), bHp);
+      }
+    }
+
+    /** 选中目标改了（键盘 / 鼠标 / 目标被打死之后自动跳）。 */
+    function bsPick(i) {
+      const L = game.liveFight;
+      if (!L || !(i >= 0 && i < L.duel.bs.length)) return;
+      if (L.duel.bs[i].hp <= 0) return;      // 死了的不给选
+      bsSel = i;
+      bsSync();
+    }
+
+    bsSelFn = function (dir) {
+      const L = game.liveFight;
+      if (!L) return;
+      const n = L.duel.bs.length;
+      if (n < 2) return;
+      // 只在**活着**的那些之间循环：让玩家把光标停在一具尸体上
+      // 只会让下一轮的菜单拿一份无意义的防御数值。
+      for (let c = 1; c <= n; c++) {
+        const j = ((bsSel + dir * c) % n + n) % n;
+        if (L.duel.bs[j].hp > 0) { bsSel = j; bsSync(); return; }
+      }
+    };
+    bsPickFn = bsPick;
+    bsSync();
 
     function playRounds(rounds, i, cb) {
       if (bsSkip || i >= rounds.length) { cb(); return; }
@@ -1912,7 +2017,17 @@
     function autoPick() {
       const L = game.liveFight;
       if (!L) return 'p';
-      const dv = C.stanceDef(L.duel.b.st, L.duel.b.stance);
+      // 托管 = 照 AI 的打法：选"最快能打死"的那只 + 对应的那一路。
+      // 群战里它必须连**目标**一起接管，否则托管的含义变成
+      // "只盯着第一只自动打" —— 那不是托管，是半个托管。
+      const pick = game._autoPickFor ? game._autoPickFor(L.duel) : null;
+      if (pick && pick.target >= 0 && L.duel.bs.length > 1) {
+        bsSel = pick.target;
+        bsSync();
+        return pick.type;
+      }
+      const tgt = L.duel.bs[bsSel] || L.duel.b;
+      const dv = C.stanceDef(tgt.st, tgt.stance);
       return C.bestAttack(L.duel.a.st, dv, game.K).type;
     }
 
@@ -1921,16 +2036,25 @@
       busy = true;
       bsCmdCb = null;
       bsMenu('hide');
-      const r = game.duelRound(type);
+      const r = game.duelRound(type, bsSel);
       if (!r) { busy = false; endNow(); return; }
       playRounds(r.rounds, 0, function () {
         // 血条以**模型**为准。逐条累加出来的值在"克制奖励 / 反伤 / 吸血"
         // 这些额外项上会和真实值慢慢漂开，边界一多就一定会错。
-        aHp = r.aHp; bHp = Math.max(0, r.bHp);
-        bsBars(aHp, S.aMax, bHp, S.bMax);
+        aHp = r.aHp;
+        // 选中的那只可能刚被打死 → 自动跳到下一只活着的。
+        // 不跳的话玩家下一轮会对着一个 0 血的目标出手，结算把它当"打空"：
+        // 那不是 bug，但看起来像。
+        const L2 = game.liveFight;
+        if (L2 && L2.duel.bs[bsSel] && L2.duel.bs[bsSel].hp <= 0) {
+          for (let i = 0; i < L2.duel.bs.length; i++) {
+            if (L2.duel.bs[i].hp > 0) { bsSel = i; break; }
+          }
+        }
+        // 一次同步做完三件事：敌群列表、大面板（名字/立绘/徽章）、血条。
+        // 姿态翻面也在这条路径上 —— 否则菜单下一轮读的是旧题目。
+        bsSync();
         $('bs-round').textContent = '交锋 ' + r.round + ' 轮';
-        // 姿态可能刚翻面 —— 徽章必须跟着走，否则菜单下一轮读的是旧题目
-        bsBadges('bs-foe-badges', foe);
         if (r.flipped) {
           bsPop('姿态 → ' + (r.stance === 'p' ? '硬化物理' : '硬化法术'), 'true', 'foe', 15);
         }
@@ -1967,7 +2091,11 @@
     const L = game.liveFight;
     if (!L) { cmd.classList.add('hidden'); return; }
     const me = L.duel.a;
-    const dv = C.stanceDef(L.duel.b.st, L.duel.b.stance);
+    // 数值必须按**当前选中的那只**给。群战里拿第一只的防御去算，
+    // 玩家照着菜单算出来的答案和实际打出来的就不是同一道题 ——
+    // 而菜单存在的全部意义就是"玩家自己算的那个数是对的"。
+    const tgt = L.duel.bs[bsSel] || L.duel.b;
+    const dv = C.stanceDef(tgt.st, tgt.stance);
     const r1 = function (v) { return Math.round(v * 10) / 10; };
     const ep = $('bs-cmd-p'), em = $('bs-cmd-m');
     if (ep) {
@@ -1999,6 +2127,17 @@
   function battleKey(ev) {
     if (!bsCmdCb) return false;
     const k = ev.key;
+    // 群战：方向键切换目标。**不用 1~4 选目标** —— 1 和 2 已经给了物理 / 法术，
+    // 而那条绑定跟 HUD 上的出手类型是同一份习惯（"在 HUD 上设好，
+    // 然后一路敲 1 或空格"），不该被抢走。
+    // 必须显式 return true：漏了的话方向键会漏到地图层，
+    // 症状是"在战斗里按方向键，角色在背后偷偷走了一步"。
+    if (k === 'ArrowLeft' || k === 'ArrowUp' || k === 'ArrowRight' || k === 'ArrowDown') {
+      if (bsSelFn) {
+        bsSelFn((k === 'ArrowLeft' || k === 'ArrowUp') ? -1 : 1);
+        return true;
+      }
+    }
     if (k === '1') { bsCmdCb('p'); return true; }
     if (k === '2') { bsCmdCb('m'); return true; }
     if (k === ' ' || k === 'Enter') {

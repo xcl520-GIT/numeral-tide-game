@@ -1518,3 +1518,48 @@ html, body {
   color: var(--teal);
 }
 .buff-chip b { font-weight: 600; }
+
+/* ============================================================
+   敌群列表（v11.4-b）
+   单敌时整块隐藏 —— 一对一的构图与 v11.3-c 完全一致，不重画。
+   选中行用暖色（和指令菜单的强调同一族），"硬化物理/法术"用冷色，
+   两种信息一眼可分。
+   ============================================================ */
+.bs-foes {
+  position: relative; z-index: 6;
+  display: flex; flex-direction: column; gap: 4px;
+  width: min(560px, 74vw); margin: 0 auto 8px;
+}
+.bs-foes.hidden { display: none; }
+.bs-foes-head {
+  color: #7f8ca1; font: 11px Consolas, monospace;
+  letter-spacing: .06em; text-align: center;
+}
+.bs-foe-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 10px; cursor: pointer; text-align: left;
+  background: rgba(8, 14, 24, .74);
+  border: 1px solid #2b3648; border-radius: 4px;
+  color: #b9c6d8; font: 12px Consolas, monospace;
+}
+.bs-foe-row:hover { border-color: #46536b; color: #dbe6f5; }
+.bs-foe-row.on {
+  border-color: #e0a45a; color: #f4e6cd;
+  background: rgba(38, 26, 12, .82);
+  box-shadow: inset 0 0 0 1px rgba(224, 164, 90, .22);
+}
+.bs-foe-row.dead { opacity: .34; cursor: default; }
+.bs-foe-row .idx { width: 13px; text-align: center; opacity: .75; }
+.bs-foe-row.on .idx { color: #e0a45a; font-weight: bold; opacity: 1; }
+.bs-foe-row .nm { flex: 0 0 auto; min-width: 60px; }
+.bs-foe-row .hp {
+  flex: 1 1 auto; height: 6px; overflow: hidden;
+  background: #1a2231; border-radius: 3px;
+}
+.bs-foe-row .hp .fill {
+  display: block; height: 100%; background: #c8555f;
+  transition: width .18s linear;
+}
+.bs-foe-row.on .hp .fill { background: #e07a52; }
+.bs-foe-row.dead .hp .fill { background: #3a4354; }
+.bs-foe-row .st { flex: 0 0 auto; font-size: 11px; color: #8fb6d8; }

@@ -273,6 +273,11 @@
        只出入参（攻 / 穿 / 姿态调整后的防），**不出结论** ——
        一旦这里标出"建议用法术"，它就退化成 bestAttack 的一层皮，
        而"让玩家自己算"正是 v11.2-e 花一整个提交换来的东西。 -->
+  <!-- 敌群列表（v11.4-b）：群战时列出参战的每一只（最多 4），高亮的是当前目标。
+       为什么夹在大面板与指令菜单之间：玩家的视线顺序本来就是
+       「先看有谁 → 再决定打谁 → 再选哪一路」，三步排在同一条竖线上。
+       单敌时整块隐藏 —— 一对一的构图与 v11.3-c 完全一致。 -->
+  <div class="bs-foes hidden" id="bs-foes"></div>
   <div class="bs-cmd hidden" id="bs-cmd">
     <button class="bs-cmd-btn" data-atk="p">
       <span class="k">1</span><span class="t">物理</span><span class="n" id="bs-cmd-p"></span>

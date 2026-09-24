@@ -206,6 +206,12 @@
       // 于是"通关率变了多少"可以百分之百归因到这一件事上，
       // 而不是"改了 AI 策略 + 改了结算"两件事混在一起。
       this.aiStance = (opts.aiStance === undefined) ? true : !!opts.aiStance;
+      // 群战：踩上敌人格时，把主角**正交相邻**（上下左右）的敌人一并拉进这场
+      // 对决，最多 4 个。关掉它 = 回到 v11.3 的一对一。
+      // 这与 aiStance 是同一类开关：重标基线时，"通关率变了多少"必须能被拆成
+      // "群战造成的"和"数值改造成的"两份，否则改完什么都归因不了。
+      // 同理**必须在这里声明**，不能等第一场战斗再挂上去（隐藏类迁移的教训）。
+      this.squad = (opts.squad === undefined) ? true : !!opts.squad;
 
       this.seed = (opts.seed === undefined || opts.seed === null)
         ? ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0)
@@ -1815,7 +1821,11 @@
               if (u.stance !== was) flipped = true;
             }
           }
-          if (a.hp <= 0 || b.hp <= 0) finished = true;
+          // 结束条件是「玩家倒下」或「**敌方全灭**」，不是「第一只倒下」。
+          // 写成 b.hp <= 0 的话，群战打到第一只就收场：后面几只一次都没
+          // 挨打、也没被结算（实测 killed=1，而剩下的血还是满的）。
+          // N=1 时 allFoesDown() 就是 b.hp <= 0，所以这条对单敌逐位等价。
+          if (a.hp <= 0 || allFoesDown()) finished = true;
           else if (round >= C.maxRounds) { capOut(); finished = true; }
           return roundLog.slice(from);
         },
@@ -1876,33 +1886,74 @@
      * 无论哪种，写回模型的动作都只有 _fightSettle 一处 —— 免得某条路径漏写
      * this.hp / enemy.hp，出现"界面显示已经打死了、模型里它还在"的鬼故事。
      */
-    _fightBegin(enemy, atkType) {
+    /**
+     * 群战名单：被踩中的那一只 + 主角**正交相邻**（上下左右）的敌人，最多 4 个。
+     *
+     * 为什么围着**主角**取四邻、而不是围着目标：玩家看到的画面是
+     * 「我站在哪儿、身边围着几只」—— 决策依据是他的位置，不是那只怪的。
+     * 为什么含脚下那只：stepTo 只走一格，被踩中的那只本来就落在主角的
+     * 四邻里，所以"最多 4 个"是精确的，不是"4 + 1"。
+     * squad 关掉时退化成只打那一只 —— 那就是重标基线用的对照组。
+     */
+    _squadAt(x, y) {
+      if (!this.squad) {
+        const only = this.enemyAt(x, y);
+        return only ? [only] : [];
+      }
+      const list = [];
+      const add = (ex, ey) => {
+        const e = this.enemyAt(ex, ey);
+        if (e && list.indexOf(e) < 0) list.push(e);
+      };
+      add(x, y);                       // 被踩中的那只排第一 = 默认目标
+      add(this.px + 1, this.py);
+      add(this.px - 1, this.py);
+      add(this.px, this.py + 1);
+      add(this.px, this.py - 1);
+      return list.slice(0, 4);
+    }
+
+    _fightBegin(foes, atkType) {
       const st = this.stats();
       const fl = this.flags();
-      const hp0 = this.hp, ehp0 = enemy.hp;   // 战斗场景回放要用它推血条
+      // 参战名单：单个敌人（旧调用点、冒烟里的合成对决）或一个数组（群战）。
+      // 归一化只在这里做一次 —— 这层之下只剩"一场对决"这一种形态。
+      const list = Array.isArray(foes) ? foes.slice() : [foes];
+      const enemy = list[0];                  // 旧字段：第一个敌人
+      const hp0 = this.hp;                    // 战斗场景回放要用它推血条
+      const ehp0 = enemy.hp;
       const A = Object.assign({}, st); A.hp = this.hp; A.maxHp = st.hp;
-      const B = Object.assign({}, enemy.stats); B.hp = enemy.hp; B.maxHp = enemy.maxHp;
-      B.wet = enemy.wet || 0;      // 潮湿状态要带进结算
-      B.stance = enemy.stance || null;   // 姿态同理，不带上就会「看得见、打不着」
-      B.tags = enemy.tags || [];            // 针对词条要在结算里读到它
+      const Bs = [], bInfos = [], ehp0s = [];
+      for (let i = 0; i < list.length; i++) {
+        const e = list[i];
+        const B = Object.assign({}, e.stats); B.hp = e.hp; B.maxHp = e.maxHp;
+        B.wet = e.wet || 0;          // 潮湿状态要带进结算
+        B.stance = e.stance || null; // 姿态同理，不带上就会「看得见、打不着」
+        B.tags = e.tags || [];       // 针对词条要在结算里读到它
+        Bs.push(B);
+        ehp0s.push(e.hp);
+        // src 让姿态时钟能在战斗里继续走。aiStance 关掉时**不传**，
+        // 那场战斗的姿态就固定在开战那一刻 —— 对照组要的正是这个。
+        bInfos.push({ name: e.name, src: this.aiStance ? e : null });
+      }
       // atkType === null 是**显式**的"不必在这里预选"：逐轮模式由 picker
       // 每一轮现选，此时预选一次不但是浪费，还会白白消耗掉一个随机数，
       // 把对照组的随机流弄脏。undefined 才走 attackTypeFor
       // —— 那是"开战时用哪一路"的唯一收口。
       const resolved = (atkType === undefined) ? this.attackTypeFor(enemy)
         : ((atkType === 'p' || atkType === 'm') ? atkType : null);
-      const duel = this.newDuel(A, B, fl, null, true,
-        { name: this.cls.name, isPlayer: true, atkType: resolved },
-        // src 让姿态时钟能在战斗里继续走。aiStance 关掉时**不传**，
-        // 那场战斗的姿态就固定在开战那一刻 —— 对照组要的正是这个。
-        { name: enemy.name, src: this.aiStance ? enemy : null });
+      const duel = this.newDuel(A, Bs, fl, null, true,
+        { name: this.cls.name, isPlayer: true, atkType: resolved }, bInfos);
       // 刻意**不**把句柄挂在 this 上。无头模拟每局要开 34 场战斗，
       // 而给 Game 实例新增一个字段会让它的隐藏类发生迁移 ——
       // playHeadless 里所有指向旧 map 的内联缓存随之全部重建。
       // 实测的后果非常反直觉：战斗本身只占整局的 1.5%，
       // 整局却因此慢了 3 倍（741ms → 2149ms，n=20）。
       // 句柄由调用方持有：一键路径直接往下传，逐回合路径才显式存起来。
-      return { enemy: enemy, duel: duel, hp0: hp0, ehp0: ehp0, atkType: resolved };
+      return {
+        enemy: enemy, enemies: list, duel: duel,
+        hp0: hp0, ehp0: ehp0, ehp0s: ehp0s, atkType: resolved
+      };
     }
 
     /**
@@ -1911,29 +1962,60 @@
      */
     _fightSettle(L, played) {
       if (!L) return null;
-      const enemy = L.enemy;
+      const list = L.enemies || [L.enemy];
+      const enemy = list[0];
       const res = L.duel.result();
       this.hp = res.aHp;
-      enemy.hp = res.bHp;
-      enemy.hitFlash = 12;
+      // 逐只写回。res.bsHp 与 list 一一对应（newDuel 是按同一个顺序建的）。
+      // i === 0 时它逐位等于旧的 res.bHp，所以单敌路径没有任何变化。
+      for (let i = 0; i < list.length; i++) {
+        list[i].hp = res.bsHp[i];
+        list[i].hitFlash = 12;
+      }
       const ev = {
-        kind: 'fight', enemy: enemy, rounds: res.log, target: enemy, capped: res.capped,
+        kind: 'fight', enemy: enemy, enemies: list, rounds: res.log,
+        target: enemy, capped: res.capped,
         // 起始血量。让界面自己从结束血量倒推也能work，但那样血条会在
         // 「克制奖励 / 反伤 / 吸血」这些额外项上和真实值慢慢漂开 ——
         // 边界一多就一定会错，而且错得很隐蔽（血条看起来一直在动）。
-        aHp0: L.hp0, bHp0: L.ehp0
+        aHp0: L.hp0, bHp0: L.ehp0, bHp0s: L.ehp0s || [L.ehp0]
       };
       // played = 这场仗的演出已经由战斗界面逐轮做过了。
       // 这时**不能**再推一个 fight 事件：上层（main.js 的 afterAction）
       // 会把它当成"还有一场仗要播"，于是刚打完的战斗原地再演一遍。
       if (!played) this.events.push(ev);
       if (res.capped) this._log('与 ' + enemy.name + '僵持不下 —— 先撑不住的一方倒下了。', 'warn');
-      if (res.bHp <= 0) {
-        this._killEnemy(enemy, true);
-        return { win: true, died: res.dead, rounds: res.log };
+      // 倒下的一起结算：掉落 / 升级（每 4 杀）/ 秘藏（每 6 杀）/ 吞噬栈
+      // 都按**只数**全额计入。这是有意为之 —— 否则"多打几只"会变成惩罚，
+      // 正好和群战的意图相反。代价（一轮挨 N 次打）在别处付。
+      let killed = 0;
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].hp <= 0) { this._killEnemy(list[i], true); killed++; }
       }
-      if (res.dead) { this._die(enemy.name); return { win: false, died: true, rounds: res.log }; }
+      if (killed > 0) {
+        return { win: true, died: res.dead, rounds: res.log, killed: killed };
+      }
+      if (res.dead) {
+        this._die(this._killerName(res, list));
+        return { win: false, died: true, rounds: res.log };
+      }
       return { win: false, died: false, rounds: res.log };
+    }
+
+    /**
+     * "谁把你打死的"。群战里不能再写死 list[0] —— 那会把死因记到一只
+     * 可能已经倒下的怪头上，而 deathCause 是模拟器要统计的东西。
+     *
+     * 判据取自对决明细：最后一条"打到玩家身上"的记录，它的出手方就是凶手。
+     * 一条都没有时（例如死于自己的反伤）退回第一只 ——
+     * 单敌时这两条路都指向同一个名字，与旧实现逐字相同。
+     */
+    _killerName(res, list) {
+      const lg = res.log || [];
+      for (let i = lg.length - 1; i >= 0; i--) {
+        if (lg[i].to === this.cls.name) return lg[i].from;
+      }
+      return (list && list.length) ? list[0].name : this.cls.name;
     }
 
     /**
@@ -1948,8 +2030,8 @@
      * @param {function} picker 可选。逐轮选路器：每轮开打前被问一次该走哪一路。
      *   给了它，atkType 就不再被使用，也不会为它消耗随机数。
      */
-    fight(enemy, atkType, picker) {
-      const L = this._fightBegin(enemy, atkType);
+    fight(foes, atkType, picker) {
+      const L = this._fightBegin(foes, atkType);
       if (picker) {
         L.duel.runAuto(function (d) { return picker(d); });
       } else {
@@ -1974,15 +2056,18 @@
      *   rounds 只含**这一轮新增**的明细 —— 界面要逐条演，
      *   把整场的日志反复交出去会让演出无限重播。
      */
-    duelRound(playerType) {
+    duelRound(playerType, target) {
       const L = this.liveFight;
       if (!L) return null;
       const d = L.duel;
       const from = d.log.length;
-      d.step(playerType);
+      d.step(playerType, target);
       return {
         rounds: d.log.slice(from),
         aHp: d.a.hp, bHp: d.b.hp,
+        // 每只敌人各自回一份血量：界面的"敌群列表"要各自推进自己的血条。
+        // bHp 仍然是第一只（旧字段，别删 —— 旧断言读它）。
+        bsHp: d.bs.map(function (u) { return u.hp; }),
         aMax: d.a.maxHp, bMax: d.b.maxHp,
         stance: d.b.stance, flipped: d.lastFlip,
         round: d.round, finished: d.finished
@@ -2094,14 +2179,52 @@
     _autoPicker() {
       if (!this.aiStance) return null;
       const g = this;
-      let lastStance, lastType = null;
+      let lastSig = null, lastPick = null;
       return function (d) {
-        if (lastStance !== d.b.stance) {
-          lastStance = d.b.stance;
-          lastType = g._autoAtkTypeLive(d.b.st, d.b.stance);
+        // "题目"= 场上敌人的姿态组合（谁还活着、各自哪一面硬化）。
+        // 只有它变了才重新读 —— 理由见上面那段长注释：面板一个字没变时重掷
+        // 骰子，等于假设玩家每轮都重新怀疑自己一次（实测白拿 +11.4pp）。
+        //
+        // 单敌时它退化成原来的 `lastStance !== d.b.stance`，**随机数消耗也
+        // 一模一样**（每个敌人恰好一次 _autoAtkTypeLive），对照组因此仍然干净。
+        let sig = '';
+        for (let i = 0; i < d.bs.length; i++) {
+          const u = d.bs[i];
+          sig += (u.hp > 0 ? String(u.stance) : '-') + '|';
         }
-        return lastType;
+        if (sig !== lastSig) {
+          lastSig = sig;
+          lastPick = g._autoPickFor(d);
+        }
+        return lastPick;
       };
+    }
+
+    /**
+     * AI 这一轮"打谁 + 走哪路"。**纯数学，不消耗随机数。**
+     *
+     * 选目标的规则：先看"几下能打死"（越少越好），并列时取这一下伤害更高的。
+     * 为什么不选"血最少的"：血少但物法双抗很高的怪，打上去只是白费轮次；
+     * "几下能打死"同时吃进了血量与防御这两件事。
+     * 顺序上先算伤害再问类型 —— _autoAtkTypeLive 会消耗随机数，
+     * 而每个敌人只调一次，单敌时与旧实现逐位一致。
+     */
+    _autoPickFor(d) {
+      const st = this.stats(), K = this.K;
+      let bestIdx = -1, bestType = null, bestNeed = Infinity, bestDmg = -1;
+      for (let i = 0; i < d.bs.length; i++) {
+        const u = d.bs[i];
+        if (u.hp <= 0) continue;
+        const dv = stanceDef(u.st, u.stance);
+        const type = this._autoAtkTypeLive(u.st, u.stance);
+        const dmg = Math.max(1, attackVia(st, dv, type, K).base);
+        const need = Math.ceil(u.hp / dmg);
+        if (need < bestNeed || (need === bestNeed && dmg > bestDmg)) {
+          bestNeed = need; bestDmg = dmg; bestIdx = i; bestType = type;
+        }
+      }
+      if (bestIdx < 0) return null;
+      return { type: bestType, target: bestIdx };
     }
 
     _enemyPreview(e) {
@@ -2354,17 +2477,20 @@
       if (!this.walkable(x, y)) return false;
       const e = this.enemyAt(x, y);
       if (e) {
+        // 一次接触 = 把这一圈一起拉进来。名单在这里定下来，
+        // 之后开的这场对决就与地图上谁还站在旁边无关了。
+        const squad = this._squadAt(x, y);
         if (!this.headless) {
           // 逐回合：这里只**开局**，每一轮选哪一路交给战斗界面。
           //
           // 绝不在这里调 _afterAction —— 收尾必须等对决真正打完。
           // 提前收尾的后果是"你倒下了"的结算面板会和战斗演出同时出现，
           // 玩家看到的是自己一边挨打一边被宣告死亡。
-          const L = this._fightBegin(e);
+          const L = this._fightBegin(squad);
           this.liveFight = L;
           this.events.push({
-            kind: 'duel', enemy: e, target: e, duel: L.duel,
-            aHp0: L.hp0, bHp0: L.ehp0
+            kind: 'duel', enemy: e, enemies: squad, target: e, duel: L.duel,
+            aHp0: L.hp0, bHp0: L.ehp0, bHp0s: L.ehp0s
           });
           return true;
         }
@@ -2372,8 +2498,8 @@
         // 开的时传 null（= 别在这里预选，省下那一个随机数）；
         // 关的时走 attackTypeFor，和 v11.3-a 的路径**逐字相同** ——
         // 对照组的意义就在这里，少一个随机数它就不是对照组了。
-        if (this.aiStance) this.fight(e, null, this._autoPicker());
-        else this.fight(e, this.attackTypeFor(e));
+        if (this.aiStance) this.fight(squad, null, this._autoPicker());
+        else this.fight(squad, this.attackTypeFor(e));
         if (this.status === 'playing') this._afterAction();
         return true;
       }
@@ -2831,7 +2957,8 @@
           // 战斗内姿态轮换的开关。**必须能被外面关掉**：
           // 开着跑出来的通关率和关着跑出来的差多少，就是这条机制的全部代价，
           // 而"代价"这件事只能靠对照实验回答，不能靠看代码猜。
-          aiStance: opts.aiStance
+          aiStance: opts.aiStance,
+          squad: opts.squad
         });
         const r = g.playHeadless(opts.maxTurns || 1400);
         out.turns += g.turn; out.kills += g.kills;
@@ -3173,8 +3300,11 @@
         const e = g.ref;
         if (this.enemies.indexOf(e) < 0) { this.aiGoal = null; return false; }
         if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) === 1) {
-          if (this.aiStance) this.fight(e, null, this._autoPicker());
-          else this.fight(e, this.attackTypeFor(e));
+          // AI 也必须按**群战**打，否则它按 1v1 打、玩家按 1v4 打，
+          // 模拟器给出的通关率就和真人脱节了（它现在只是下限）。
+          const sq = this._squadAt(e.x, e.y);
+          if (this.aiStance) this.fight(sq, null, this._autoPicker());
+          else this.fight(sq, this.attackTypeFor(e));
           if (this.status === 'playing') this._afterAction();
           this.aiGoal = null;
           return true;
@@ -3203,8 +3333,11 @@
       // 同时又走不出去，双方互相罚站到天荒地老。
       for (const e of this.enemies) {
         if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) === 1) {
-          if (this.aiStance) this.fight(e, null, this._autoPicker());
-          else this.fight(e, this.attackTypeFor(e));
+          // AI 也必须按**群战**打，否则它按 1v1 打、玩家按 1v4 打，
+          // 模拟器给出的通关率就和真人脱节了（它现在只是下限）。
+          const sq = this._squadAt(e.x, e.y);
+          if (this.aiStance) this.fight(sq, null, this._autoPicker());
+          else this.fight(sq, this.attackTypeFor(e));
           if (this.status === 'playing') this._afterAction();
           this.aiGoal = null;
           return true;

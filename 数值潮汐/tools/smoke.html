@@ -3370,6 +3370,133 @@ try {
   else ok('重开一局后没有任何浮层残留（自动枚举 ' +
     d.querySelectorAll('.modal, [id$="-screen"]').length + ' 个）');
 
+
+/* ---------- 42. 群战（1vN）：相邻入战 · 选目标 · 多杀结算 · squad=0 对照 ----------
+   为什么这一节必须存在：群战的三个后果全都**不可见** ——
+     ① 名单算错 → 参战人数不对，但战斗照样能打完；
+     ② 目标选择失效 → 玩家永远只打第一只，看起来也正常；
+     ③ 多杀结算漏了 → 掉落凭空少一半，更难看出来。
+   所以每一条都要有断言盯着，并且要有一条断言盯着"代价"本身：
+   一轮会挨 N 次打 —— 那是这个机制唯一的成本，也是它改变平衡的方式。 */
+try {
+  var DIRQ = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  /* 造一局，把怪放进主角四邻。spd 统一压到 4：
+     这样"一轮挨几次打"就不会混进速度碾压的追加击。 */
+  var mkSquad = function (opts, hp) {
+    var g = new w.TideCore.Game(opts);
+    g.enemies = [];
+    for (var i = 0; i < 4; i++) {
+      var x = g.px + DIRQ[i][0], y = g.py + DIRQ[i][1];
+      if (!g.walkable(x, y)) continue;
+      var e = g._makeEnemy(x, y, g.depth);
+      e.stats.spd = 4;
+      e.maxHp = e.hp = hp;
+      g.enemies.push(e);
+    }
+    return g;
+  };
+  var SEEDQ = 20260924;
+  var gQ = mkSquad({ classKey: 'warlord', difficulty: 'standard', seed: SEEDQ, meta: null }, 500);
+  if (gQ.enemies.length < 4) fail('群战测试：主角四邻只放下 ' + gQ.enemies.length + ' 只怪');
+
+  // (a) 名单：被踩中的那只排第一，四邻都进来，上限 4
+  var tgtQ = gQ.enemies[0];
+  var listQ = gQ._squadAt(tgtQ.x, tgtQ.y);
+  if (listQ.length !== gQ.enemies.length) {
+    fail('群战名单不对：' + listQ.length + ' vs ' + gQ.enemies.length);
+  } else if (listQ[0] !== tgtQ) {
+    fail('群战名单第一只应当是被踩中的那只');
+  } else if (listQ.length > 4) {
+    fail('群战名单超过 4 只：' + listQ.length);
+  } else ok('群战名单：被踩中的排第一，共 ' + listQ.length + ' 只（上限 4）');
+
+  // (b) 对照组：squad=false 时必须退化成只打那一只
+  var gQ0 = mkSquad({ classKey: 'warlord', difficulty: 'standard', seed: SEEDQ, squad: false }, 500);
+  var listQ0 = gQ0._squadAt(gQ0.enemies[0].x, gQ0.enemies[0].y);
+  if (listQ0.length !== 1) fail('squad=false 应当只打一只，实际 ' + listQ0.length);
+  else ok('squad=false 对照组：只打被踩中的那一只');
+
+  // (c) 代价：一轮要挨 N 次打
+  gQ.hp = 999999;
+  gQ.liveFight = gQ._fightBegin(listQ);
+  var rQ = gQ.duelRound('p', 0);
+  if (!rQ) fail('群战：duelRound 返回空');
+  else {
+    var hitsQ = 0;
+    for (var qi = 0; qi < rQ.rounds.length; qi++) {
+      if (rQ.rounds[qi].to === gQ.cls.name) hitsQ++;
+    }
+    if (hitsQ !== listQ.length) {
+      fail('群战：一轮应当挨 ' + listQ.length + ' 次打，实际 ' + hitsQ);
+    } else ok('群战代价：一轮挨 ' + hitsQ + ' 次打（每只各出手一次）');
+  }
+
+  // (d) 选目标：指定打第 2 只 → 只有它掉血
+  // 血量的权威在**对决单位**上（d.bs[i].hp）；模型要等 _fightSettle 才写回。
+  // 读模型会读到"一点没掉" —— 那是测试读错了地方，不是规则错了。
+  var dQ = gQ.liveFight.duel;
+  var hpBeforeQ = dQ.bs.map(function (u) { return u.hp; });
+  var rQ2 = gQ.duelRound('p', 1);
+  if (!rQ2) fail('群战：第二次 duelRound 返回空');
+  else if (!(dQ.bs[1].hp < hpBeforeQ[1])) fail('群战：指定的第 2 只没有掉血');
+  else if (dQ.bs[0].hp !== hpBeforeQ[0]) fail('群战：没被选中的第 1 只也掉血了');
+  else ok('群战选目标：只打指定的那一只');
+  gQ.liveFight = null;
+
+  // (e) 多杀结算：四只各 1 血 → 一场对决清场 → 击杀 / 金币按只数累计
+  var gR = mkSquad({ classKey: 'warlord', difficulty: 'standard', seed: SEEDQ, meta: null }, 1);
+  var nR = gR.enemies.length;
+  gR.hp = 999999;
+  var k0 = gR.kills, gold0 = gR.gold;
+  var sqR = gR._squadAt(gR.enemies[0].x, gR.enemies[0].y);
+  var resR = gR.fight(sqR, 'p');
+  if (!resR || !resR.killed || resR.killed !== nR) {
+    fail('群战：一场对决没有把 ' + nR + ' 只都算进击杀（killed=' + (resR && resR.killed) +
+      ' squad=' + sqR.length + ' alive=' + gR.enemies.length +
+      ' rounds=' + (resR && resR.rounds ? resR.rounds.length : -1) +
+      ' hp=' + JSON.stringify(gR.enemies.map(function (e) { return e.hp; })) + '）');
+  } else if (gR.kills !== k0 + nR) {
+    fail('群战：击杀数没有按只数累计（' + k0 + ' → ' + gR.kills + '）');
+  } else if (!(gR.gold > gold0)) {
+    fail('群战：多杀没有产生金币');
+  } else ok('群战多杀：killed=' + resR.killed + '，kills +' + (gR.kills - k0) +
+    '，gold +' + (gR.gold - gold0));
+
+  // (f) 界面：列表出现 · 默认目标高亮 · 方向键能换目标
+  var gU = mkSquad({ classKey: 'warlord', difficulty: 'standard', seed: SEEDQ, meta: null }, 500);
+  var LU = gU._fightBegin(gU._squadAt(gU.enemies[0].x, gU.enemies[0].y));
+  gU.liveFight = LU;
+  w.TideUI.playBattle(gU, {
+    kind: 'duel', enemy: LU.enemy, enemies: LU.enemies, duel: LU.duel,
+    aHp0: LU.hp0, bHp0: LU.ehp0
+  }, function () {});
+  var kq = function (key) {
+    w.dispatchEvent(new w.KeyboardEvent('keydown', { key: key, bubbles: true }));
+    w.dispatchEvent(new w.KeyboardEvent('keyup', { key: key, bubbles: true }));
+  };
+  var rail = d.getElementById('bs-foes');
+  if (!rail || rail.classList.contains('hidden')) {
+    fail('群战界面：敌群列表没有出现');
+  } else {
+    var rows = rail.querySelectorAll('.bs-foe-row');
+    if (rows.length !== LU.enemies.length) {
+      fail('群战界面：列表行数 ' + rows.length + ' vs ' + LU.enemies.length);
+    } else if (!rows[0].classList.contains('on')) {
+      fail('群战界面：默认目标没有高亮');
+    } else {
+      kq('ArrowRight');
+      var rows2 = rail.querySelectorAll('.bs-foe-row');
+      var onNow = -1;
+      for (var ri = 0; ri < rows2.length; ri++) {
+        if (rows2[ri].classList.contains('on')) onNow = ri;
+      }
+      if (onNow !== 1) fail('群战界面：方向键没有换到第 2 只（实际 ' + onNow + '）');
+      else ok('群战界面：列表 ' + rows2.length + ' 行，方向键换目标生效');
+    }
+  }
+  w.TideUI.closeBattle();
+} catch (e) { fail('群战测试异常: ' + (e && e.stack ? e.stack : e)); }
+
   w.TideUI.closeBattle();
   w.TideMeta.reset();
 } catch (e) { fail('规则层测试异常: ' + (e && e.stack ? e.stack : e)); }
