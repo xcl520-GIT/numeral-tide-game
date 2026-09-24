@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>probe-aistuck</title>
+<style>body{background:#0a0e18;color:#ccd6e6;font:13px Consolas,monospace}pre{padding:12px;white-space:pre-wrap}</style>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script src="../src/js/data.js"></script>
+<script src="../src/js/core.js"></script>
+<script>
+/* 卡住的那几局，AI 到底每轮在追什么？
+
+   为什么要专用探针：症状是"A 前进两格 → 后退两格"的周期，出口可达、
+   每轮都成功走了一步。已经证伪的假设是"A* 每轮重算导致第一步翻转"
+   （加了路径记忆，timeout 仍在）。剩下的可能全都需要**每轮的目标与落步**
+   才能分辨：
+     · 目标在换（两个目标方向相反，交替选中）
+     · 目标没换但路径在换（水位）
+     · 目标就是这个坐标、但永远走不到（被挡/被水隔开）
+   所以这里把 _aiStep 的决策逐轮记下来，只打印**失败局**的最后 60 轮。 */
+(function () {
+  var qp = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return; var p = kv.split('='); qp[p[0]] = decodeURIComponent(p[1] || '');
+  });
+  var n = parseInt(qp.n || '300', 10);
+  var diff = qp.diff || 'abyss';
+  var seedBase = parseInt(qp.seedBase || '1000', 10);
+  var CLASSES = ['warlord', 'arcanist', 'ranger', 'warden'];
+
+  var P = TideCore.Game.prototype;
+  var REC = [];
+  var recording = false;
+
+  var oStep = P._autoStep;
+  P._autoStep = function () {
+    var g = this.aiGoal;
+    var goalTxt = g ? (g.type + '@' + (g.x !== undefined ? (g.x + ',' + g.y) : '?')) : 'none';
+    var beforeX = this.px, beforeY = this.py;
+    var r = oStep.apply(this, arguments);
+    if (recording) {
+      REC.push(this.turn + ' pos=' + beforeX + ',' + beforeY +
+        ' -> ' + this.px + ',' + this.py +
+        ' goal=' + goalTxt + ' ret=' + r +
+        ' enemies=' + this.enemies.length +
+        ' hp=' + Math.round(this.hp));
+    }
+    return r;
+  };
+
+  var lines = ['AISTUCK'];
+  var found = 0;
+  for (var i = 0; i < n && found < 2; i++) {
+    var seed = seedBase + i * 7919;
+    var g = new TideCore.Game({
+      classKey: CLASSES[i % 4], difficulty: diff, seed: seed,
+      aiFumble: 0.2, aiStance: true, squad: true
+    });
+    REC = [];
+    recording = false;
+    // 跑一段之后才开始录（只关心尾部）
+    var out = null;
+    try {
+      recording = true;
+      out = g.playHeadless(2400);
+    } catch (e) {
+      lines.push('seed=' + seed + ' 异常: ' + (e && e.message));
+      continue;
+    }
+    if (out === 'timeout' || out === 'stall') {
+      found++;
+      lines.push('');
+      lines.push('=== 失败局 seed=' + seed + ' class=' + CLASSES[i % 4] +
+        ' depth=' + g.depth + ' end=' + out + ' kills=' + g.kills);
+      var tail = REC.slice(Math.max(0, REC.length - 60));
+      for (var t = 0; t < tail.length; t++) lines.push('  ' + tail[t]);
+    }
+  }
+  if (!found) lines.push('本次 n=' + n + ' 没有失败局');
+  lines.push('AISTUCKDONE');
+  document.getElementById('out').textContent = lines.join('\n');
+})();
+</script>
+</body>
+</html>
