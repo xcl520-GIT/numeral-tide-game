@@ -268,6 +268,10 @@
       // 会全部失效。实测代价：整局慢 3 倍（741ms → 2149ms，n=20），
       // 而战斗只占整局的 1.5% —— 症状出现在离改动最远的地方。
       this.liveFight = null;
+      // 区域门位缓存（v11.4-j）。**必须在这里声明**：它们是每回合都要读的字段，
+      // 给成型对象临时挂新字段会触发隐藏类迁移（本项目踩过，整局慢 3 倍）。
+      this._doorsByRegion = null;   // 每层算一次
+      this._doorCache = {};         // 每回合清一次
       this.devourStacks = 0;
       this.skillCd = 0;          // 魂技冷却剩余回合
       this.skillUses = 0;        // 一局里放过几次魂技（平衡分析用）
@@ -948,6 +952,7 @@
     _buildRegions(depth) {
       const W = this.W, H = this.H, total = W * H;
       this.regionOf = new Int16Array(total); this.regionOf.fill(-1);
+      this._doorsByRegion = null;   // 换层了：门位必须重算
       this.regions = [];
       this.gateRegion = -1;
 
@@ -2403,6 +2408,49 @@
      *
      * 道具型 / 姿态型是**位置无关**的，所以那两条是精确预告，不是估计。
      */
+    /**
+     * 本区的"门位"：**本区里、与别的区正交相邻的那一批格**。
+     * 每层只扫一次全图，之后只是从一个几十元素的小表里挑最近的 ——
+     * 比"返回空路径"便宜得多，也比每回合扫全图（1575 格）便宜得多。
+     * @returns {Array} 该区的门位列表（可能为空：孤岛区，那就没有门）
+     */
+    _regionDoors() {
+      if (this._doorsByRegion) return this._doorsByRegion;
+      const map = {};
+      const NB = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      for (let y = 1; y < this.H - 1; y++) {
+        for (let x = 1; x < this.W - 1; x++) {
+          if (!this.walkable(x, y)) continue;
+          const r = this.regionAt(x, y);
+          if (r < 0) continue;
+          for (const d of NB) {
+            const r2 = this.regionAt(x + d[0], y + d[1]);
+            if (r2 >= 0 && r2 !== r) {
+              if (!map[r]) map[r] = [];
+              map[r].push({ x: x, y: y });
+              break;
+            }
+          }
+        }
+      }
+      this._doorsByRegion = map;
+      return map;
+    }
+
+    /** 本区离玩家最近的那个门位（每回合对每个区只算一次） */
+    _regionDoor(rid) {
+      const key = rid + ':' + this.px + ',' + this.py;
+      if (this._doorCache[key] !== undefined) return this._doorCache[key];
+      const list = this._regionDoors()[rid] || [];
+      let best = null, bd = 1e9;
+      for (const p of list) {
+        const d = Math.abs(p.x - this.px) + Math.abs(p.y - this.py);
+        if (d < bd) { bd = d; best = p; }
+      }
+      this._doorCache[key] = best;
+      return best;
+    }
+
     /* 槽位指派（v11.4-h）——**围而不堵**
        ------------------------------------------------------------
        外部参考（L4D 的 attack slots、阿卡姆的攻击令牌、Unity 社区的 Surround AI）
@@ -2463,11 +2511,63 @@
       const cand = [];
       for (const e of this.enemies) {
         if (!awakeOK(e) || e.hp <= 0 || e.stun > 0) continue;
+        /* **只收本区的怪。**
+           少了这一条，门外的怪也会被塞进"玩家四邻"这个槽位池 ——
+           而它拿到的槽位在玩家那个区、自己却在另一个区，
+           寻路被区域限制挡住、永远走不到 → 原地站死。
+           实测这一条让"寻路失败"虚高到 16.1%（它本来应该是 0）。
+           门外的怪由上面那套**门位**负责，两套池子不能混。 */
+        if (e.region !== this.regionAt(this.px, this.py)) continue;
         const d2 = Math.abs(e.x - this.px) + Math.abs(e.y - this.py);
         if (d2 <= 1) continue;        // 贴身了：它这一步是出手，不是移动
         if (stuck.has(e)) continue;   // 已经粘住的：不参与重分
         cand.push({ e: e, d: d2 });
       }
+      /* 玩家**不在**这个区的怪：给它们分配**不同的门位**。
+         ------------------------------------------------------------
+         第一版是"都走到本区离玩家最近的那个门位"—— 结果它们全挤在同一格，
+         又变成排队（实测"被同类挡住"从 7% 涨到 18.1%）。
+         堆形的意义就是**并排**，而不是叠在同一个点上；
+         所以门位也要像槽位一样一个个分下去。 */
+      const byReg = {};
+      for (const e of this.enemies) {
+        if (!e.awake || e.returning || e.hp <= 0 || e.stun > 0) continue;
+        if (e.region === this.regionAt(this.px, this.py)) continue;   // 本区的走下面那套
+        if (!byReg[e.region]) byReg[e.region] = [];
+        byReg[e.region].push(e);
+      }
+      for (const rid in byReg) {
+        const doors = (this._regionDoors()[rid] || []).slice();
+        if (!doors.length) continue;
+        doors.sort((a, b) =>
+          (Math.abs(a.x - this.px) + Math.abs(a.y - this.py)) -
+          (Math.abs(b.x - this.px) + Math.abs(b.y - this.py)));
+        const pool = doors.slice(0, Math.min(4, doors.length));
+        const list = byReg[rid];
+        // 贪心就近指派（门位池最多 4 个，不值得上全排列）
+        const usedD = {};
+        list.sort((a, b) =>
+          (Math.abs(a.x - this.px) + Math.abs(a.y - this.py)) -
+          (Math.abs(b.x - this.px) + Math.abs(b.y - this.py)));
+        for (const e of list) {
+          // 粘性：已经站在某个门位上就继续用它，别每回合重挑
+          if (e.slot) {
+            let stillDoor = false;
+            for (const dd of pool) if (dd.x === e.slot.x && dd.y === e.slot.y) stillDoor = true;
+            if (stillDoor && e.x === e.slot.x && e.y === e.slot.y) continue;
+          }
+          let bestI = -1, bestD = 1e9;
+          for (let s = 0; s < pool.length; s++) {
+            if (usedD[s]) continue;
+            const d = Math.abs(e.x - pool[s].x) + Math.abs(e.y - pool[s].y);
+            if (d < bestD) { bestD = d; bestI = s; }
+          }
+          if (bestI < 0) continue;
+          usedD[bestI] = 1;
+          e.slot = pool[bestI];
+        }
+      }
+
       if (!cand.length) return;
       cand.sort(function (a, b) { return a.d - b.d; });
       const freeCount = open.length - Object.keys(taken).length;
@@ -2535,30 +2635,30 @@
      * 玩家就会在战斗画面里被画面外的怪打死，而那条伤害没有任何演出能解释。
      * @returns {boolean} 真的挪动了吗
      */
+    /**
+     * 这只怪这一步的**目标格** —— 唯一的执行点。
+     *
+     * 为什么要把"目标"单独抽出来：v11.4-i 之后目标有三种（回巢 / 门位列队 / 玩家的槽位），
+     * 而探针必须复刻同一套判断才能算出正确的归因表。让探针自己抄一遍判断，
+     * 就等于埋了第二个真源 —— 它一旦漂移，归因表会开始指着一些游戏里根本不存在的行为，
+     * 而且看起来完全正常（实测就发生过：探针还在问"能不能走到玩家"，
+     * 而游戏早就改成"走到门位"了，于是"寻路失败"整列虚高到 17~24%）。
+     * @returns {{x:number, y:number, region:(number|null)}} region = 寻路允许的范围
+     */
+    _enemyGoal(e) {
+      if (e.returning) return { x: e.homeX, y: e.homeY, region: e.region };
+      // 槽位统一了两种情形：玩家在本区时是"他四邻中的一格"，
+      // 玩家不在本区时是"本区的一个门位"。于是下游只需要认一个字段。
+      if (e.slot) return { x: e.slot.x, y: e.slot.y, region: e.region };
+      return { x: this.px, y: this.py, region: null };
+    }
+
     _stepEnemyTowardPlayer(e) {
-      let tx, ty, onlyRegion;
-      if (e.returning) {
-        // 回巢：目标是自己那一格。它**不受分格影响** —— 回位是纪律，不是战术。
-        tx = e.homeX; ty = e.homeY; onlyRegion = e.region;
-        if (e.x === tx && e.y === ty) return false;
-      } else {
-        // 贴身了就该出手，不该挪
-        if (Math.abs(e.x - this.px) + Math.abs(e.y - this.py) <= 1) return false;
-        tx = this.px; ty = this.py;
-        /* 折中：**惊动半径只负责唤醒，房间仍然管着它们能走多远**。
-           放开区域限制（onlyRegion=null）实测确实能把群战抬到 21%，
-           但 standard 通关率同时掉到 34%（-15pp）—— 代价是"被追穿整层"，
-           那不是"进房被扑"，是"甩不掉"。而这一根杠杆要的只是**行军的回合数**：
-           半径 8 让堆在玩家还在走廊里时就开始收网，等他在房门口露面，
-           两路纵队的形状已经展开完毕。这不需要它们跨出房间。 */
-        onlyRegion = e.region;
-        if (e.slot) {
-          // 已经站在自己的槽位上就**停下**。少了这一条，它会继续朝玩家挤，
-          // 把刚分好的四邻又挤成一个方向 —— 那就白分了。
-          if (e.x === e.slot.x && e.y === e.slot.y) return false;
-          tx = e.slot.x; ty = e.slot.y;
-        }
-      }
+      const goal = this._enemyGoal(e);
+      const tx = goal.x, ty = goal.y, onlyRegion = goal.region;
+      if (e.x === tx && e.y === ty) return false;
+      // 贴身了就该出手，不该挪（回巢途中不适用：它本来就是在离开）
+      if (!e.returning && Math.abs(e.x - this.px) + Math.abs(e.y - this.py) <= 1) return false;
       const path = this.findPath(e.x, e.y, tx, ty, 260, 0, onlyRegion);
       if (!path || path.length < 2) return false;
       const n = path[1];
@@ -2586,6 +2686,7 @@
     _fightRoundTick(participants) {
       if (!this.tick) return;
       this._assignSlots();
+      this._doorCache = {};
       for (const e of this.enemies) {
         if (participants && participants.indexOf(e) >= 0) continue;
         if (e.stun > 0) continue;
@@ -3139,6 +3240,7 @@
       // 放在敌人循环**之前**，因为分配是这一回合整体的事，
       // 边打边分会让先行动的怪占便宜、后行动的白跑一步。
       this._assignSlots();
+      this._doorCache = {};
       const list = this.enemies.slice();
       for (const e of list) {
         if (this.status !== 'playing') break;

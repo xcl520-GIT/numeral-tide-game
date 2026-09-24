@@ -40,6 +40,9 @@
     st = { total: 0, adj: 0, waited: 0, moved: 0, movedAdj: 0, blockedFoe: 0,
            noPath: 0, playerTile: 0, stunned: 0, other: 0, dead: 0, turns: 0,
            adjHist: {}, approachTurns: 0, approachN: 0, returning: 0,
+           // 被挡住的地方是窄口还是空地 —— 这一列决定下一根杠杆是
+           // "把门凿宽"（关卡生成）还是"改槽位目标"（AI）。
+           blockedNarrow: 0, blockedOpen: 0,
            // 目标格冲突（外部参考建议的第 2 列打点）：
            // 这一步有几只怪想走**同一格**。它是"同侧排队"假说的直接判据 ——
            // 冲突率高 = 每只怪都在理性地选同一个最优格，那不是 bug，是均衡。
@@ -49,6 +52,7 @@
            frozenTurns: 0, fights: 0 };
   }
 
+  var NB4P = [[1, 0], [-1, 0], [0, 1], [0, -1]];
   var P = TideCore.Game.prototype;
   var oe = P.endTurn;
   P.endTurn = function () {
@@ -109,12 +113,25 @@
       if (b.stun > 0) { st.stunned++; continue; }
       var fast = (g.kind === 'elite' || g.kind === 'boss');
       if (!(fast || (b.cd + 1) % 2 === 0)) { st.waited++; continue; }
-      // 该动却没动 —— 查明原因（复刻 core 里那段分支）
-      var path = me.findPath(b.x, b.y, px, py, 260, 0, b.region);
-      if (!path || path.length < 2) { st.noPath++; continue; }
+      // 该动却没动 —— 查明原因。
+      // **目标格直接问模型**（_enemyGoal 是唯一执行点），不在这里复刻判断：
+      // 探针抄一遍规则就等于埋第二个真源，它一漂移，归因表就会开始
+      // 指着一些游戏里根本不存在的行为（已经踩过一次）。
+      var goal = me._enemyGoal(b.e);
+      var path = me.findPath(b.x, b.y, goal.x, goal.y, 260, 0, goal.region);
+      if (path && path.length === 1) { st.atPost = (st.atPost || 0) + 1; continue; }
+      if (!path) { st.noPath++; continue; }
       var n2 = path[1];
-      if (n2.x === px && n2.y === py) { st.playerTile++; continue; }
-      if (me.enemyAt(n2.x, n2.y)) { st.blockedFoe++; continue; }
+      if (me.enemyAt(n2.x, n2.y)) {
+        st.blockedFoe++;
+        // 它自己站的那一格有多宽？（可走的正交邻居数）
+        var degB = 0;
+        for (var db = 0; db < 4; db++) {
+          if (me.walkable(b.x + NB4P[db][0], b.y + NB4P[db][1])) degB++;
+        }
+        if (degB <= 2) st.blockedNarrow++; else st.blockedOpen++;
+        continue;
+      }
       st.other++;
     }
     return r;
@@ -158,9 +175,11 @@
       '   （其中落在玩家四邻 ' + pct(st.movedAdj, st.moved) + '）');
     L.push('  走不动:被同类挡住   ' + pad(pct(st.blockedFoe, st.total), 7) + '  ' + st.blockedFoe);
     L.push('  走不动:寻路失败     ' + pad(pct(st.noPath, st.total), 7) + '  ' + st.noPath);
-    L.push('  走不动:目标是玩家格 ' + pad(pct(st.playerTile, st.total), 7) + '  ' + st.playerTile);
+    L.push('  已到位(门位/槽位)   ' + pad(pct(st.atPost || 0, st.total), 7) + '  ' + (st.atPost || 0));
     L.push('  被震晕 / 其他       ' + pad(pct(st.stunned, st.total), 7) + ' / ' + st.other);
     L.push('  回巢途中（不计入上面）' + (st.returning || 0));
+    L.push('  └ 挡在**窄口**（邻居<=2）' + pct(st.blockedNarrow, st.blockedFoe) +
+      '  挡在**空地**' + pct(st.blockedOpen, st.blockedFoe));
     L.push('  死亡回合的残留      ' + st.dead);
     var h = {}; for (var k = 0; k < adjAtFight.length; k++) h[adjAtFight[k]] = (h[adjAtFight[k]] || 0) + 1;
     var ks = Object.keys(h).sort(function (a, b) { return a - b; });

@@ -1,22 +1,41 @@
-﻿<html lang="zh-CN">
-<head><meta charset="utf-8"><title>packcheck</title></head>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>packcheck</title>
+<style>body{background:#0a0e18;color:#ccd6e6;font:13px Consolas,monospace}pre{padding:12px;white-space:pre-wrap}</style>
+</head>
 <body>
 <pre id="out">running...</pre>
 <script src="../src/js/data.js"></script>
 <script src="../src/js/core.js"></script>
 <script>
-/* 敌人到底有没有"成群"？纯静态检查：开局就把每只怪和它的近邻数出来。
-   为什么必须单独验一次：如果堆根本没生成，那所有"让它们更快过来"的努力
-   都是在优化一个不存在的东西，而症状只会是"群战发生率不涨"——
-   看起来像 AI 问题，其实是布点问题。 */
+/* 地图的两项静态检查。
+ *
+ * ① 敌人到底有没有"成群"？—— 排掉"根本没有堆"这个假设。
+ *    为什么必须单独验：如果堆根本没生成，那所有"让它们更快过来"的努力
+ *    都是在优化一个不存在的东西，而症状只会是"群战发生率不涨"——
+ *    看起来像 AI 问题，其实是布点问题。
+ *
+ * ② 区域边界上的"口子"有多宽？—— 门口漏斗假说的判据。
+ *    2×2 队形穿 1 格宽的走廊时会被迫拉成一列，形状恰好在最需要之前被毁掉。
+ *    如果边界大多数是窄口，那么"再加分格/再加半径"都是白花力气，
+ *    该动的是**关卡生成**（把区域之间的口子凿宽），而不是 AI。
+ */
 (function () {
   var L = ['PACKCHECK'];
+  var Q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return; var p = kv.split('='); Q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+  var n = parseInt(Q.n || '30', 10);
+  var diff = Q.diff || 'standard';
+
   var hist = {}, pairs = 0, total = 0, minSame = 99, maxSame = 0;
-  var seed = parseInt((location.search.match(/seed=(\d+)/) || [])[1] || '1000', 10);
-  var n = parseInt((location.search.match(/n=(\d+)/) || [])[1] || '20', 10);
-  var diff = (location.search.match(/diff=(\w+)/) || [])[1] || 'standard';
+  // 区域边界
+  var bTiles = 0, narrow = 0, degHist = {}, pairRuns = {}, runHist = {};
+
   for (var g = 0; g < n; g++) {
     var gm = new TideCore.Game({ difficulty: diff, seed: 1000 + g * 7919, classKey: 'warlord' });
+
+    // ① 近邻
     for (var i = 0; i < gm.enemies.length; i++) {
       var same = 0;
       for (var j = 0; j < gm.enemies.length; j++) {
@@ -25,18 +44,52 @@
         if (d <= 2) same++;
       }
       hist[same] = (hist[same] || 0) + 1;
-      total++;
-      pairs += same;
+      total++; pairs += same;
       if (same < minSame) minSame = same;
       if (same > maxSame) maxSame = same;
     }
+
+    // ② 区域边界格：它的通行宽度（可走的正交邻居数）
+    var NB4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    var isBound = {};
+    for (var y = 1; y < gm.H - 1; y++) {
+      for (var x = 1; x < gm.W - 1; x++) {
+        if (!gm.walkable(x, y)) continue;
+        var r0 = gm.regionAt(x, y);
+        if (r0 < 0) continue;
+        for (var k = 0; k < 4; k++) {
+          var r1 = gm.regionAt(x + NB4[k][0], y + NB4[k][1]);
+          if (r1 >= 0 && r1 !== r0) { isBound[y * gm.W + x] = r0; break; }
+        }
+      }
+    }
+    for (var key in isBound) {
+      var bx = key % gm.W, by = (key / gm.W) | 0;
+      var deg = 0;
+      for (var k2 = 0; k2 < 4; k2++) if (gm.walkable(bx + NB4[k2][0], by + NB4[k2][1])) deg++;
+      bTiles++;
+      degHist[deg] = (degHist[deg] || 0) + 1;
+      // 窄口 = 通行宽度 <= 2（走廊格）。2×2 队形在这里必然被压成一列。
+      if (deg <= 2) narrow++;
+      // 同一条边界上的连续窄口段有多长（粗略：按"这一格所属区域 + 相邻的边界格"链起来）
+      var pk = isBound[key];
+      pairRuns[pk] = (pairRuns[pk] || 0) + 1;
+    }
   }
-  var ks = Object.keys(hist).sort(function (a, b) { return a - b; });
-  L.push('开局第 1 层 · ' + diff + ' · ' + n + ' 局 · 敌人数 ' + total);
-  L.push('每只怪"距离≤2 的同伴数"分布：' + ks.map(function (k) {
-    return k + '只:' + Math.round(hist[k] / total * 100) + '%';
-  }).join('  '));
-  L.push('平均同伴数 ' + (Math.round(pairs / total * 100) / 100) + '（0 表示完全散开）  最少 ' + minSame + '  最多 ' + maxSame);
+
+  function hist2(h, tot) {
+    return Object.keys(h).sort(function (a, b) { return Number(a) - Number(b); })
+      .map(function (k) { return k + ':' + Math.round(h[k] / tot * 100) + '%'; }).join('  ');
+  }
+  L.push('开局第 1 层 · ' + diff + ' · ' + n + ' 局');
+  L.push('');
+  L.push('① 敌人的近邻：' + n + ' 局共 ' + total + ' 只');
+  L.push('   每只怪"距离<=2 的同伴数"  ' + hist2(hist, total));
+  L.push('   平均 ' + (Math.round(pairs / total * 100) / 100) + '（0=完全散开）  最少 ' + minSame + '  最多 ' + maxSame);
+  L.push('');
+  L.push('② 区域边界的通行宽度：' + bTiles + ' 个边界格');
+  L.push('   可走正交邻居数  ' + hist2(degHist, bTiles));
+  L.push('   **窄口占比（邻居数<=2）**  ' + Math.round(narrow / bTiles * 100) + '%   (' + narrow + '/' + bTiles + ')');
   document.getElementById('out').textContent = 'PACKCHECKDONE\n' + L.join('\n');
 })();
 </script>
