@@ -5,7 +5,11 @@
 iframe{width:1380px;height:880px;border:1px solid #333}</style>
 </head>
 <body>
-<iframe id="fr" src="../src/index.html"></iframe>
+<!-- ?ask=0 是**自动化必须带的开关**（见 main.js 的 askOn）：
+     不带上它，TideMain.start 会弹"开局魂技三选一"，而那个弹窗会拦住所有输入 ——
+     于是"逐回合战斗"那一行的 15 个键会全部报 (没进战斗)，切屏那条也会报 skill-modal 残留。
+     真人从标题页开局仍然会问（那是设计），所以这不是游戏的问题，是这份体检页漏带了开关。 -->
+<iframe id="fr" src="../src/index.html?ask=0"></iframe>
 <pre id="out">running...</pre>
 <script>
 /* ============================================================
@@ -98,6 +102,15 @@ iframe{width:1380px;height:880px;border:1px solid #333}</style>
       {
         name: '选秘藏', blocked: true, up: function (g) {
           g.pendingRelic = [D.RELICS[0], D.RELICS[1], D.RELICS[2]];
+        }
+      },
+      {
+        name: '选魂技', blocked: true, up: function (g) {
+          /* 与"选秘藏"对称。加它是因为上面把 iframe 改成 ?ask=0 之后，
+             魂技弹窗不再自然出现 —— 而"弹窗必须拦住输入"这件事不能没人守。
+             注意门禁读的是**模型**（ui.js 的 topLayer 看 hasPendingSkill），
+             所以这里只要把 pendingSkill 挂上就足够了，不需要等一帧渲染。 */
+          g.pendingSkill = g._offerSkills();
         }
       },
       { name: '逐回合战斗', blocked: true, up: function (g) { enterDuel(g); } },
