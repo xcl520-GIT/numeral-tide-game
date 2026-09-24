@@ -4306,6 +4306,263 @@ try {
   w.TideUI.closeBattle();
 } catch (e) { fail('P4 Boss 行为测试异常: ' + (e && e.stack ? e.stack : e)); }
 
+/* ---------- 53. P3 第二步：魂技进对决 ----------
+   为什么单开一节：这一轮给菜单加了第 4 个动作，而"加了动作"这件事本身
+   几乎不可能靠分布看出来 —— 三档通关率动 1pp 以内，冒烟不加断言也全绿。
+   于是必须逐条钉住四件会**静默失效**的事：
+     ① 注册表里有它、并且真的渲染出了自己的按钮（少一个都只是"没反应"）；
+     ② 按 3 只挂算式、**不占回合**（多占一回合不会报错，只会让玩家白亏一轮）；
+     ③ 四条技能各自的算式真的走到了结算里（重击 / 破姿 / 追打 / 免伤反伤）——
+        尤其是免伤：`Math.max(1, …)` 会把 0 强行抬回 1 点，
+        而"免伤"的文案就变成了一句谎话，肉眼完全看不出来；
+     ④ 开关关掉 = 旧行为（不是靠读代码推的，是按一遍再问一次）。
+
+   所有对照都**同一张种子**：开着和关着走同一个布置函数，
+   否则"差别来自开关还是来自布置"说不清 —— 本项目反复踩过这个坑。 */
+try {
+  var kq53 = function (key) {
+    w.dispatchEvent(new w.KeyboardEvent('keydown', { key: key, bubbles: true }));
+    w.dispatchEvent(new w.KeyboardEvent('keyup', { key: key, bubbles: true }));
+  };
+  /* 布置一场真对决。**只有这一个布置函数** —— 开着和关着两组走同一段代码。 */
+  var open53 = function (cls, seed, on, stance, hp) {
+    var g = new w.TideCore.Game({
+      classKey: cls, difficulty: 'standard', seed: seed,
+      duelSkill: (on === undefined) ? true : !!on
+    });
+    var e = g._makeEnemy(g.px + 2, g.py, 1);
+    if (stance) e.stance = stance;
+    /* 想验"多打一次"就必须让目标活得过第一击 —— 血线可由调用方指定。 */
+    if (hp) { e.maxHp = hp; e.hp = hp; }
+    g.enemies = [e];
+    var L = g._fightBegin([e]);
+    g.liveFight = L;
+    w.TideUI.playBattle(g, {
+      kind: 'duel', enemy: L.enemy, enemies: L.enemies, duel: L.duel,
+      aHp0: L.hp0, bHp0: L.ehp0
+    }, function () {});
+    return { g: g, L: L, e: e, me: g.cls.name };
+  };
+  /* 只统计**第 1 轮**：这一节验的是"挂上的效果在这一轮兑现"，
+     把后面几轮混进来会让数字随战斗长度漂。 */
+  var sum53 = function (A, f) {
+    var lg = A.L.duel.log, s = 0;
+    for (var i = 0; i < lg.length; i++) if (lg[i].r === 1 && f(lg[i])) s += (lg[i].dmg || 0);
+    return s;
+  };
+  var cnt53 = function (A, f) {
+    var lg = A.L.duel.log, s = 0;
+    for (var i = 0; i < lg.length; i++) if (lg[i].r === 1 && f(lg[i])) s++;
+    return s;
+  };
+  var all53 = function (A) {
+    var lg = A.L.duel.log, s = '';
+    for (var i = 0; i < lg.length; i++) if (lg[i].r === 1) s += (lg[i].extra || '') + ' ';
+    return s;
+  };
+
+  /* ---- ① 注册表：魂技是一个注册项，键位 3，按钮真的渲染出来了 ---- */
+  var acts53 = (w.TideUI.battleActs ? w.TideUI.battleActs() : []);
+  var A53 = open53('warlord', 86001);
+  var miss53 = [];
+  var hasSkill53 = null;
+  for (var a53 = 0; a53 < acts53.length; a53++) {
+    if (acts53[a53].id === 'skill') hasSkill53 = acts53[a53];
+    if (!d.getElementById('bs-cmd-' + acts53[a53].id)) miss53.push(acts53[a53].id);
+  }
+  if (!hasSkill53) {
+    fail('P3 第二步：动作注册表里没有 skill 这一项（魂技没进菜单）');
+  } else if (!(hasSkill53.keys && hasSkill53.keys.indexOf('3') >= 0)) {
+    fail('P3 第二步：魂技的键位不是 3（' + JSON.stringify(hasSkill53.keys) + '）');
+  } else if (miss53.length) {
+    fail('P3 第二步：注册表里的动作没有自己的按钮：' + miss53.join('/'));
+  } else {
+    ok('P3 第二步：注册表 ' + acts53.length + ' 个动作（含 skill · 键位 3），每个都渲染出了按钮');
+  }
+
+  /* ---- ② 按 3 = 挂效果，且**不占回合** ---- */
+  var r0_53 = A53.L.duel.round, t0_53 = A53.g.turn;
+  kq53('3');
+  var fx53 = A53.L.duel.pendingFx;
+  if (A53.L.duel.round !== r0_53 || A53.g.turn !== t0_53) {
+    fail('P3 第二步：按 3 推进了回合（' + r0_53 + ' → ' + A53.L.duel.round +
+      '）—— 它只挂算式，不占回合');
+  } else if (!fx53) {
+    fail('P3 第二步：按 3 之后本轮没有挂上效果（界面到引擎这一段没接上）');
+  } else {
+    ok('P3 第二步：按 3 → 本轮挂上「' + (fx53.text || '') + '」，回合数一点没动');
+  }
+
+  /* ---- ③ 裂地斩（重击）：真按下去打出 ×1.6 ---- */
+  kq53('1');
+  var dmgA53 = sum53(A53, function (x) { return x.from === A53.me; });
+  var hasHeavy53 = /重击/.test(all53(A53));
+  var cd53 = A53.g.skillCd;
+  var cdFull53 = A53.g.skill().cd;
+  var used53 = A53.g.duelUseSkill();
+  w.TideUI.closeBattle();
+
+  var B53 = open53('warlord', 86001, false);
+  kq53('1');
+  var dmgB53 = sum53(B53, function (x) { return x.from === B53.me; });
+  w.TideUI.closeBattle();
+
+  if (!hasHeavy53) {
+    fail('P3 第二步：按 3 之后打出的明细里没有「重击」标记（效果没走进算式）');
+  } else if (!(dmgA53 >= Math.floor(dmgB53 * 1.5))) {
+    fail('P3 第二步：重击没有兑现 ×1.6（开着 ' + dmgA53 + ' vs 关着 ' + dmgB53 + '）');
+  } else if (used53.ok || used53.reason !== 'used') {
+    fail('P3 第二步：同一场对决里放第二次没被挡住（' + JSON.stringify(used53) + '）');
+  } else if (cd53 !== cdFull53) {
+    fail('P3 第二步：默认口径下冷却动了（挂上时 ' + cdFull53 + '，打完一轮成了 ' + cd53 +
+      '）—— 默认必须是"冷却不随战斗轮走"（旧口径）');
+  } else {
+    ok('P3 第二步：裂地斩 → 本轮伤害 ' + dmgA53 + ' vs 关掉开关 ' + dmgB53 + '（×1.6 兑现）' +
+      '；同场第二次被挡（used）；冷却停在 ' + cd53 + '（默认口径 = 旧行为）');
+  }
+
+  /* ---- ③b 口径开关真的接上了：duelCd=true 时，打完一轮冷却少 1 ----
+     少了这一条，上面那句"冷却不动"是**假绿** ——
+     一个把 duelCd 读漏、永远不减的实现照样能让它通过。 */
+  var gcd53 = new w.TideCore.Game({
+    classKey: 'warlord', difficulty: 'standard', seed: 86601, duelCd: true
+  });
+  var egc53 = gcd53._makeEnemy(gcd53.px + 2, gcd53.py, 1);
+  gcd53.enemies = [egc53];
+  gcd53.liveFight = gcd53._fightBegin([egc53]);
+  var gcFull53 = gcd53.skill().cd;
+  gcd53.duelUseSkill();
+  gcd53.duelRound('p', 0);
+  if (gcd53.skillCd !== gcFull53 - 1) {
+    fail('P3 第二步：duelCd=true 时冷却没有随战斗轮走（挂上时 ' + gcFull53 +
+      '，打完一轮成了 ' + gcd53.skillCd + '，应为 ' + (gcFull53 - 1) + '）');
+  } else {
+    ok('P3 第二步：口径开关接上了 —— duelCd=true 时冷却 ' + gcFull53 + ' → ' + gcd53.skillCd +
+      '（随战斗轮走一格）');
+  }
+
+  /* ---- ④ 潮语洪流（破姿）：对方硬化物理时，无视姿态按弱化侧结算 ----
+     对照组用的是**同一个被硬化的敌人**：不无视姿态时，玩家按 1（物理）
+     正好撞在对方硬化的那一面，伤害应当明显更低。 */
+  var C53 = open53('arcanist', 86101, true, 'p');
+  kq53('3'); kq53('1');
+  var dmgC53 = sum53(C53, function (x) { return x.from === C53.me; });
+  var brk53 = /破姿/.test(all53(C53));
+  w.TideUI.closeBattle();
+  var D53 = open53('arcanist', 86101, false, 'p');
+  kq53('1');
+  var dmgD53 = sum53(D53, function (x) { return x.from === D53.me; });
+  w.TideUI.closeBattle();
+  if (!brk53) {
+    fail('P3 第二步：破姿没有标记（明细里读不出"这一次无视了姿态"）');
+  } else if (!(dmgC53 > dmgD53)) {
+    fail('P3 第二步：破姿没有绕开姿态（无视 ' + dmgC53 + ' vs 撞在硬化面 ' + dmgD53 + '）');
+  } else {
+    ok('P3 第二步：潮语洪流 → 对方硬化物理时，无视姿态打出 ' + dmgC53 +
+      '（不无视只有 ' + dmgD53 + '）');
+  }
+
+  /* ---- ⑤ 疾影（追打）：本回合多打一次，且不额外推进回合 ---- */
+  /* 敌人血量抬到 600：真相是"疾风第一击一刀收掉了祷者"（探针实测），
+     于是额外那一击根本没地方落 —— 而那是**测试布置**的错，不是机制的错。
+     抬高血线之后，这一条验的才是"追打真的多打了一次"。 */
+  var E53 = open53('ranger', 86201, true, null, 600);
+  kq53('3'); kq53('1');
+  var nE53 = cnt53(E53, function (x) { return x.from === E53.me; });
+  var rdE53 = E53.L.duel.round;
+  w.TideUI.closeBattle();
+  var F53 = open53('ranger', 86201, false, null, 600);
+  kq53('1');
+  var nF53 = cnt53(F53, function (x) { return x.from === F53.me; });
+  w.TideUI.closeBattle();
+  if (nE53 !== nF53 + 1) {
+    fail('P3 第二步：追打没有多打一次（挂上 ' + nE53 + ' 次 vs 没挂 ' + nF53 + ' 次）');
+  } else if (rdE53 !== 1) {
+    fail('P3 第二步：追打把回合推多了（打完第 1 轮时 round=' + rdE53 + '）');
+  } else {
+    ok('P3 第二步：疾影 → 同一轮里出手 ' + nE53 + ' 次（没挂时 ' + nF53 + ' 次），回合数仍是 ' + rdE53);
+  }
+
+  /* ---- ⑥ 不退之壁（免伤 + 反伤）：免伤必须真到 0，反伤必须不为 0 ----
+     这两条互为护栏：只验"免伤"会被 Math.max(1,…) 蒙过去（挨 1 点血，看着也像免伤），
+     只验"反伤"则会漏掉"免伤其实没生效"。 */
+  var G53 = open53('warden', 86301);
+  kq53('3'); kq53('1');
+  var hit53 = null, ref53 = 0, lg53 = G53.L.duel.log;
+  for (var g53 = 0; g53 < lg53.length; g53++) {
+    if (lg53[g53].r !== 1) continue;
+    if (lg53[g53].to === G53.me) hit53 = lg53[g53];
+    if (lg53[g53].reflect > 0) ref53 += lg53[g53].reflect;
+  }
+  w.TideUI.closeBattle();
+  if (!hit53) {
+    fail('P3 第二步：坚守那一轮里敌人一次都没打到玩家（这场对决没打起来）');
+  } else if (hit53.dmg !== 0) {
+    fail('P3 第二步：免伤了但玩家仍掉了 ' + hit53.dmg + ' 血（被 Math.max(1,…) 抬回来了）');
+  } else if (!/免伤/.test(hit53.extra || '')) {
+    fail('P3 第二步：免伤没有标记（明细里读不出这一次是免伤）');
+  } else if (!(ref53 > 0)) {
+    fail('P3 第二步：免伤生效了却没有反伤（反伤基数被免伤清成了 0）');
+  } else {
+    ok('P3 第二步：不退之壁 → 本轮挨打 0 血（免伤到 0，不是被抬回 1），反弹回去 ' + ref53 + ' 点');
+  }
+
+  /* ---- ⑦ 开关关掉 = 旧行为（真链路按一遍）+ 两种拒绝原因 ---- */
+  var I53 = open53('warlord', 86501, false);
+  kq53('3');
+  var armedI53 = !!I53.L.duel.pendingFx, roundI53 = I53.L.duel.round;
+  w.TideUI.closeBattle();
+  /* 现场必须真的有一场对决 —— 否则先被 nofight 拦住，这条就成了空断言
+     （第一版就是这么写的，实测返回 nofight 而不是 off）。 */
+  var H53 = new w.TideCore.Game({
+    classKey: 'warlord', difficulty: 'standard', seed: 86401, duelSkill: false
+  });
+  var eh53 = H53._makeEnemy(H53.px + 2, H53.py, 1);
+  H53.enemies = [eh53];
+  H53.liveFight = H53._fightBegin([eh53]);
+  var off53 = H53.duelUseSkill();
+  var K53 = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 86401 });
+  var nf53 = K53.duelUseSkill();
+  /* ---- ⑧ AI 贴身时把技能留给对决（新入口不许是"纸面上的入口"）----
+     实测背景：不加这条守卫时，900 局里 AI 在对决里放了 **0** 次 ——
+     它总是在地图上先放掉。这条断言钉的正是那个策略本身。 */
+  /* 三种配置各问一次，三条必须**方向互不相同**才说明守卫真的挂上了 ——
+     而且默认那一格必须等于**旧行为**（映射上照放）。 */
+  var ask53 = function (extra) {
+    for (var hs53 = 0; hs53 < 8; hs53++) {
+      var o53 = { classKey: 'warlord', difficulty: 'standard', seed: 87000 + hs53 };
+      for (var k53 in extra) o53[k53] = extra[k53];
+      var gh53 = new w.TideCore.Game(o53);
+      var eho53 = gh53._makeEnemy(gh53.px + 1, gh53.py, 1);
+      gh53.enemies = [eho53];
+      if (gh53._autoSkill()) return true;
+    }
+    return false;
+  };
+  var def53 = ask53({});
+  var hold53 = ask53({ duelAi: true });
+  var off53c = ask53({ duelSkill: false });
+  if (!def53) {
+    fail('P3 第二步：默认配置下 AI 贴身却不放魂技 —— 默认值动了旧行为');
+  } else if (hold53) {
+    fail('P3 第二步：标了留手，贴身时 AI 还是在地图上放掉了 —— 守卫没挂上');
+  } else if (!off53c) {
+    fail('P3 第二步：关掉整条入口之后 AI 也不放 —— 守卫越界了');
+  } else {
+    ok('P3 第二步：留手是**可选**策略（默认放 / duelAi=true 留手 / 关入口照旧放）');
+  }
+
+  if (armedI53 || roundI53 !== 0) {
+    fail('P3 第二步：开关关掉之后按 3 仍然生效（pendingFx=' + armedI53 + ', round=' + roundI53 + '）');
+  } else if (off53.reason !== 'off') {
+    fail('P3 第二步：duelSkill=false 时没被挡住（' + JSON.stringify(off53) + '）');
+  } else if (nf53.reason !== 'nofight') {
+    fail('P3 第二步：不在对决里时返回的不是 nofight（' + JSON.stringify(nf53) + '）');
+  } else {
+    ok('P3 第二步：开关关掉 = 旧行为（按 3 挂不上、也不占回合）；两种拒绝原因 off / nofight 都对');
+  }
+} catch (e) { fail('P3 魂技进对决测试异常: ' + (e && e.stack ? e.stack : e)); }
+
   } catch (e) {
     fail('测试脚本异常: ' + (e && e.stack ? e.stack : e));
   }
