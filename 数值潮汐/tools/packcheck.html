@@ -34,7 +34,7 @@
 
   for (var g = 0; g < n; g++) {
     var gm = new TideCore.Game({ difficulty: diff, seed: 1000 + g * 7919, classKey: 'warlord',
-                                 roadW: (parseInt(Q.roadw, 10) === 2) ? 2 : 1,
+                                 roadW: (parseInt(Q.roadw, 10) === 1) ? 1 : 2,
                                  packAnchor: parseInt(Q.packanchor, 10) === 1 });
 
     // ① 近邻
