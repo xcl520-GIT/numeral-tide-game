@@ -3993,6 +3993,68 @@ try {
   w.TideUI.closeBattle();
 } catch (e) { fail('魂技三选一测试异常: ' + (e && e.stack ? e.stack : e)); }
 
+/* ---------- 51. 战斗音效真的会响 ----------
+   为什么必须单开一条：这一条的失效方式**完全无声**，而且两轮都没被发现。
+   main.js 把 duel/fight 事件从 FX 队列里 splice 走交给战斗界面，
+   于是 runEvents 里那段 AU.play 永远看不到它 —— 代码在、注释在、
+   语法自检绿、冒烟全绿，玩家却从头到尾听不到一声。
+   所以断言盯的是"按下去那一下真的去放音了"，不是"代码里有 AU.play"。
+
+   它证明的是**调用**，不是**声音**：无头环境里 AudioContext 通常是挂起的，
+   真出声没法验。但缺的从来不是音源，是那一次调用。 */
+try {
+  var IMPACT51 = { hit: 1, magic: 1, crit: 1, hurt: 1 };
+  var snd51 = [], namesA51 = [];
+  var realPlay51 = w.TideAudio.play;
+  w.TideAudio.play = function (n) { snd51.push(n); };
+  var kq51 = function (key) {
+    w.dispatchEvent(new w.KeyboardEvent('keydown', { key: key, bubbles: true }));
+    w.dispatchEvent(new w.KeyboardEvent('keyup', { key: key, bubbles: true }));
+  };
+
+  // (a) 我打它：走真实链路（开战斗界面 → 按 1 出手）
+  var gotA51 = 0;
+  for (var s51 = 0; s51 < 5 && !gotA51; s51++) {
+    var gA51 = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 83000 + s51 });
+    var eA51 = gA51._makeEnemy(gA51.px + 2, gA51.py, 1);
+    gA51.enemies = [eA51];
+    var LA51 = gA51._fightBegin([eA51]);
+    gA51.liveFight = LA51;
+    snd51.length = 0;
+    w.TideUI.playBattle(gA51, {
+      kind: 'duel', enemy: LA51.enemy, enemies: LA51.enemies, duel: LA51.duel,
+      aHp0: LA51.hp0, bHp0: LA51.ehp0
+    }, function () {});
+    kq51('1');                       // 出手一轮：第一击是同步打的，不必等
+    for (var ai51 = 0; ai51 < snd51.length; ai51++) {
+      if (IMPACT51[snd51[ai51]]) { gotA51++; namesA51.push(snd51[ai51]); }
+    }
+    w.TideUI.closeBattle();
+  }
+
+  // (b) 它打我：喂一轮"敌方出手"的回放，覆盖 hurt 那一支。
+  // 只测"我打它"是不够的 —— 那正是"分不清方向"这个缺陷本身。
+  var gB51 = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 83009 });
+  var eB51 = gB51._makeEnemy(gB51.px + 2, gB51.py, 1);
+  gB51.enemies = [eB51];
+  snd51.length = 0;
+  w.TideUI.playBattle(gB51, {
+    kind: 'fight', enemy: eB51,
+    rounds: [{ from: eB51.name, to: gB51.cls.name, dmg: 12, type: 'p' }]
+  }, function () {});
+  var gotB51 = 0;
+  for (var bi51 = 0; bi51 < snd51.length; bi51++) if (snd51[bi51] === 'hurt') gotB51++;
+  w.TideUI.closeBattle();
+  w.TideAudio.play = realPlay51;
+
+  if (!gotA51) fail('战斗音效：出手一轮一个冲击音都没放（战斗界面还是哑的）');
+  else if (!gotB51) fail('战斗音效：敌方出手没有放 hurt（分不清"我打它"与"它打我"）');
+  else ok('战斗音效：我打它 → ' + namesA51.join('/') + '；它打我 → hurt');
+} catch (e) {
+  w.TideAudio.play = realPlay51;
+  fail('战斗音效测试异常: ' + (e && e.stack ? e.stack : e));
+}
+
   } catch (e) {
     fail('测试脚本异常: ' + (e && e.stack ? e.stack : e));
   }

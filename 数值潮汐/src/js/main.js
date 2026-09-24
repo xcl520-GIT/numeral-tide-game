@@ -613,6 +613,11 @@
       w: R.view.w, h: R.view.h, game: g
     });
     for (const ev of evs) {
+      /* 注意：**战斗界面里的那一场永远不会走到这里** —— startAction 会把
+         duel/fight 事件从队列里 splice 走交给 UI.playBattle（见那处注释），
+         所以这段只服务世界层的 "hit" 事件（撞怪自动结算、陷阱、腐蚀）。
+         战斗界面那一场的音效在 ui.js 的 stepRound 里，一轮一声、跟着回放
+         节奏走 —— 那才是对的；这段的"整场一起响"只是历史的形状。 */
       if (ev.kind === 'hit' || ev.kind === 'fight') {
         for (const r of (ev.rounds || [])) {
           if (r.dodge) continue;

@@ -2295,6 +2295,23 @@
     let dealt = (r.dmg || 0) + (r.counter || 0);
     bsPop(r.dmg, (r.crit ? 'crit-' : '') + (r.type || 'p'), targetSide, r.crit ? 30 : 24);
     bsImpact(targetSide, r.dmg, r.crit ? 'crit' : (r.type || 'p'));
+    /* 战斗音效必须在这里放 —— v11.2-h 起就缺的那一层（v11.4-r）。
+       main.js 把 duel/fight 事件从 FX 队列里 splice 走交给战斗界面，
+       于是 runEvents 里那段 AU.play **永远看不到它**：玩家亲手打的那一场
+       反而一声不响，而世界层（撞怪自动结算、陷阱、"hit" 事件）却有声音 ——
+       "有时有声有时没声"比"一直没声"更难归因。
+       放在这里本来就该，而且比那段更对两处：
+         · 一轮响一次，跟着回放节奏走；那段是"整场的音一起响"，是噪音不是节奏；
+         · 能分清"我打它"和"它打我" —— 后者是 hurt，不是 hit。
+       快进时不放：bsSkip 下每 60ms 走一轮，会把音挤成一片糊。
+       gate() 在音效层还有自己的限流（hit/magic 30ms、hurt 60ms），
+       所以连打也不会叠爆。 */
+    if (!bsSkip) {
+      if (toHero) global.TideAudio.play('hurt');
+      else if (r.crit) global.TideAudio.play('crit');
+      else global.TideAudio.play(r.type === 'm' ? 'magic' : 'hit', (r.dmg || 0) > 24);
+      if (r.heal > 0) global.TideAudio.play('heal');
+    }
     if (r.counter > 0) bsPop(r.counter, 'true', targetSide, 17);
     setTimeout(function () { bsPulse(toHero ? 'bs-hero-side' : 'bs-foe-side', 'flinch', 300); }, 150);
     let na = toHero ? curA - dealt : curA;
