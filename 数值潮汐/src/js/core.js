@@ -872,6 +872,18 @@
       this._spawnEnemies(depth);
       this._applyRegionFlavor();   // 依赖 e.region，必须在敌人落位之后
 
+      /* v11.11 · E：连通性兜底**再走一次** —— 这一次是冲着**敌人**来的。
+         上面那次调用在分区之前，是刻意的（见它的注释：兜底会凿墙、增加可走格，
+         在那之前算出来的区域会因为新增的通道而失准）。但那一刻**还没有敌人**，
+         于是它里面那段"走不到的敌人留在场上只有坏处"从来没有被执行过 —— 是死代码。
+
+         代价是实测到的（冒烟第 58 节的扫描把这一层照出来了）：
+         一张图上可以有一整块**孤岛口袋**（实测 36 格、正好是一个区的面积）
+         住着 4 只怪，玩家永远杀不到它们，而 AI 会一直往上撞 ——
+         这正是那段代码的作者写下那句话时要防的事。
+         函数是幂等的：出口已经可达时它一次墙都不会凿。 */
+      this._ensureConnectivity();
+
       /* —— 11. Boss：守在下一层入口边上 —— */
       this.boss = null;
       if (depth >= this.diff.depth) {
@@ -1301,7 +1313,15 @@
       //    否则会切出一层全是高难区，玩家的"规划路线"就没得规划了。
       const exitI = this.exit.y * W + this.exit.x;
       this.gateRegion = this.regionOf[exitI];
-      const pool = ['normal', 'normal', 'normal', 'elite', 'reward', 'hazard'];
+      /* v11.11 · E：'pillar'（柱厅）进池子 —— 它是**地形型**，
+         和难度型（elite / hazard）、休整型（reward）是三个不同的轴。
+         仍然遵守"每层最多一个"那条规矩（靠下面的 used 计数实现，不用另写）。
+
+         池子里放**两份**：实测放一份时，扫 24 层只出现 5 个柱厅（约 21% 的层），
+         而这一项要解决的正是"每层的变化感觉不大"—— 三层才撞见一次，
+         变化就还是感觉不到。两份之后约 37% 的层会有一个柱厅，
+         代价是其它三种特色区各从 1/7 降到 1/8（它们本来也受"每层最多一个"的约束）。 */
+      const pool = ['normal', 'normal', 'normal', 'elite', 'reward', 'hazard', 'pillar', 'pillar'];
       const used = {};
       for (const reg of this.regions) {
         if (reg.id === this.gateRegion) { reg.type = 'gate'; continue; }
@@ -1318,7 +1338,10 @@
       //     奖励区保留：第一眼看到"地图上有块好地方"是正向引导。
       if (depth <= 1) {
         for (const reg of this.regions) {
-          if (reg.type === 'elite' || reg.type === 'hazard') reg.type = 'normal';
+          /* 柱厅也一起降级（v11.11 E）。它不加难度，但它是**地形噪音**：
+             第 1 层要能一眼读懂"水在哪、门在哪、怪在哪"，多一层石柱只会
+             把教学层搅糊。这条规则由冒烟第 58 节钉住。 */
+          if (reg.type === 'elite' || reg.type === 'hazard' || reg.type === 'pillar') reg.type = 'normal';
         }
       }
 
@@ -1330,6 +1353,100 @@
       // 出现在玩家脚底下，而玩家明明就站在里面
       if (!this.regionVisited) this.regionVisited = {};
       if (this.playerRegion >= 0) this.regionVisited[this.playerRegion] = 1;
+
+      /* 7) v11.11 · E：柱厅的地形改造（把石柱埋下去）。
+         必须放在**布点之前** —— 本函数就跑在 _spawnEnemies() 之前。
+         反过来的话会有一只怪站在自己的柱子里：它既打不到、也杀不掉，
+         而 _ensureConnectivity() 会把"走不到的敌人"静默删掉 ——
+         表现出来只是"这一层莫名少了一只怪"，是最难归因的那种。 */
+      for (const reg of this.regions) {
+        if (reg.type === 'pillar') this._carvePillars(reg);
+      }
+    }
+
+    /**
+     * 柱厅：在区域内撒下**不可通行**的石柱（v11.11 · E）。
+     *
+     * 为什么按时装撒、不随机撒：
+     *   随机撒必须靠连通性兜底收拾残局，而兜底一旦被触发，地图上就多一条
+     *   笔直的应急走廊（见 _ensureConnectivity）。那是"修好了"，但玩家看到的
+     *   是一条不该出现的路。按时装（只埋横纵坐标都是 step 的倍数的那种格）
+     *   有一条现成的性质：**石柱之间天生留着网格状的空档**，任何一格都能绕开走。
+     *   兜底仍然留着（下面落完复验），但它正常情况下一次都不会响。
+     *
+     * 剩下的三条边界，每一条砸掉都会直接弄坏别的机制：
+     *   ① 邻接**别的区域**的格绝不埋 —— 那是"门位"，堵掉它等于切断两个区域之间
+     *      唯一的通道（_regionDoors 靠它排队，区域门禁靠它放行）；
+     *   ② 不是普通地面的格不动（水要留给潮汐按水位重算、宝箱/泉水/商栈/门都有主）；
+     *   ③ 玩家脚下与出口格不埋 —— 不用解释。
+     *
+     * @returns {number} 埋下去的石柱数；触发复验兜底时返回 -1（并把这一区退回普通区）
+     */
+    _carvePillars(reg) {
+      const W = this.W, H = this.H;
+      const step = Math.max(2, num(D.MAP.pillarStep) || 2);
+      const cand = [];
+      for (let y = 1; y < H - 1; y++) {
+        for (let x = 1; x < W - 1; x++) {
+          const i = y * W + x;
+          if (this.regionOf[i] !== reg.id) continue;
+          const v = this.tiles[i];
+          if (v !== T.FLOOR && v !== T.MOSS) continue;          // ②
+          if (x === this.px && y === this.py) continue;          // ③
+          if (x === this.exit.x && y === this.exit.y) continue;  // ③
+          /* ③′ 柱子底下不能有人。当前调用点跑在 _spawnEnemies 之前，所以正常
+             生成时这一条恒不成立 —— 它的意义是"这个函数在任何时机被调用都安全"。
+             这不是假想：冒烟第 58 节就是拿一只**已经建好的关卡**来试这个函数的，
+             当场抓到两只被埋进柱子里的怪 —— 而它们随即变成"走不到的敌人"，
+             会被 _ensureConnectivity() 静默删掉，表现为"这一层莫名少了两只怪"。 */
+          if (this.enemyAt(x, y)) continue;
+          if (x % step !== 0 || y % step !== 0) continue;        // 按时装（见 data.js）
+          let door = false;                                      // ①
+          for (const d of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const j = (y + d[1]) * W + (x + d[0]);
+            if (this.regionOf[j] >= 0 && this.regionOf[j] !== reg.id) { door = true; break; }
+          }
+          if (door) continue;
+          cand.push(i);
+        }
+      }
+      if (!cand.length) return 0;
+      const before = this._reachCount();
+      const saved = [];
+      for (const i of cand) {
+        saved.push({ i: i, t: this.tiles[i], d: this.deco[i], b: this.base ? this.base[i] : -1 });
+        this.tiles[i] = T.WALL;
+        /* base 是"烘焙地形"的镜像层，晚于本函数创建（见 _buildLevel 的第 12 步），
+           所以这里通常只需要防御性地写上 —— 但**必须写**：本函数一旦在别的时机
+           被调用（奖励区那个保底箱子就是这么处理的），不同步 base 会让潮水
+           把石柱冲掉，变成"逻辑上有柱子、画面上没有"。 */
+        if (this.base) this.base[i] = T.WALL;
+        this.deco[i] = DECO.NONE;
+      }
+      /* 落完**必须复验**：埋掉的每一格都该是"多余的路"，所以可达格数应当
+         **精确地**减少 cand.length 个。差一个就说明有地方被隔断了 ——
+         整块还原、这一区退回普通区（宁可没有柱厅，也不要一个把敌人关在
+         外面的柱厅）。这是本项目那条"地图生错了不能靠调数值掩盖，
+         必须有确定性兜底"的同一条纪律。 */
+      if (this._reachCount() !== before - cand.length) {
+        for (const s of saved) {
+          this.tiles[s.i] = s.t;
+          this.deco[s.i] = s.d;
+          if (this.base && s.b >= 0) this.base[s.i] = s.b;
+        }
+        reg.type = 'normal';
+        return -1;
+      }
+      reg.pillars = cand.length;
+      return cand.length;
+    }
+
+    /** 从玩家出发能走到的可走格数 —— 连通性复验的唯一口径 */
+    _reachCount() {
+      const seen = this._reachable(this.px, this.py);
+      let n = 0;
+      for (let i = 0; i < seen.length; i++) if (seen[i]) n++;
+      return n;
     }
 
     /**

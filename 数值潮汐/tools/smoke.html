@@ -5174,6 +5174,184 @@ try {
     }
   } catch (e57) { fail('v11.11 远程测试异常: ' + (e57 && e57.stack ? e57.stack : e57)); }
 
+  /* ---------- 58. v11.11 E：柱厅 —— 地形型区域 ----------
+     为什么单开一节：它的失效方式**全都不可见** —— 画面正常、三档通关率只差几个 pp：
+       ① 埋到"门位"（邻接别的区域的格）上 → 两个区域之间唯一的通道被切断，
+          AI 会开始原地打转、玩家以为路本来就不通；
+       ② 把区域自己隔断 → 里面有敌人杀不到，而 _ensureConnectivity() 会把
+          "走不到的敌人"**静默删掉** —— 表现为"这一层莫名少了一只怪"，
+          这是最难归因的一种；
+       ③ 埋到特殊格上（水 / 宝箱 / 泉水 / 商栈 / 门）→ 潮汐按水位重算、掉落逻辑
+          会开始出错；
+       ④ 只改 tiles 没改 base → 退潮时石柱被冲掉（"逻辑上有柱子、画面上没有"）；
+       ⑤ 兜底自己也失灵 → 一条本该被还原的改造留在了场上。
+     ⇒ 这一节逐条钉，并且**专门验证兜底能真的还原**（用一个故意过密的步长把它逼出来）。
+     构造方式沿用第 57 节的"钉模板"：手动挑一个区改成柱厅再改造，不靠抽签 ——
+     抽到哪一区取决于随机，断言会随"以后改区域池"一起变红。 */
+  try {
+    var D58 = w.TideData, T58 = w.TideCore.T;
+    var mk58 = function (seed, depth) {
+      var g = new w.TideCore.Game({
+        classKey: 'warlord', difficulty: 'standard', seed: seed, meta: null
+      });
+      g.depth = depth; g._buildLevel(depth);
+      return g;
+    };
+    var pickTwo58 = function (g) {
+      var out = [], rs = g.regions || [];
+      for (var i = 0; i < rs.length; i++) {
+        if (rs[i].type === 'gate') continue;
+        out.push(rs[i]);
+        if (out.length >= 2) break;
+      }
+      return out;
+    };
+
+    var g58 = mk58(58001, 3);                   // 第 3 层：柱厅在池子里（第 1 层按设计不设）
+    var two58 = pickTwo58(g58);
+    if (two58.length < 2) {
+      fail('v11.11 柱厅：这张图上找不到两个非守门区来做"只动这一区"的对照');
+    } else {
+      var reg58 = two58[0];
+      var t0_58 = g58.tiles.slice(), b0_58 = g58.base.slice();
+      var nR0_58 = g58._reachCount();
+      reg58.type = 'pillar';
+      var put58 = g58._carvePillars(reg58);
+      var nR1_58 = g58._reachCount();
+
+      /* 逐格核对这一次改造碰了哪些格，以及每一格有没有踩到上面那四条边界 */
+      var changed58 = 0, stray58 = 0, special58 = 0, baseBad58 = 0, doorBad58 = 0;
+      var NB58 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      for (var i58 = 0; i58 < g58.tiles.length; i58++) {
+        if (g58.tiles[i58] === t0_58[i58]) continue;
+        changed58++;
+        var x58 = i58 % g58.W, y58 = (i58 / g58.W) | 0;
+        if (g58.regionOf[i58] !== reg58.id) stray58++;              // 动了别的区
+        if (t0_58[i58] !== T58.FLOOR && t0_58[i58] !== T58.MOSS) special58++;   // ③
+        if (g58.base[i58] !== g58.tiles[i58]) baseBad58++;          // ④
+        for (var nb = 0; nb < 4; nb++) {                            // ①
+          var j58 = (y58 + NB58[nb][1]) * g58.W + (x58 + NB58[nb][0]);
+          if (g58.regionOf[j58] >= 0 && g58.regionOf[j58] !== reg58.id) { doorBad58++; break; }
+        }
+      }
+      var seen58 = g58._reachable(g58.px, g58.py);
+      var unreach58 = 0;
+      for (var e58 = 0; e58 < g58.enemies.length; e58++) {
+        if (!seen58[g58.enemies[e58].y * g58.W + g58.enemies[e58].x]) unreach58++;
+      }
+      var exitOk58 = !!seen58[g58.exit.y * g58.W + g58.exit.x];
+
+      if (put58 <= 0) {
+        fail('v11.11 柱厅：一根石柱都没埋下去（这一区等于没改造）');
+      } else if (stray58) {
+        fail('v11.11 柱厅：动了本区以外的 ' + stray58 + ' 格 —— 它只该改自己这一区');
+      } else if (special58) {
+        fail('v11.11 柱厅：埋到了非普通地面上（' + special58 + ' 格）—— 水要留给潮汐重算');
+      } else if (doorBad58) {
+        fail('v11.11 柱厅：有 ' + doorBad58 + ' 根柱子堵在"门位"（邻接别的区域）上' +
+          ' —— 那会切断两个区域之间唯一的通道');
+      } else if (baseBad58) {
+        fail('v11.11 柱厅：base 没有同步（' + baseBad58 + ' 格）—— 退潮时石柱会被冲掉');
+      } else if (nR1_58 !== nR0_58 - put58) {
+        fail('v11.11 柱厅：可达格数不对（' + nR0_58 + ' → ' + nR1_58 + '，埋了 ' + put58 +
+          ' 根）—— 埋掉的路不该多于埋掉的格，说明有地方被隔断了');
+      } else if (unreach58) {
+        fail('v11.11 柱厅：改造后有 ' + unreach58 + ' 只敌人走不到了（它们会被静默删掉）');
+      } else if (!exitOk58) {
+        fail('v11.11 柱厅：改造后出口不可达 —— 这一层直接废掉');
+      } else {
+        ok('v11.11 柱厅：改 ' + changed58 + ' 格、只在本区、只动普通地面、门位不碰、base 同步；' +
+          ' 可达格数 ' + nR0_58 + ' → ' + nR1_58 + '（精确 −' + put58 + '）；' +
+          ' ' + g58.enemies.length + ' 只敌人与出口全部仍可达');
+      }
+
+      /* ⑤ 兜底必须真的能还原。
+         第一版这里写的是"把步长调成 1 埋死整区、逼它触发" —— **当场被证伪**：
+         步长 1 确实埋掉了所有候选格，复验却依然通过（返回 15），因为
+         ①门位格、②特殊格（水 / 宝箱 / 门）都不在候选里，它们替这一区保住了通路。
+         也就是说那条断言赌的是"这张图的拓扑刚好被埋断" —— 赌输了就变成一条假绿
+         （和 ③ 那条"找不到天然被墙挡住的落点"是同一类错误：拿环境的巧合当断言）。
+         改成**直接逼出失败条件**：把复验用的 `_reachCount` 临时换掉，让判据必然不成立。
+         ⚠ 这里踩了第二个坑：第一版是"两次调用都减 1"，于是两次偏移互相抵消、
+         判据照样成立（那次也是白测的）。"有地方被隔断"在复验里的形状是
+         **可达格数掉得比埋掉的格数更多** —— 所以必须**只让第二次调用**偏一格。 */
+      var g58b = mk58(58001, 3);
+      var two58b = pickTwo58(g58b);
+      var rev58 = 0, restBad58 = 0;
+      if (two58b.length) {
+        var reg58b = two58b[0];
+        var t0b = g58b.tiles.slice(), d0b = g58b.deco.slice(), b0b = g58b.base.slice();
+        var real58 = g58b._reachCount, calls58 = 0;
+        reg58b.type = 'pillar';
+        try {
+          g58b._reachCount = function () {
+            calls58++;
+            return real58.call(this) - (calls58 >= 2 ? 1 : 0);
+          };
+          rev58 = g58b._carvePillars(reg58b);
+        } finally { g58b._reachCount = real58; }
+        for (var i58b = 0; i58b < g58b.tiles.length; i58b++) {
+          if (g58b.tiles[i58b] !== t0b[i58b]) restBad58++;
+          if (g58b.deco[i58b] !== d0b[i58b]) restBad58++;
+          if (g58b.base[i58b] !== b0b[i58b]) restBad58++;
+        }
+        if (rev58 !== -1) {
+          fail('v11.11 柱厅：复验明明对不上，改造却没有被判失败（返回 ' + rev58 +
+            '）—— 那条兜底等于不存在');
+        } else if (restBad58) {
+          fail('v11.11 柱厅：判定失败之后没有把地形还原干净（还剩 ' + restBad58 + ' 处）' +
+            ' —— tiles / deco / base 三层都要还原');
+        } else if (reg58b.type !== 'normal') {
+          fail('v11.11 柱厅：改造被还原了，这一区却没有退回普通区（仍是 ' + reg58b.type + '）');
+        } else {
+          ok('v11.11 柱厅：兜底真的会还原 —— 复验对不上时，tiles/deco/base 三层逐格还原、' +
+            '这一区退回普通区');
+        }
+      }
+
+      /* ⑥ 第 1 层是教学层：按设计不设柱厅（同精英区 / 危险区那条规矩） */
+      var l1pillar58 = 0;
+      for (var s1 = 0; s1 < 20; s1++) {
+        var g1p = new w.TideCore.Game({ classKey: 'warlord', difficulty: 'standard', seed: 58300 + s1, meta: null });
+        var rs1 = g1p.regions || [];
+        for (var k1 = 0; k1 < rs1.length; k1++) if (rs1[k1].type === 'pillar') l1pillar58++;
+      }
+      if (l1pillar58) fail('v11.11 柱厅：第 1 层出现了 ' + l1pillar58 + ' 个柱厅（它是教学层）');
+      else ok('v11.11 柱厅：扫 20 个种子的第 1 层，一个柱厅都没有（教学层保持干净）');
+
+      /* ⑦ 真实生成里它真的会出现，而且出现了也不破坏"全图可达"
+         —— 少了这一条，机制可能只是"写在那里、从来不触发" */
+      var pillarSeen58 = 0, sweep58 = [];
+      for (var sd58 = 0; sd58 < 24; sd58++) {
+        var gg58 = mk58(58400 + sd58, 2 + (sd58 % 3));     // 第 2~4 层
+        var rs58 = gg58.regions || [];
+        var seen58b = gg58._reachable(gg58.px, gg58.py);
+        for (var k58 = 0; k58 < rs58.length; k58++) {
+          if (rs58[k58].type !== 'pillar') continue;
+          pillarSeen58++;
+          if (!rs58[k58].pillars) sweep58.push('seed' + (58400 + sd58) + ':一根柱子都没有');
+        }
+        for (var e58b = 0; e58b < gg58.enemies.length; e58b++) {
+          if (!seen58b[gg58.enemies[e58b].y * gg58.W + gg58.enemies[e58b].x]) {
+            sweep58.push('seed' + (58400 + sd58) + ':敌人不可达');
+            break;
+          }
+        }
+        if (!seen58b[gg58.exit.y * gg58.W + gg58.exit.x]) {
+          sweep58.push('seed' + (58400 + sd58) + ':出口不可达');
+        }
+      }
+      if (!pillarSeen58) {
+        fail('v11.11 柱厅：扫 24 个种子的第 2~4 层一个柱厅都没出现 —— 这条机制等于没接上');
+      } else if (sweep58.length) {
+        fail('v11.11 柱厅：真实生成里出了问题：' + sweep58.join(' | '));
+      } else {
+        ok('v11.11 柱厅：扫 24 个种子的第 2~4 层出现 ' + pillarSeen58 +
+          ' 个柱厅，每一个都真的埋了柱子，且全部敌人与出口仍然可达');
+      }
+    }
+  } catch (e58) { fail('v11.11 柱厅测试异常: ' + (e58 && e58.stack ? e58.stack : e58)); }
+
   finish();
 }
 
