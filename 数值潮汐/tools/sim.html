@@ -67,10 +67,13 @@
   var roadw = (parseInt(q.roadw, 10) === 1) ? 1 : 2;
   // P2（v11.5）：堆贴门位（默认 0 = 旧布点）。第 1 层始终不参与。
   var packanchor = (q.packanchor === undefined || q.packanchor === '') ? 0 : parseInt(q.packanchor, 10);
-  // P4（v11.5）：Boss 行为差异化（默认 0 = 三个 Boss 只有数值差别）。
-  var bossfx = (q.bossfx === undefined || q.bossfx === '') ? 0 : parseInt(q.bossfx, 10);
-  // P3 第二步（v11.5）：魂技能不能在**对决里**放一次。默认 **1 = 开** —— 它和
-  // bossfx 的默认相反，理由也是反的：Boss 行为改的是难度（要先证噪声），
+  // P4（v11.5）：Boss 行为差异化。**v11.11 起默认 1（转正）** ——
+  // 当初压着不转正的是一个异常终止（bossfx=1 有 1 例 stall/timeout），
+  // v11.11 查清那是 AI 的四处缺陷被它提高了撞见率、不是它自己的 bug，并逐一修掉。
+  // 传 0 回到旧行为（三个 Boss 只有数值差别）—— 那是对照组，也是唯一的回退口径。
+  var bossfx = (q.bossfx === undefined || q.bossfx === '') ? 1 : parseInt(q.bossfx, 10);
+  // P3 第二步（v11.5）：魂技能不能在**对决里**放一次。默认 **1 = 开** ——
+  // 它当初和 bossfx 的默认相反，理由也是反的：Boss 行为改的是难度（要先证噪声），
   // 魂技改的是玩家侧的新选项（关掉就等于这一轮没做）。
   // 传 0 得到"魂技只在地图上放"的旧行为 = 对照组，也是它唯一的代价口径。
   var duelskill = (q.duelskill === undefined || q.duelskill === '') ? 1 : parseInt(q.duelskill, 10);
