@@ -4941,6 +4941,239 @@ try {
     }
   } catch (e56) { fail('v11.9 深层潮水测试异常: ' + (e56 && e56.stack ? e56.stack : e56)); }
 
+  /* ---------- 57. v11.11：敌人的攻击距离（反馈⑥「增加敌人的种类」）----------
+     为什么单开一节：两只新怪的**行为**（在射程内止步开火）有四个失效方式，
+     而四个全都不报错、不崩，三档通关率最多动几个 pp：
+       ① 判据写了两份（出手一份、止步一份）→ 它站在射程里"够得着"却每回合
+          只往上贴，或者反过来，站定了却打不到 —— 看起来都只是"它有点呆"；
+       ② 忘了"不写 range = 旧行为"→ 所有近战怪开始检查视野，
+          贴脸时被自己身后的墙角挡住而哑火，三档基线当场全漂；
+       ③ 远程不过视线 → 隔着墙放箭，在玩家侧和"凭空掉血"没有区别；
+       ④ 顺手把距离接进伤害（"离得越远打得越疼"之类）→ rawDamage 那条
+          唯一执行点当场破功，而它正是本项目所有数值讨论的地基。
+     ⇒ 这一节钉四件：标签不撒谎、射程判据唯一且止步+出手一致、
+       贴脸不看视野、距离不进伤害。外加一条"新怪真的会在池子里出现"。
+
+     ⚠ 布置方式刻意"钉模板"而不是靠抽签：抽到谁取决于池子权重，
+       那会让这一节随"以后加怪 / 改权重"一起变红 —— 那是把尺子焊死在旧尺寸上
+       （v11.10 那条 6% → 10.5% 的教训）。 */
+  try {
+    var D57 = w.TideData;
+    var mk57 = function (seed) {
+      return new w.TideCore.Game({
+        classKey: 'warlord', difficulty: 'standard', seed: seed, meta: null
+      });
+    };
+    /* 把一只怪**钉成**指定模板。stats 走游戏自己的 _scaleEnemyStats ——
+       不在测试里重抄一份数值（那就成了第二个真源）。
+       tags / stance 是从 arc 与 stats **推导**出来的，换了模板就必须让它们
+       和"真按这个模板造一只"一致：这里直接把 stance 置空，因为这几只模板的
+       防御都是 3/3 以下（canStance 三道闸全不过），真实造出来本来就是空。 */
+    var put57 = function (g, id, x, y) {
+      var e = g._makeEnemy(x, y, 1);
+      var arc = D57.enemyById(id);
+      e.arc = arc;
+      e.name = arc.name;
+      e.kind = arc.kind || 'normal';
+      e.stats = g._scaleEnemyStats(arc, 1);
+      e.hp = e.maxHp = e.stats.hp;
+      e.stance = null;
+      e.region = g.regionAt(g.px, g.py);   // 区域门禁：不设的话它整场不行动
+      e.awake = true;                      // 守位模式下的惊动旗
+      g.enemies = [e];
+      g._decideEnemy(e);
+      return e;
+    };
+    /* 找一个"离玩家正好 d 格、且看得见 / 看不见"的落点。
+       现算，不写死坐标 —— 地图是随机生成的。 */
+    var spot57 = function (g, d, wantVisible) {
+      for (var yy = 1; yy < g.H - 1; yy++) {
+        for (var xx = 1; xx < g.W - 1; xx++) {
+          if (Math.abs(xx - g.px) + Math.abs(yy - g.py) !== d) continue;
+          if (!g.walkable(xx, yy)) continue;
+          if (!!g.isVisible(xx, yy) !== !!wantVisible) continue;
+          return { x: xx, y: yy };
+        }
+      }
+      return null;
+    };
+    var ar57 = D57.enemyById('archer'), ca57 = D57.enemyById('caster');
+
+    /* ---- ① 池子里真有它们，而且「远程」标签与实际射程一致（不撒谎）----
+       "标签撒谎"比没有标签更糟，所以判据是**一致**而不是"有没有"：
+       远程的必须带标签、不远程的一个都不许带。 */
+    var gP57 = mk57(57001), cnt57 = {}, badTag57 = [];
+    for (var p57 = 0; p57 < 200; p57++) {
+      var ep57 = gP57._makeEnemy(1, 1, 1);
+      cnt57[ep57.arc.id] = (cnt57[ep57.arc.id] || 0) + 1;
+      var isR57 = (ep57.arc.range || 0) > 1;
+      var hasR57 = ep57.tags.indexOf(D57.TAGS.RANGE) >= 0;
+      if (isR57 !== hasR57) badTag57.push(ep57.arc.id + (hasR57 ? '(多标)' : '(漏标)'));
+    }
+    var newShare57 = ((cnt57.archer || 0) + (cnt57.caster || 0)) / 2;   // 200 局的百分比
+    var newShare57pct = Math.round(newShare57 * 10) / 10;
+    if (!cnt57.archer || !cnt57.caster) {
+      fail('v11.11 远程：新怪没进第 1 层的池子（弓手 ' + (cnt57.archer || 0) + ' 只、术士 ' +
+        (cnt57.caster || 0) + ' 只 / 200 次）—— 玩家永远遇不到，等于没加');
+    } else if (ar57.kind !== 'normal' || ca57.kind !== 'normal') {
+      fail('v11.11 远程：新怪的 kind 不是 normal（' + ar57.kind + '/' + ca57.kind +
+        '）—— 反馈要的是**普通**怪，不是又一只精英');
+    } else if (badTag57.length) {
+      fail('v11.11 远程：「远程」标签与实际射程不一致：' + badTag57.join(' ') +
+        ' —— 标签撒谎比没有标签更糟');
+    } else {
+      ok('v11.11 远程：新怪进了第 1 层池子（弓手 ' + cnt57.archer + ' / 术士 ' + cnt57.caster +
+        ' / 200 次 ≈ ' + newShare57pct + '%），「远程」标签与射程逐只一致（' +
+        ar57.range + ' / ' + ca57.range + ' 格）');
+    }
+
+    /* ---- ② 射程内 + 看得见 → 原地开火（止步与出手必须是同一份判据）---- */
+    var gA57 = mk57(57002);
+    gA57.hp = 1000;                       // 只看"它开不开火"，不看能不能打死我
+    var sA57 = spot57(gA57, ar57.range, true);
+    if (!sA57) {
+      fail('v11.11 远程：这张图上找不到一个"离玩家正好 ' + ar57.range + ' 格且看得见"的落点');
+    } else {
+      var eA57 = put57(gA57, 'archer', sA57.x, sA57.y);
+      var dA57 = Math.abs(sA57.x - gA57.px) + Math.abs(sA57.y - gA57.py);
+      /* ⚠ 预告必须在这一回合**开始之前**读：endTurn() 末尾会为下一回合重算
+         一遍意图（那是它的职责），在它之后读等于在断言下一回合的事。
+         这一条与 ③ 都在第一版踩过同一个坑，写法保持一致。 */
+      var intentA57 = eA57.intent.kind;
+      var movedA57 = gA57._stepEnemyTowardPlayer(eA57);
+      var n0_57 = gA57.events.length;
+      gA57.endTurn();
+      var firedA57 = 0;
+      for (var qa57 = n0_57; qa57 < gA57.events.length; qa57++) {
+        if (gA57.events[qa57].kind === 'hit' && gA57.events[qa57].enemy === eA57) firedA57++;
+      }
+      if (intentA57 !== 'strike') {
+        fail('v11.11 远程：站在射程 ' + dA57 + ' 格、看得见，预告却是「' + intentA57 +
+          '」—— 预告与实际出手分家了');
+      } else if (movedA57 || eA57.x !== sA57.x || eA57.y !== sA57.y) {
+        fail('v11.11 远程：够得着却还在往上贴（挪到了 ' + eA57.x + ',' + eA57.y +
+          '）—— 那它和贴脸怪没有区别，射程只是个数字');
+      } else if (firedA57 !== 1) {
+        fail('v11.11 远程：这个回合它开了 ' + firedA57 + ' 次火（应为 1 次）' +
+          '—— 止步了却没出手，机制只剩一半');
+      } else {
+        ok('v11.11 远程：离玩家 ' + dA57 + ' 格时止步开火 —— 预告「打击」、一步不挪、' +
+          '回合里真的开了 1 次火（止步与出手共用同一个判据）');
+      }
+    }
+
+    /* ---- ③ 射程内但**看不见** → 不许预告打击，也不许开火 ----
+       这一条钉的是"隔着墙放箭"：它不报错、三档通关率也看不出来，
+       只有玩家会在屏幕前发现自己在墙角后面莫名其妙掉血。
+       落点先找**天然被墙挡住**的；找不到就构造同一个状态（见下面的注释）——
+       断言绝不能因为"这张图刚好很开阔"而变成空转。 */
+    var gB57 = mk57(57003), eB57 = null, dB57 = 0, how57 = '';
+    gB57.hp = 1000;
+    var sB57 = null;
+    for (var t57 = 2; t57 <= ca57.range && !sB57; t57++) sB57 = spot57(gB57, t57, false);
+    if (sB57) {
+      eB57 = put57(gB57, 'caster', sB57.x, sB57.y);
+      dB57 = Math.abs(sB57.x - gB57.px) + Math.abs(sB57.y - gB57.py);
+      how57 = '天然被墙挡住';
+    } else {
+      /* 实战里第 1 次跑这条断言就红了：FOV 是 240 条射线的扇形，射程之内
+         （2~3 格）几乎处处可见，天然被挡的落点在这张图上不存在。
+         那就**造出同一个状态**：把视野清空。其正当性在这里 ——
+         `_reach` 读的就是 `isVisible(e.x, e.y)` 这一格的取值，
+         "被墙挡住"与"清空视野"落进的是**同一条分支**，差别只是我们怎么
+         到达那个状态。不补这一步，这条断言就会随地图随机性时红时绿。 */
+      var sV57 = spot57(gB57, ca57.range, true);
+      if (!sV57) {
+        fail('v11.11 远程：这张图上既找不到被挡的落点、也找不到射程内的落点');
+      } else {
+        eB57 = put57(gB57, 'caster', sV57.x, sV57.y);
+        dB57 = Math.abs(sV57.x - gB57.px) + Math.abs(sV57.y - gB57.py);
+        gB57.visible.fill(0);
+        gB57._decideEnemy(eB57);
+        how57 = '视野清空（等价于被墙挡住）';
+      }
+    }
+    if (eB57) {
+      /* ⚠ 这两个快照必须在 endTurn() **之前**取 —— endTurn 末尾会重算视野、
+         并为下一回合重算意图，而那正是这条断言第一版报红的原因：
+         它读到了"下一回合"的 strike，于是喊"预告在撒谎"，
+         而这一回合的出火判断其实是对的（一次都没开）。 */
+      var intentB57 = eB57.intent.kind;
+      var reachB57 = gB57._reach(eB57, dB57);
+      var nB57 = gB57.events.length;
+      gB57.endTurn();
+      var firedB57 = 0, dmgB57 = 0;
+      for (var qb57 = nB57; qb57 < gB57.events.length; qb57++) {
+        var eb57 = gB57.events[qb57];
+        if ((eb57.kind === 'hit' || eb57.kind === 'dodge') && eb57.enemy === eB57) {
+          firedB57++; dmgB57 += (eb57.dmg || 0);
+        }
+      }
+      if (intentB57 !== 'approach') {
+        fail('v11.11 远程：射程内却看不见，预告仍是「' + intentB57 + '」—— 预告在撒谎' +
+          '（玩家会照着一条假线索做决策）');
+      } else if (firedB57) {
+        fail('v11.11 远程：看不见却开了 ' + firedB57 + ' 次火、打掉 ' + dmgB57 +
+          ' 血 —— 玩家侧读起来就是"凭空掉血"');
+      } else if (reachB57) {
+        fail('v11.11 远程：看不见却仍然算"够得着"（判据没接视线）');
+      } else {
+        ok('v11.11 远程：射程内但看不见（' + dB57 + ' 格，' + how57 + '）—— ' +
+          '预告「逼近」、一次火都不开');
+      }
+    }
+
+    /* ---- ④ 没写 range 的旧怪：行为一个字都没变（可选字段 = 天然开关）----
+       判据要**具体到"视野清空也照打"**：只验"1 格能打、2 格不能打"的话，
+       一个给所有怪都加上了视线检查的实现照样能通过（贴脸时视野几乎总是通的），
+       而那正是"不写 = 旧行为"这条边界破掉的样子 —— 三档基线全漂，还极难归因。 */
+    var gC57 = mk57(57004);
+    gC57.hp = 1000;
+    var sC57 = spot57(gC57, 1, true);
+    if (!sC57) {
+      fail('v11.11 远程：这张图上找不到一个贴身的落脚点（不该发生，但别让断言空转）');
+    } else {
+      var eC57 = put57(gC57, 'slime', sC57.x, sC57.y);
+      var near57 = gC57._reach(eC57, 1), far57b = gC57._reach(eC57, 2);
+      gC57.visible.fill(0);              // 视野清空：贴脸那一条**不许**看视野
+      gC57._decideEnemy(eC57);
+      var blind57 = gC57._reach(eC57, 1) && eC57.intent.kind === 'strike';
+      if (!near57 || far57b) {
+        fail('v11.11 远程：没写 range 的怪，"够不够得着"算错了（1 格 ' + near57 + ' / 2 格 ' +
+          far57b + '）—— "不写 = 旧行为"这条边界破了');
+      } else if (!blind57) {
+        fail('v11.11 远程：视野清空后贴脸的怪就不出手了 —— 旧怪开始检查视野了' +
+          '（`range <= 1` 那个免检分支被删了？），三档基线会全漂');
+      } else {
+        ok('v11.11 远程：没写 range 的旧怪行为一字未变 —— 1 格够得着、2 格够不着，' +
+          '且**视野清空也照打**（贴脸不判视线）');
+      }
+    }
+
+    /* ---- ⑤ 距离只回答"够不够得着"，**不许进伤害公式** ----
+       这条是护栏不是发现：它现在必然相等，而它要挡的是"以后给远程加个
+       距离衰减 / 距离加成"那种改动 —— 那会让 rawDamage 那条唯一执行点
+       悄悄多一个入参，本项目所有数值结论都建立在"伤害只认 atk/def/pen"上。 */
+    var gD57 = mk57(57005);
+    gD57.hp = 1000;
+    var sNear57 = spot57(gD57, 1, true), sFar57 = spot57(gD57, ar57.range, true);
+    if (!sNear57 || !sFar57) {
+      fail('v11.11 远程：找不到"1 格"与"射程边缘"两个落点来比伤害');
+    } else {
+      var eNear57 = put57(gD57, 'archer', sNear57.x, sNear57.y);
+      var pvNear57 = gD57._enemyPreview(eNear57);
+      var eFar57 = put57(gD57, 'archer', sFar57.x, sFar57.y);
+      var pvFar57 = gD57._enemyPreview(eFar57);
+      if (pvNear57.dmg !== pvFar57.dmg) {
+        fail('v11.11 远程：距离进了伤害公式（1 格 ' + pvNear57.dmg + ' vs ' + ar57.range +
+          ' 格 ' + pvFar57.dmg + '）—— rawDamage 那条唯一执行点不许被距离碰');
+      } else {
+        ok('v11.11 远程：1 格与 ' + ar57.range + ' 格打出的伤害逐位相同（' + pvNear57.dmg +
+          '）—— 射程只回答"够不够得着"，不改数值');
+      }
+    }
+  } catch (e57) { fail('v11.11 远程测试异常: ' + (e57 && e57.stack ? e57.stack : e57)); }
+
   finish();
 }
 

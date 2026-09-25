@@ -128,6 +128,10 @@
     if (num(st.leech) > 0) t.push(D.TAGS.LEECH);
     if (arc) {
       if (arc.spawn) t.push(D.TAGS.SUMMON);        // 行为型：只能从模板读，它不是数值
+      /* v11.11 · 反馈⑥：远程也是一条**要读出来的**行为线索。
+         它同样只能从模板读（射程是行为不是数值），而且它比"高物抗"更该被看见 ——
+         玩家要据此决定"是绕开它，还是顶着箭走过去"。 */
+      if (num(arc.range) > 1) t.push(D.TAGS.RANGE);
       if (arc.kind === 'elite') t.push(D.TAGS.ELITE);
       if (arc.kind === 'boss') t.push(D.TAGS.BOSS);
     }
@@ -140,17 +144,20 @@
 
   /**
    * 这只怪配不配拥有姿态。
-   * 三条边界，每条都有理由：
+   * 四条边界，每条都有理由：
    *   ① 双侧防御都 >= minDef —— 某侧是 0 的话，"x0.5 硬化对侧"毫无意义
    *      （0 乘任何数还是 0），姿态会变成纯装饰。
    *   ② 排除宝箱怪 —— 它是奖励型遭遇，不是用来教抗性的。
    *   ③ 排除已经有固定抗性标签的敌人 —— 让"读标签"和"读姿态"各管一半敌人，
    *      否则同一只怪身上两条线索互相削弱，玩家会两条都不信。
+   *   ④ 排除远程怪（v11.11）—— ③ 的另一半，理由完全相同：
+   *      它已经有「远程」这条要读的行为线索了，不该再叠一条姿态线索。
    */
   function canStance(st, arc) {
     const S = D.STANCE;
     if (!S) return false;
     if (arc && arc.kind === 'treasure') return false;
+    if (arc && num(arc.range) > 1) return false;
     if (num(st.defP) < S.minDef || num(st.defM) < S.minDef) return false;
     const t = tagsOf(st, arc);
     if (t.indexOf(D.TAGS.P) >= 0 || t.indexOf(D.TAGS.M) >= 0) return false;
@@ -672,6 +679,12 @@
       // 与 aiGoal/aiBad 同一处声明 + 重置：换层必须归零，否则第二层一开局
       // 就以为"刷够了"、直接冲出口。
       this.layerKills = 0;
+      /* 两格横跳检测（v11.11）用的两个历史格 + 连续计数。
+         同样与 aiGoal/aiBad 同一处声明 + 重置：换层不清的话，
+         第二层开局会拿上一层的坐标当"上上格"，把正常的头几步误判成往返。 */
+      this.aiPx1 = -1; this.aiPy1 = -1;
+      this.aiPx2 = -1; this.aiPy2 = -1;
+      this.aiBack = 0;
 
       const idx = (x, y) => y * this.W + x;
       const setT = (x, y, v) => { if (x > 0 && y > 0 && x < this.W - 1 && y < this.H - 1) this.tiles[idx(x, y)] = v; };
@@ -3255,6 +3268,42 @@
      * 玩家就会在战斗画面里被画面外的怪打死，而那条伤害没有任何演出能解释。
      * @returns {boolean} 真的挪动了吗
      */
+    /* ============================================================
+       敌人的「攻击距离」（v11.11 · 反馈⑥：增加敌人的种类）
+       ============================================================
+       模板上写 `range` 就是远程怪：它在这个距离之内就出手，不再往上贴。
+       不写 = 1 = 原来那种贴脸怪 —— 可选字段 = 天然开关，
+       和 speedGap / deepCorrupt / penPerDepth 同一条规矩。
+
+       为什么要单独抽成一个函数：这条判据有三个调用点
+       （敌人回合出手 / 逼近那一步的止步 / 意图预告），
+       而它们**必须**是同一份判断。写两份的后果是"界面说会打、实际在逼近"
+       那种最坏的漂移 —— v11.5 P4 已经为同一类问题付过一次学费。
+
+       为什么远程**必须过视线**：贴脸那一条不需要判（隔着一堵墙走不到贴身），
+       但隔着墙放箭 / 隔墙施法，在玩家侧和"凭空掉血"没有区别 ——
+       而"看不见是谁干的"这件事在本项目里已经判过一次死刑
+       （见 _bossRoar 那条感知半径）。判据复用 isVisible()：
+       它读的就是玩家手里那个视野数组，也就是"你看得见它"，
+       和玩家远程魂技那句 `isVisible && dist <= range` 是同一个口径。
+
+       ⚠ 两条边界，都不许顺手"优化"掉：
+       ① `range <= 1` 时**不判视线** —— 只有这样"不写字段 = 旧行为"才成立：
+          旧怪贴脸时从来不检查视野，现在也不能开始检查。
+       ② 视野每回合只在 endTurn 末尾重算一次，所以敌人行动时读到的，
+          是**玩家上一步落下时**的视野。这不是缺陷，恰恰是它诚实的地方：
+          意图预告（_decideEnemy）也是那一刻算的，两者读同一份数据，
+          "预告说会打"与"真的打了"因此精确一致 —— 而预告的语义本来就是
+          "若你不动"。多算一次视野能跟上最新位置，代价是每回合一次全图射线，
+          模拟器不值得为一格差别付这笔账。
+       ============================================================ */
+    _reach(e, dist) {
+      const r = num(e.arc && e.arc.range) || 1;
+      if (dist > r) return false;
+      if (r <= 1) return true;
+      return this.isVisible(e.x, e.y);
+    }
+
     /**
      * 这只怪这一步的**目标格** —— 唯一的执行点。
      *
@@ -3277,8 +3326,12 @@
       const goal = this._enemyGoal(e);
       const tx = goal.x, ty = goal.y, onlyRegion = goal.region;
       if (e.x === tx && e.y === ty) return false;
-      // 贴身了就该出手，不该挪（回巢途中不适用：它本来就是在离开）
-      if (!e.returning && Math.abs(e.x - this.px) + Math.abs(e.y - this.py) <= 1) return false;
+      // 够得着了就该出手，不该挪（回巢途中不适用：它本来就是在离开）
+      // 远程怪就在这一行止步 —— 判据与出手那条共用 `_reach`，不许各写一份：
+      // 否则会出现最坏的一种漂移 —— 它停在 3 格外"每回合都够得着"却只逼近，
+      // 或者反过来，站定了却打不到。
+      const here = Math.abs(e.x - this.px) + Math.abs(e.y - this.py);
+      if (!e.returning && this._reach(e, here)) return false;
       const path = this.findPath(e.x, e.y, tx, ty, 260, 0, onlyRegion);
       if (!path || path.length < 2) return false;
       const n = path[1];
@@ -3347,7 +3400,9 @@
       let it;
       if (e.stun > 0) it = { kind: 'stunned' };
       else if (gated) it = { kind: 'idle' };
-      else if (dist <= 1) {
+      // 够得着就预告"打击"（远程怪按它的射程算，且要过视线）——
+      // 与真实出手共用 `_reach`，所以预告不会和结算分家
+      else if (this._reach(e, dist)) {
         const pv = this._enemyPreview(e);
         it = { dmg: pv.dmg, type: pv.type, crit: pv.crit, dodge: pv.dodge, lethal: pv.lethal };
         it.kind = 'strike';
@@ -4272,7 +4327,7 @@
         // "它明明没动，姿态却变了"，节奏线索当场断掉。
         this._tickStance(e);
         const dist = Math.abs(e.x - this.px) + Math.abs(e.y - this.py);
-        if (dist <= 1) {
+        if (this._reach(e, dist)) {
           this.enemyHit(e);
         } else {
           // 逼近节奏：默认每 2 回合挪一步 —— 所有怪每回合都动会让"绕开"变成不可能。
@@ -4916,6 +4971,38 @@
           // 而"最近"会随位置改变 —— 又是两格横跳。
           (g.type === 'fountain' && hpPct > 0.78);
         if (dead) { this.aiGoal = null; g = null; }
+      }
+
+      /* —— 两格横跳检测（v11.11）——
+         「A → B → A」：这一步的落点正好是**上上格**，净位移为零。
+         成因是本项目反复遇到的那一类：AI 每轮对"会动的东西"重算一次路径，
+         而对方也在朝你走 —— 两个局部最优凑成一对完美周期，谁都没犯错，
+         却永远走不到一起。实测（abyss n=900 里那 1 例 timeout）：
+         玩家 34,18 ↔ 33,18、祷者 33,14 ↔ 34,14，两边各跳各的，
+         距离稳定停在 5，一路跳到 2400 回合上限。
+
+         处置沿用"走不到这个目标"那条既有纪律：记进黑名单 + 清空重来。
+         换一个目标照样能打（贴脸的兜底不看黑名单），而它只影响**这一个**目标。
+
+         ⚠ 为什么必须连续 3 次才动手：偶尔掉头是正常的（敌人绕到了你身后，
+           最近的路就是走回去）—— 那种局面下一步就会踩到新格、计数自动归零。
+           只有真在原地打转，`aiBack` 才会一路涨上去。这条"只认连续"让守卫在
+           **健康局面里完全惰性**：它只在本来就是死局的地方改变行为。 */
+      if (this.px !== this.aiPx1 || this.py !== this.aiPy1) {
+        this.aiBack = (this.aiPx2 === this.px && this.aiPy2 === this.py) ? this.aiBack + 1 : 0;
+        this.aiPx2 = this.aiPx1; this.aiPy2 = this.aiPy1;
+        this.aiPx1 = this.px; this.aiPy1 = this.py;
+      }
+      if (this.aiBack >= 3) {
+        this.aiBack = 0;
+        if (g) {
+          /* 出口是不会动的静态目标，正常不可能横跳；真走到这里说明这一层
+             已经出不去，那就按 v11.11 那条既有规矩**消耗一回合**而不是空转。 */
+          if (g.type === 'exit') { this.wait(); return true; }
+          this._badGoal(g);
+        }
+        this.aiGoal = null;
+        g = null;
       }
 
       /* —— 脱离期：先跑，别恋战（v11.6）——
