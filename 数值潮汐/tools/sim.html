@@ -57,10 +57,13 @@
   var cleave = (q.cleave === undefined || q.cleave === '') ? 1 : parseInt(q.cleave, 10);
   // keeppay=0 关掉守门堆的保费 —— 用来把"布局的代价"和"保费的补偿"分开量。
   var keeppay = (q.keeppay === undefined || q.keeppay === '') ? 1 : parseInt(q.keeppay, 10);
-  // P1（v11.5）的两个开关，默认都是**旧行为** —— 所以基线命令逐位不变。
+  // P1（v11.5）的两个开关。
   //   waitcost=0|a|b   a = 等待额外推进一个潮汐节拍 / b = 累积惊动（已醒的敌人免费挪一步）
   //   aiwait=0|1       无头 AI 会不会刷回合（0 = 旧 AI，一次都不等）
-  var waitcost = (q.waitcost === 'a' || q.waitcost === 'b') ? q.waitcost : '0';
+  // ★ v11.11：waitcost 转正，默认 **b**。它对基线**逐位无影响**（AI 从不等待）——
+  //   那是预期的：它是只对真人生效的规则。传 waitcost=0 得到"等待免费"的旧行为。
+  //   aiwait 仍默认 0（AI 的等待动机还没造出来，见 v11.5 P1 的两次证伪）。
+  var waitcost = (q.waitcost === 'a' || q.waitcost === 'b') ? q.waitcost : 'b';
   var aiwait = (q.aiwait === undefined || q.aiwait === '') ? 0 : parseInt(q.aiwait, 10);
   // P2（v11.5）：路宽。默认 1 = 旧地图（单格走廊）。传 2 得到 2 格宽的走廊。
   // P2（v11.5）定稿：默认已经是 2 格宽。传 roadw=1 回到改造前的旧地图（对照用）。
