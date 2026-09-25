@@ -23,7 +23,7 @@ $name    = "数值潮汐"
 # 版本号：唯一源头（zip 名 + 生成的 说明.txt 都用它）。
 # v11.6 起补齐：此前一直写死 11.1，于是 v11.2~v11.5 的包都印着 v11.1 ——
 # 这个文件自己的注释就写着"发错版本比没发更糟"，这次把这条账结了。
-$version = "11.10"
+$version = "11.11"
 $lib     = Join-Path $root "builder\lib"
 $release = Join-Path $root "release\$name"
 $csc     = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
